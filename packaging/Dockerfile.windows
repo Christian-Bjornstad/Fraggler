@@ -1,0 +1,14 @@
+FROM tobix/pywine:3.10
+
+# Wine pip needs to install PyInstaller
+RUN wine python -m pip install --no-cache-dir pyinstaller
+
+WORKDIR /app
+COPY requirements.txt .
+RUN wine python -m pip install --no-cache-dir -r requirements.txt
+
+# Copy source
+COPY . .
+
+# Run Build script using Wine execution
+CMD ["wine", "python", "build_qt.py"]

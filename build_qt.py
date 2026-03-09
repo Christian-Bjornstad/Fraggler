@@ -1,6 +1,17 @@
 import PyInstaller.__main__
 import sys
 import os
+import dis
+
+# Monkey-patch dis._get_const_info to swallow known Python 3.10 bytecode IndexErrors
+_orig_get_const_info = getattr(dis, '_get_const_info', None)
+if _orig_get_const_info:
+    def _patched_get_const_info(arg, constants):
+        try:
+            return _orig_get_const_info(arg, constants)
+        except IndexError:
+            return arg, repr(arg)
+    dis._get_const_info = _patched_get_const_info
 
 def build_app():
     print(f"Building Fraggler Diagnostics for {sys.platform}...")

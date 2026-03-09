@@ -1,51 +1,19 @@
-# ============================================================
-# Dockerfile for building Fraggler Diagnostics Linux executable
-# ============================================================
-# Used by build_linux.sh to cross-build from macOS.
-# ============================================================
-
 FROM python:3.10-slim-bookworm
 
-# Install system deps for building C extensions
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    g++ \
-    gfortran \
-    libopenblas-dev \
-    liblapack-dev \
-    pkg-config \
+    gcc g++ libglib2.0-0 libsm6 libxext6 libxrender-dev libx11-xcb1 \
+    libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+    libxcb-xinerama0 libxcb-xfixes0 libxkbcommon-x11-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyInstaller
 RUN pip install --no-cache-dir pyinstaller
 
-# Copy project
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the project
+# Copy source
 COPY . .
 
-# Create the build script that includes the dis.py patch
-RUN echo 'import dis\n\
-_orig = dis._get_const_info\n\
-def _patched(ci, cl):\n\
-    try: return _orig(ci, cl)\n\
-    except IndexError: return ci, repr(ci)\n\
-dis._get_const_info = _patched\n\
-\n\
-import PyInstaller.__main__\n\
-PyInstaller.__main__.run([\n\
-    "packaging/fraggler_diagnostics.spec",\n\
-    "--distpath", "/app/packaging/dist",\n\
-    "--workpath", "/app/packaging/build",\n\
-    "--clean",\n\
-    "--noconfirm",\n\
-])' > /app/run_build.py
-
-# Build the executable
-RUN python3 /app/run_build.py
-
-# Default command: copy the built executable to /output
-CMD ["cp", "-r", "/app/packaging/dist/fraggler-diagnostics", "/output/fraggler-diagnostics-linux"]
+# Run Build script
+CMD ["python3", "build_qt.py"]
