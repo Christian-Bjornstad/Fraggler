@@ -1,0 +1,27 @@
+.DS_Store
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+*.log
+venv/
+env/
+ENV/
+fraggler-mac310-venv/
+
+# PyInstaller
+build/
+dist/
+*.spec
+
+# IDEs
+.idea/
+.vscode/
+
+# Local data / output
+brain/
+backups/
+Gamle filer/
+data/

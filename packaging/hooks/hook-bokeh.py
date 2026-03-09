@@ -1,0 +1,7 @@
+# PyInstaller hook for Bokeh
+# Ensures Bokeh model definitions and static resources are included.
+
+from PyInstaller.utils.hooks import collect_data_files, collect_submodules
+
+datas = collect_data_files("bokeh")
+hiddenimports = collect_submodules("bokeh")
