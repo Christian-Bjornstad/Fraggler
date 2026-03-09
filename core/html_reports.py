@@ -112,7 +112,7 @@ def build_dit_html_reports(
         html_lines.append("<html lang='no'>")
         html_lines.append("<head>")
         html_lines.append("<meta charset='utf-8'>")
-        html_lines.append(f"<title>DIT {escape(dit)} – Fraggler-rapport</title>")
+        html_lines.append(f"<title>{escape(dit)}_Klonalitet_Resultater</title>")
         html_lines.append(
             """
 <style>
@@ -257,11 +257,11 @@ function printReport() {
         meta_parts.append(f"Generert: {gen_date}")
         html_lines.append(f"""
 <div class='report-header no-print'>
-  <h1>Fraggler-rapport &mdash; DIT {escape(dit)}</h1>
+  <h1>{escape(dit)}_Klonalitet_Resultater</h1>
   <div class='meta'>{" &nbsp;&bull;&nbsp; ".join(meta_parts)}</div>
 </div>
 <div style='display:none' class='print-only-header'>
-  <h1>Fraggler-rapport &mdash; DIT {escape(dit)}</h1>
+  <h1>{escape(dit)}_Klonalitet_Resultater</h1>
   <p>{" | ".join(meta_parts)}</p>
 </div>
 """)
@@ -550,7 +550,7 @@ function printReport() {
 </div>
 </body></html>""")
 
-        out_html = dit_root / f"{dit}.html"
+        out_html = dit_root / f"{dit}_Klonalitet_Resultater.html"
         out_html.write_text("\n".join(html_lines), encoding="utf-8")
         print_green(f"[DIT] Lagret pasientrapport for {dit}: {out_html}")
 

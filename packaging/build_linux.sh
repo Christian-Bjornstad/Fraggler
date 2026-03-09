@@ -22,7 +22,7 @@ echo "Building Docker image..."
 docker build -f packaging/Dockerfile.linux -t fraggler-linux-build .
 
 echo "Running build..."
-# We map the dist/ folder to export the compiled executable
-docker run --rm -v "$PROJECT_ROOT/dist:/app/dist" fraggler-linux-build
+# We map the dist/ folder to export the compiled executable, avoiding host collisions
+docker run --rm -v "$PROJECT_ROOT/dist:/output" fraggler-linux-build sh -c "python3 build_qt.py && cp -r dist/Fraggler /output/Fraggler_Linux"
 
 echo "Done! Linux executable is available in dist/"
