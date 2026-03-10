@@ -30,6 +30,7 @@ def build_app():
     
     if sys.platform == 'darwin':
         args.append('--icon=assets/app_icon.icns')
+        args.append('--osx-bundle-identifier=com.christian-bjornstad.fraggler')
         # macOS specific bundle settings can be added here
     elif sys.platform == 'win32':
         args.append('--icon=assets/app_icon.ico')
@@ -37,6 +38,16 @@ def build_app():
         pass
         
     PyInstaller.__main__.run(args)
+    
+    # Post-build fix for macOS translocation
+    if sys.platform == 'darwin':
+        resources_dir = 'dist/Fraggler.app/Contents/Resources'
+        if os.path.exists(resources_dir):
+            qt_conf_path = os.path.join(resources_dir, 'qt.conf')
+            print(f"Creating {qt_conf_path} to fix translocation crashes...")
+            with open(qt_conf_path, 'w') as f:
+                f.write("[Paths]\nPrefix = .\n")
+
     print("\nBuild complete! Check the 'dist' directory.")
 
 if __name__ == "__main__":
