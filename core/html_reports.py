@@ -233,8 +233,59 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
     .modebar { display: none !important; }
     .js-plotly-plot .plotly .modebar { display: none !important; }
 }
+
+/* ── Save Peaks Button ── */
+.save-peaks-btn {
+    background: #0ea5e9;
+    color: white;
+    box-shadow: 0 6px 16px rgba(14, 165, 233, 0.4);
+}
+.save-peaks-btn:hover {
+    box-shadow: 0 10px 20px rgba(14, 165, 233, 0.5);
+}
 </style>
+<script id="peak-data" type="application/json">
+{}
+</script>
 <script>
+window.PeakManager = {
+    plots: {},
+    registerPlot: function(id, plotObj) {
+        this.plots[id] = plotObj;
+    },
+    getAllPeaks: function() {
+        var all = {};
+        for (var id in this.plots) {
+            all[id] = this.plots[id].getPeaks();
+        }
+        return all;
+    },
+    getInitialPeaksForPlot: function(id) {
+        try {
+            var data = JSON.parse(document.getElementById('peak-data').textContent);
+            return data[id] || [];
+        } catch(e) { return []; }
+    },
+    downloadUpdatedHtml: function() {
+        var allPeaks = this.getAllPeaks();
+        var currentHtml = document.documentElement.outerHTML;
+        
+        // Update the peak-data script tag in the HTML string
+        var peakDataStr = JSON.stringify(allPeaks);
+        var pattern = /<script id="peak-data" type="application\/json">[\s\S]*?<\/script>/;
+        var newTag = '<script id="peak-data" type="application/json">\\n' + peakDataStr + '\\n<\/script>';
+        var updatedHtml = currentHtml.replace(pattern, newTag);
+        
+        var blob = new Blob(['<!DOCTYPE html>\\n' + updatedHtml], {type: 'text/html'});
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement('a');
+        a.href = url;
+        a.download = document.title + '_updated.html';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+};
+
 function printReport() {
     window.print();
 }
@@ -544,6 +595,9 @@ function printReport() {
 
         html_lines.append("""
 <div class="print-fab no-print">
+  <button class="print-btn save-peaks-btn" onclick="PeakManager.downloadUpdatedHtml()">
+    💾&nbsp; Save Peaks (Download HTML)
+  </button>
   <button class="print-btn" onclick="printReport()">
     🖨&nbsp; Print / Save PDF
   </button>

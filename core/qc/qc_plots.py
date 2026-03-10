@@ -171,7 +171,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     if marker_results:
         xs_sample, ys_sample, text_sample = [], [], []
         xs_ladder, ys_ladder, text_ladder = [], [], []
-
+ 
         for mr in marker_results:
             if not mr.get("ok"):
                 continue
@@ -242,6 +242,8 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
                 y0=0, y1=1, xref="x", yref="paper",
                 line=dict(color=col, width=1, dash="dot")
             ))
+ 
+    # Layout
 
 
     # Layout

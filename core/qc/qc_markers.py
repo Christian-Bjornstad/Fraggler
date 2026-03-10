@@ -142,7 +142,7 @@ def markers_for_entry(entry: dict, rules: QCRules) -> list[dict]:
 
     assay = normalize_assay_qc(entry.get("assay", "UNKNOWN"))
 
-    # Ladder-kanal iht master: ROX ladder = DATA4, LIZ ladder = DATA105 [1](https://hsorhf-my.sharepoint.com/personal/chrbj5_ous-hf_no/Documents/Microsoft%20Copilot%20Chat-filer/fraggler_master_assay_channels.py)
+    # Ladder-kanal iht master: ROX ladder = DATA4, LIZ ladder = DATA105
     ladder_channel = "DATA4" if entry.get("ladder") == "ROX" else "DATA105"
 
     wS = rules.sample_peak_window_bp
@@ -265,7 +265,7 @@ def markers_for_entry(entry: dict, rules: QCRules) -> list[dict]:
                 {"name": "TCRgB_PK_LIZ_Ladder_200", "kind": "ladder", "expected_bp": 200.0, "channel": ladder_channel, "window_bp": wL},
             ]
 
-
+    return []
 # ======================================================================
 # Peak finding nær forventet bp (height + area + found_bp)
 # ======================================================================

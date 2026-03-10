@@ -25,3 +25,6 @@ brain/
 backups/
 Gamle filer/
 data/
+*.zip
+fraggler_offline_linux/
+fraggler_offline_linux

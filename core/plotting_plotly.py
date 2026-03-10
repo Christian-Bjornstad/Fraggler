@@ -16,6 +16,7 @@ from core.assay_config import (
     ASSAY_REFERENCE_RANGES,
     CHANNEL_COLORS,
     DEFAULT_TRACE_COLOR,
+    NONSPECIFIC_PEAKS,
 )
 from core.analysis import estimate_running_baseline
 from core.plotly_offline import local_plotly_tag as _local_plotly_tag
@@ -419,6 +420,53 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
                 line_width=0,
             )
         )
+ 
+    # --- 8) Uspesifikke topper (vertikale dotted linjer + peak-deteksjon) ---
+    if assay_name in NONSPECIFIC_PEAKS:
+        ns_x, ns_y, ns_text = [], [], []
+        trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
+        
+        # Bruk baseline-korrigert trace for peak-høyde hvis mulig
+        try:
+            baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
+            corr_trace = trace_data - baseline
+            corr_trace[corr_trace < 0] = 0.0
+        except Exception:
+            corr_trace = trace_data
+
+        for ns_bp in NONSPECIFIC_PEAKS[assay_name]:
+            # Dotted linje (tydeligere nå: dash="dashdot" og litt mørkere)
+            shapes.append(dict(
+                type="line",
+                x0=float(ns_bp), x1=float(ns_bp),
+                y0=0, y1=1, xref="x", yref="paper",
+                line=dict(color="rgba(100, 116, 139, 0.7)", width=1.5, dash="dashdot"),
+                name=f"NS_{ns_bp}"
+            ))
+
+            # Peak deteksjon i ±3 bp vindu
+            mask = (bp_trace >= (ns_bp - 3)) & (bp_trace <= (ns_bp + 3))
+            if np.any(mask):
+                idx_in_mask = np.where(mask)[0]
+                y_win = corr_trace[time_all[mask]]
+                if y_win.size > 0:
+                    best_local_idx = np.argmax(y_win)
+                    peak_h = float(y_win[best_local_idx])
+                    peak_bp = float(bp_trace[idx_in_mask[best_local_idx]])
+                    
+                    # Markér hvis peak er "tydelig" (> 100 RFU)
+                    if peak_h > 100:
+                        ns_x.append(peak_bp)
+                        ns_y.append(peak_h)
+                        ns_text.append(f"Potensiell uspesifikk peak ({ns_bp}bp)<br>Høyde: {peak_h:.0f}")
+
+        if ns_x:
+            fig.add_trace(go.Scatter(
+                x=ns_x, y=ns_y, mode="markers",
+                name="Uspesifikke peaks",
+                marker=dict(symbol="x", size=8, color="#64748b", line=dict(color="white", width=0.5)),
+                hovertext=ns_text, hoverinfo="text"
+            ))
 
     sample_id = f"{fsa.file_name}_{primary_ch}"
     nice_title = f"{assay_name} – {sample_id}" if assay_name else sample_id
@@ -469,22 +517,31 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
 (function() {{
   var fig = {fig_json};
   var initialPeaks = {initial_peaks_json};
-  var gd = document.getElementById("{div_id}");
+  var divId = "{div_id}";
+  var gd = document.getElementById(divId);
   if (!gd) return;
 
-  // Dynamisk index til peaks-trace (etter alle spor-tracene)
   var peaksTraceIndex = {peaks_trace_index};
 
   Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
-
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
 
-    // peaks = (x, y, active) – starter fra initialPeaks for SL, ellers tom
-    var peaks = (initialPeaks && Array.isArray(initialPeaks))
-        ? initialPeaks.slice()
-        : [];
+    // 1) Get peaks from PeakManager (if we have a match) or initialPeaks (from SL detection)
+    var peaks = [];
+    if (window.PeakManager) {{
+        peaks = window.PeakManager.getInitialPeaksForPlot(divId);
+    }}
+    if (!peaks || peaks.length === 0) {{
+        peaks = (initialPeaks && Array.isArray(initialPeaks)) ? initialPeaks.slice() : [];
+    }}
 
+    // 2) Register this plot with PeakManager
+    if (window.PeakManager) {{
+        window.PeakManager.registerPlot(divId, {{
+            getPeaks: function() {{ return peaks; }}
+        }});
+    }}
 
     function nearestPeakIdx(xClick) {{
       if (!peaks.length) return -1;
@@ -501,7 +558,6 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
     }}
 
     function rebuild() {{
-
       var xs = peaks.map(function(p) {{ return p.x; }});
       var ys = peaks.map(function(p) {{ return p.y; }});
       var op = peaks.map(function(p) {{ return p.active ? 1.0 : 0.3; }});
@@ -539,7 +595,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       }});
     }}
 
-    // Tegn initielle peaks hvis vi har noen (typisk SL)
+    // Tegn initielle peaks hvis vi har noen
     if (peaks.length) {{
       rebuild();
     }}
@@ -732,20 +788,48 @@ def build_interactive_assay_batch_plot_html(
                         line_width=0,
                     )
                 )
-        else:
-            shapes.append(
-                dict(
-                    type="rect",
-                    x0=float(bp_min),
-                    x1=float(bp_max),
-                    y0=0,
-                    y1=1,
-                    xref="x",
-                    yref="paper",
-                    fillcolor="rgba(235,232,203,0.25)",
-                    line_width=0,
-                )
-            )
+        # Uspesifikke topper (vertikale dotted linjer + detection) i batch-plott
+        if assay in NONSPECIFIC_PEAKS:
+            ns_x, ns_y, ns_text = [], [], []
+            trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
+            try:
+                baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
+                corr_trace = trace_data - baseline
+                corr_trace[corr_trace < 0] = 0.0
+            except Exception:
+                corr_trace = trace_data
+
+            for ns_bp in NONSPECIFIC_PEAKS[assay]:
+                shapes.append(dict(
+                    type="line",
+                    x0=float(ns_bp), x1=float(ns_bp),
+                    y0=0, y1=1, xref="x", yref="paper",
+                    line=dict(color="rgba(100, 116, 139, 0.6)", width=1.2, dash="dashdot"),
+                    name=f"NS_{ns_bp}"
+                ))
+                
+                # Peak deteksjon i ±3 bp vindu
+                mask = (bp_trace >= (ns_bp - 3)) & (bp_trace <= (ns_bp + 3))
+                if np.any(mask):
+                    idx_in_mask = np.where(mask)[0]
+                    y_win = corr_trace[time_all[mask]]
+                    if y_win.size > 0:
+                        best_local_idx = np.argmax(y_win)
+                        peak_h = float(y_win[best_local_idx])
+                        peak_bp = float(bp_trace[idx_in_mask[best_local_idx]])
+                        if peak_h > 150: # Litt strengere i batch
+                            ns_x.append(peak_bp)
+                            ns_y.append(peak_h)
+                            ns_text.append(f"Uspesifikk peak ({ns_bp}bp)")
+
+            if ns_x:
+                fig.add_trace(go.Scatter(
+                    x=ns_x, y=ns_y, mode="markers",
+                    name="Uspesifikke peaks",
+                    marker=dict(symbol="x", size=7, color="#64748b", opacity=0.8),
+                    hovertext=ns_text, hoverinfo="text",
+                    showlegend=False
+                ))
 
         fig.update_layout(
             title=f"{fsa.file_name} – {primary_ch}",
@@ -810,51 +894,57 @@ def build_interactive_assay_batch_plot_html(
             html_parts.append(_local_plotly_tag(Path("."), version="2.35.2"))
             plotly_script_included = True
 
-        # JS for akkurat denne editoren – uendret logikk, bare limt inn som før
-        html_parts.append(f"""
+        # JS for akkurat denne editoren – synka med PeakManager
+    html_parts.append(f"""
 <script type="text/javascript">
 (function() {{
   var fig = {fig_json};
   var divId = "{div_id}";
   var gd = document.getElementById(divId);
-  if (!gd) {{
-    console.error("Fant ikke div", divId);
-    return;
-  }}
+  if (!gd) return;
 
   Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
-    var peaksXs = [];
-    var peaksYs = [];
+    var peaks = [];
+    if (window.PeakManager) {{
+        peaks = window.PeakManager.getInitialPeaksForPlot(divId);
+    }}
+
+    if (window.PeakManager) {{
+        window.PeakManager.registerPlot(divId, {{
+            getPeaks: function() {{ return peaks; }}
+        }});
+    }}
 
     function redrawPeaks() {{
-      var texts = peaksXs.map(function(x) {{
-        return (typeof x === "number") ? x.toFixed(1) : String(x);
-      }});
+      var xs = peaks.map(function(p) {{ return p.x; }});
+      var ys = peaks.map(function(p) {{ return p.y; }});
+      var op = peaks.map(function(p) {{ return p.active ? 1.0 : 0.3; }});
+      var col = peaks.map(function(p) {{ return p.active ? "red" : "gray"; }});
+      var texts = peaks.map(function(p) {{ return p.active ? p.x.toFixed(1) : ""; }});
 
       Plotly.restyle(g, {{
-        x: [peaksXs],
-        y: [peaksYs],
+        x: [xs],
+        y: [ys],
+        "marker.opacity": [op],
+        "marker.color": [col],
         text: [texts]
       }}, [1]); // peaks-trace er index 1
 
-      var arr = peaksXs.map(function(x, i) {{
-        return {{
-          bp: x,
-          height: peaksYs[i]
-        }};
+      var arr = peaks.map(function(p) {{
+        return {{ x: p.x, y: p.y, active: p.active }};
       }});
-      var pre = document.getElementById("{div_id}_peaks_json");
+      var pre = document.getElementById(divId + "_peaks_json");
       if (pre) {{
         pre.textContent = JSON.stringify(arr, null, 2);
       }}
     }}
 
     function findNearestPeakIdx(xClick) {{
-      if (!peaksXs.length) return -1;
+      if (!peaks.length) return -1;
       var bestIdx = 0;
-      var bestDist = Math.abs(peaksXs[0] - xClick);
-      for (var i = 1; i < peaksXs.length; i++) {{
-        var d = Math.abs(peaksXs[i] - xClick);
+      var bestDist = Math.abs(peaks[0].x - xClick);
+      for (var i = 1; i < peaks.length; i++) {{
+        var d = Math.abs(peaks[i].x - xClick);
         if (d < bestDist) {{
           bestDist = d;
           bestIdx = i;
@@ -863,27 +953,34 @@ def build_interactive_assay_batch_plot_html(
       return bestIdx;
     }}
 
+    if (peaks.length) {{
+        redrawPeaks();
+    }}
+
     gd.on("plotly_click", function(ev) {{
       if (!ev || !ev.points || !ev.points.length) return;
       var pt = ev.points[0];
-      var isShift = !!(ev.event && ev.event.shiftKey);
-
       var xVal = pt.x;
       var yVal = pt.y;
+      var isShift = !!(ev.event && ev.event.shiftKey);
 
-      if (isShift && peaksXs.length) {{
+      if (isShift) {{
         var idx = findNearestPeakIdx(xVal);
         if (idx >= 0) {{
-          peaksXs.splice(idx, 1);
-          peaksYs.splice(idx, 1);
+          peaks.splice(idx, 1);
           redrawPeaks();
         }}
         return;
       }}
 
-      // vanlig klikk -> legg til peak
-      peaksXs.push(xVal);
-      peaksYs.push(yVal);
+      var idx = findNearestPeakIdx(xVal);
+      if (idx >= 0 && Math.abs(peaks[idx].x - xVal) < 0.4) {{
+        peaks[idx].active = !peaks[idx].active;
+        redrawPeaks();
+        return;
+      }}
+
+      peaks.push({{ x: xVal, y: yVal, active: true }});
       redrawPeaks();
     }});
   }});

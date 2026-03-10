@@ -1,0 +1,14 @@
+Notes til meg selv
+
+Samtale med patolog:
+
+Det er vitkig at vi hele tiden kan se hele plottet, altså alt... 
+Det kan nemlig være enkelte topepr som er viktige for oss selv utenfor...
+Derfor bør vi:
+
+Markere uspesifikke topper...
+Kunne legge til html_reports    
+    - Må optimalisere bildene litt hvis pdf
+Kunne huske peaks som vi legger til, manuelt...
+
+Legge til uspesifikke topper med et symbol elelrno, så er det lett å se for alle.
