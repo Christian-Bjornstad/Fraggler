@@ -146,6 +146,9 @@ class TabBatch(QWidget):
         self.btn_run.clicked.connect(self.on_run)
         self.btn_open.clicked.connect(self.on_open_output)
         
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_context_menu)
+        
         t_layout.addWidget(t_title)
         t_layout.addLayout(t_btns)
         t_layout.addWidget(self.table)
@@ -158,6 +161,20 @@ class TabBatch(QWidget):
         main_layout.addWidget(self.status_lbl)
         main_layout.addWidget(t_card, stretch=1)
         
+    def load_from_settings(self):
+        """Reload default folders and output base from APP_SETTINGS."""
+        from config import APP_SETTINGS
+        s_batch = APP_SETTINGS.get("batch", {})
+        
+        # Output base
+        self.output_base.setText(s_batch.get("output_base", ""))
+        
+        # Base input dir - only add if list is empty or we specifically want to sync
+        # For now, let's just update the list if it's currently empty
+        default_dir = s_batch.get("base_input_dir", "")
+        if default_dir and self.folder_list.count() == 0:
+            self.folder_list.addItem(default_dir)
+            
     def _ask_dir(self, widget: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory", widget.text() or str(Path.home()))
         if folder:
@@ -372,3 +389,81 @@ class TabBatch(QWidget):
                 subprocess.Popen(["explorer", str(p)])
             else:
                 subprocess.Popen(["xdg-open", str(p)])
+
+    def on_context_menu(self, pos):
+        from PyQt6.QtWidgets import QMenu
+        from PyQt6.QtGui import QAction
+        menu = QMenu()
+        adj_action = menu.addAction("Adjust Ladder...")
+        adj_action.setEnabled(len(self.table.selectionModel().selectedRows()) == 1)
+        
+        action = menu.exec(self.table.viewport().mapToGlobal(pos))
+        if action == adj_action:
+            self._on_adjust_ladder()
+
+    def _on_adjust_ladder(self):
+        selected_rows = [index.row() for index in self.table.selectionModel().selectedRows()]
+        if not selected_rows:
+            return
+            
+        job = self._detected_jobs[selected_rows[0]]
+        files = job.get("files", [])
+        if not files:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "No Files", "This job has no files to adjust.")
+            return
+            
+        # Adjust first file in the job's list
+        fsa_path = files[0]
+        
+        from gui_qt.dialogs.ladder_dialog import LadderAdjustmentDialog
+        from core.classification import classify_fsa
+        from fraggler.fraggler import FsaFile
+        from core.analysis import analyse_fsa_liz, analyse_fsa_rox
+        from PyQt6.QtWidgets import QMessageBox
+
+        self.status_lbl.setText(f"Loading {fsa_path.name} for adjustment...")
+        
+        # Classification to get params
+        classified = classify_fsa(fsa_path)
+        if not classified:
+            QMessageBox.warning(self, "Error", "Could not classify file.")
+            return
+            
+        (assay, group, ladder, trace_channels, peak_channels, primary, bp_min, bp_max) = classified
+        sample_channel = trace_channels[0]
+        
+        # Initial fit attempt
+        if ladder == "LIZ":
+            fsa = analyse_fsa_liz(fsa_path, sample_channel)
+        else:
+            fsa = analyse_fsa_rox(fsa_path, sample_channel)
+            
+        if not fsa:
+            from core.assay_config import (
+                LIZ_LADDER, ROX_LADDER, 
+                MIN_DISTANCE_BETWEEN_PEAKS_LIZ, MIN_SIZE_STANDARD_HEIGHT_LIZ,
+                MIN_DISTANCE_BETWEEN_PEAKS_ROX, MIN_SIZE_STANDARD_HEIGHT_ROX
+            )
+            if ladder == "LIZ":
+                fsa = FsaFile(str(fsa_path), LIZ_LADDER, sample_channel, 
+                             MIN_DISTANCE_BETWEEN_PEAKS_LIZ, MIN_SIZE_STANDARD_HEIGHT_LIZ,
+                             size_standard_channel="DATA105")
+            else:
+                fsa = FsaFile(str(fsa_path), ROX_LADDER, sample_channel,
+                             MIN_DISTANCE_BETWEEN_PEAKS_ROX, MIN_SIZE_STANDARD_HEIGHT_ROX,
+                             size_standard_channel="DATA4")
+                             
+        dialog = LadderAdjustmentDialog(fsa, self)
+        if dialog.exec():
+            mapping = dialog.get_mapping()
+            from core.analysis import apply_manual_ladder_mapping, save_ladder_adjustment
+            apply_manual_ladder_mapping(fsa, mapping)
+            
+            # SAVE TO DISK for persistence
+            save_ladder_adjustment(fsa, mapping)
+            
+            # Message to user
+            QMessageBox.information(self, "Success", f"Ladder for {fsa.file_name} adjusted manually and saved. \n"
+                                                      "To apply the correction to the reports, RE-RUN the job.")
+            self.status_lbl.setText(f"Manual adjustment for {fsa.file_name} saved.")

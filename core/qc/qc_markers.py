@@ -11,6 +11,7 @@ import numpy as np
 
 from core.qc.qc_rules import QCRules, normalize_assay_qc
 from core.analysis import estimate_running_baseline
+from core.utils import strip_stage_prefix, CONTROL_PREFIX_RE
 
 
 def parse_run_code_from_filename(name: str) -> str | None:
@@ -47,7 +48,6 @@ def make_run_key(filename: str) -> str:
 DATE8_RE = re.compile(r"(?<!\d)(\d{2})(\d{2})(\d{4})(?!\d)")  # ddmmyyyy
 WELL_RE = re.compile(r"_([A-H]\d{2})_", re.IGNORECASE)        # _G09_
 BATCH_RE = re.compile(r"_([A-Z]\d{6}[A-Z])(?:\.fsa)?$", re.IGNORECASE)  # _C991475U.fsa
-CONTROL_PREFIX_RE = re.compile(r"^(PK1|PK2|PK|NK|RK)_", re.IGNORECASE) # PK1_TCRgA...
 
 DATE6_RE = re.compile(r"(?<!\d)(\d{2})(\d{2})(\d{2})(?!\d)")      # ddmmyy
 
@@ -91,10 +91,6 @@ def html_escape(s: str) -> str:
     return (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-STAGE_PREFIX_RE = re.compile(r"^\d{5}_[a-f0-9]{8}_", re.IGNORECASE)
-
-def strip_stage_prefix(name: str) -> str:
-    return STAGE_PREFIX_RE.sub("", name)
 
 def control_id_from_filename(filename: str) -> str:
     clean_name = strip_stage_prefix(filename or "")

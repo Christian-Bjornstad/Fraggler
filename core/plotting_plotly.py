@@ -18,7 +18,12 @@ from core.assay_config import (
     DEFAULT_TRACE_COLOR,
     NONSPECIFIC_PEAKS,
 )
-from core.analysis import estimate_running_baseline
+from core.analysis import (
+    estimate_running_baseline,
+    BASELINE_BIN_SIZE,
+    BASELINE_QUANTILE,
+    YMAX_PADDING_FACTOR,
+)
 from core.plotly_offline import local_plotly_tag as _local_plotly_tag
 
 
@@ -172,105 +177,64 @@ def compute_group_ymax_for_entries(entries: list[dict]) -> float:
     return group_ymax
 
 
-def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
-    """
-    Bygger interaktiv Plotly-figur for én entry (én FSA) med ALLE trace-kanaler:
-
-      - Tegner alle kanaler i entry["trace_channels"] (f.eks. DATA1 + DATA2).
-      - Start-visning: bp_min–bp_max.
-      - Shade referanseområder for assay (ASSAY_REFERENCE_RANGES).
-      - Manuelle peaks: klikk (legg til), klikk på peak (toggle aktiv/grå),
-        Shift+klikk (slett nærmeste peak).
-
-      - Hvis entry inneholder 'forced_ymax' (eller legacy 'force_ymax') > 0, brukes denne som
-        felles y-maks (nyttig for kombinasjonsfigurer).
-      - Ellers:
-          * standard: auto-y basert på primary_peak_channel
-          * TCRgA/TCRgB: auto-y basert på alle trace-kanaler (DATA1 + DATA2)
-
-      - For SL:
-          * peaks_by_channel[primary_ch] brukes til å forhåndsfylle peaks i editoren.
-    """
+def _prepare_plot_data(entry: dict) -> dict | None:
+    """Extracts and prepares data for plotting from an entry dict."""
     fsa = entry["fsa"]
-    peaks_by_channel = entry["peaks_by_channel"]
-    primary_ch = entry["primary_peak_channel"]
-    trace_channels = entry.get("trace_channels", [primary_ch])
-    bp_min = float(entry["bp_min"])
-    bp_max = float(entry["bp_max"])
-    assay_name = entry.get("assay")
-
-        # --- Initielle peaks for SL (kun primary channel) ---
-    initial_peaks = []
-    if assay_name == "SL":
-        try:
-            df0 = peaks_by_channel.get(primary_ch)
-            if df0 is not None and not df0.empty:
-                for _, row in df0.iterrows():
-                    x = float(row.get("basepairs", np.nan))
-                    y = float(row.get("peaks", np.nan))
-                    if not (np.isfinite(x) and np.isfinite(y)):
-                        continue
-                    initial_peaks.append({"x": x, "y": y, "active": True})
-        except Exception as ex:
-            print_warning(
-                f"[SL_PEAKS_INIT] Klarte ikke hente initielle peaks for "
-                f"{fsa.file_name} ({primary_ch}): {ex}"
-            )
-            initial_peaks = []
-
-    initial_peaks_json = json.dumps(initial_peaks)
-
-
-    # --- 1) Valgfri tvungen y-maks (for kombinasjonsplott) ---
-    forced_ymax = entry.get("forced_ymax", None)
-    if forced_ymax is None:
-        # støtt også gammelt navn 'force_ymax'
-        forced_ymax = entry.get("force_ymax", None)
-    try:
-        if forced_ymax is not None:
-            forced_ymax = float(forced_ymax)
-        else:
-            forced_ymax = None
-    except Exception:
-        forced_ymax = None
-
     raw_df = getattr(fsa, "sample_data_with_basepairs", None)
     if raw_df is None or raw_df.empty:
         return None
-
     if "time" not in raw_df.columns or "basepairs" not in raw_df.columns:
         return None
 
     time_all = raw_df["time"].astype(int).to_numpy()
     bp_all = raw_df["basepairs"].to_numpy()
-
-    # --- 2) Hvilke kanaler finnes faktisk i FSA-filen? ---
+    
+    primary_ch = entry["primary_peak_channel"]
+    trace_channels = entry.get("trace_channels", [primary_ch])
     available = [k for k in fsa.fsa.keys() if k.startswith("DATA")]
     channels_to_plot = [ch for ch in trace_channels if ch in available]
-
-    # Fallback: hvis trace_channels er tomme/ikke finnes, prøv primary_ch
     if not channels_to_plot:
-        if primary_ch in fsa.fsa:
-            channels_to_plot = [primary_ch]
-        else:
-            return None
+        channels_to_plot = [primary_ch] if primary_ch in fsa.fsa else []
 
-    # Felles x-akse (bp) basert på første kanal
+    if not channels_to_plot:
+        return None
+
+    # Common x-axis (bp) based on first channel
     first_ch = channels_to_plot[0]
     trace_first = np.asarray(fsa.fsa[first_ch])
     mask = (time_all >= 0) & (time_all < len(trace_first))
     if not np.any(mask):
         return None
 
-    bp_trace = bp_all[mask]
+    return {
+        "fsa": fsa,
+        "time_all": time_all,
+        "bp_all": bp_all,
+        "mask": mask,
+        "bp_trace": bp_all[mask],
+        "channels_to_plot": channels_to_plot,
+        "primary_ch": primary_ch,
+        "bp_min": float(entry["bp_min"]),
+        "bp_max": float(entry["bp_max"]),
+        "assay_name": entry.get("assay"),
+        "forced_ymax": entry.get("forced_ymax") or entry.get("force_ymax"),
+        "peaks_by_channel": entry["peaks_by_channel"],
+        "sample_id": f"{fsa.file_name}_{primary_ch}"
+    }
+
+
+def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
+    """Constructs the Plotly figure and calculates y-axis limits."""
+    fsa, mask, bp_trace = data["fsa"], data["mask"], data["bp_trace"]
+    channels_to_plot, primary_ch = data["channels_to_plot"], data["primary_ch"]
+    bp_min, bp_max, assay_name = data["bp_min"], data["bp_max"], data["assay_name"]
+    time_all = data["time_all"]
 
     fig = go.Figure()
-
-    # --- 3) Tegn alle spor, og beregn auto-y ---
     ymax_auto_primary = 0.0
     ymax_auto_all = 0.0
 
-    # Predefiner bp-vindu-mask for å slippe å lage den for hver kanal
+    # Window for auto-y
     if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
         win_bp = np.zeros_like(bp_trace, dtype=bool)
         for a, b in ASSAY_REFERENCE_RANGES[assay_name]:
@@ -280,237 +244,99 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
 
     for ch in channels_to_plot:
         full_trace = np.asarray(fsa.fsa[ch])
-
-        # Rask baseline: blokkvis lav-percentil + interpolasjon
-        baseline = estimate_running_baseline(
-            full_trace,
-            bin_size=200,   # juster opp/ned for fart vs. smoothness
-            quantile=0.10,
-        )
-        full_corr = full_trace - baseline
-        full_corr[full_corr < 0] = 0.0
-
-
-        # Zoomet variant: samme time_all[mask] som før
+        baseline = estimate_running_baseline(full_trace, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
+        full_corr = np.maximum(full_trace - baseline, 0.0)
         y_corr = full_corr[time_all[mask]]
-        if y_corr.size == 0:
-            continue
+        
+        if y_corr.size == 0: continue
 
         color = CHANNEL_COLORS.get(ch, DEFAULT_TRACE_COLOR)
-        fig.add_trace(
-            go.Scatter(
-                x=bp_trace,
-                y=y_corr,
-                mode="lines",
-                name=f"{ch} trace",
-                line=dict(width=1, color=color),
-                hoverinfo="x+y",
-            )
-        )
+        fig.add_trace(go.Scatter(x=bp_trace, y=y_corr, mode="lines", name=f"{ch} trace", line=dict(width=1, color=color), hoverinfo="x+y"))
 
-        # Begrens til bp-vindu for auto-y
-        if np.any(win_bp):
-            y_win = y_corr[win_bp]
-        else:
-            y_win = y_corr
-
+        y_win = y_corr[win_bp] if np.any(win_bp) else y_corr
         if y_win.size > 0 and np.any(np.isfinite(y_win)):
             local_max = float(np.nanmax(y_win))
+            ymax_auto_all = max(ymax_auto_all, local_max)
+            if ch == primary_ch: ymax_auto_primary = max(ymax_auto_primary, local_max)
 
-            # maks over alle kanaler i denne entryen
-            if local_max > ymax_auto_all:
-                ymax_auto_all = local_max
-
-            # maks for primærkanal
-            if ch == primary_ch and local_max > ymax_auto_primary:
-                ymax_auto_primary = local_max
-
-
-
-    # --- 4) Velg endelig ymax ---
-    if forced_ymax is not None and forced_ymax > 0:
-        # Kombinasjonsfigurer: felles y-akse bestemt utenfor
-        ymax = forced_ymax
+    # 4) Select final ymax
+    forced_ymax = data["forced_ymax"]
+    if forced_ymax and float(forced_ymax) > 0:
+        ymax = float(forced_ymax)
     else:
-        # Vanlige figurer
-        multi_channel_assays = {
-            "TCRgA", "TCRgB", "TCRg", "TCRγA", "TCRγB", "TCRγ",
-            "TCRbA", "TCRbB", "TCRbC", "TCRβA", "TCRβB", "TCRβC",
-        }
-        if assay_name in multi_channel_assays:
-            base = ymax_auto_all
-        else:
-            base = ymax_auto_primary or ymax_auto_all  # fallback hvis primary er 0
+        multi_channel_assays = {"TCRgA", "TCRgB", "TCRg", "TCRγA", "TCRγB", "TCRγ", "TCRbA", "TCRbB", "TCRbC", "TCRβA", "TCRβB", "TCRβC"}
+        base = ymax_auto_all if assay_name in multi_channel_assays else (ymax_auto_primary or ymax_auto_all)
+        ymax = base if base > 0 else 1000.0
 
-
-        if base <= 0:
-            ymax = 1000.0
-        else:
-            ymax = base
-
-    if ymax <= 0:
-        ymax = 1000.0
-
-    # Index til peaks-trace = etter alle sportracene
-    peaks_trace_index = len(channels_to_plot)
-
-    # --- 5) Forhåndsfyll peaks for SL (kun primary channel) ---
-    initial_peaks = []
-    try:
-        if assay_name == "SL":
-            df0 = peaks_by_channel.get(primary_ch)
-            if df0 is not None and not df0.empty:
-                for _, row in df0.iterrows():
-                    x = float(row.get("basepairs", np.nan))
-                    y = float(row.get("peaks", np.nan))
-                    if not (np.isfinite(x) and np.isfinite(y)):
-                        continue
-                    initial_peaks.append({"x": x, "y": y, "active": True})
-    except Exception as ex:
-        print_warning(f"[SL_PEAKS_INIT] Klarte ikke hente initielle peaks for {fsa.file_name}: {ex}")
-        initial_peaks = []
-
-    initial_peaks_json = json.dumps(initial_peaks)
-
-    # --- 6) Tom peaks-trace i fig-data (JS fyller inn punktene) ---
-    fig.add_trace(
-        go.Scatter(
-            x=[],
-            y=[],
-            mode="markers",
-            name="Peaks",
-            marker=dict(
-                size=8,
-                color="red",
-                opacity=1.0,
-                line=dict(color="black", width=1),
-            ),
-            hovertemplate="bp=%{x:.2f}<br>height=%{y:.0f}<extra></extra>",
-        )
-    )
-
-    # --- 7) Referanse-shapes ---
+    # Shapes
     shapes = []
     if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
         for (a, b) in ASSAY_REFERENCE_RANGES[assay_name]:
-            shapes.append(
-                dict(
-                    type="rect",
-                    x0=float(a),
-                    x1=float(b),
-                    y0=0,
-                    y1=1,
-                    xref="x",
-                    yref="paper",
-                    fillcolor="rgba(235,232,203,0.5)",
-                    line_width=0,
-                )
-            )
+            shapes.append(dict(type="rect", x0=float(a), x1=float(b), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(235,232,203,0.5)", line_width=0))
     else:
-        shapes.append(
-            dict(
-                type="rect",
-                x0=float(bp_min),
-                x1=float(bp_max),
-                y0=0,
-                y1=1,
-                xref="x",
-                yref="paper",
-                fillcolor="rgba(235,232,203,0.15)",
-                line_width=0,
-            )
-        )
- 
-    # --- 8) Uspesifikke topper (vertikale dotted linjer + peak-deteksjon) ---
+        shapes.append(dict(type="rect", x0=float(bp_min), x1=float(bp_max), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(235,232,203,0.15)", line_width=0))
+
+    # NS Peaks
     if assay_name in NONSPECIFIC_PEAKS:
-        ns_x, ns_y, ns_text = [], [], []
         trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
-        
-        # Bruk baseline-korrigert trace for peak-høyde hvis mulig
-        try:
-            baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
-            corr_trace = trace_data - baseline
-            corr_trace[corr_trace < 0] = 0.0
-        except Exception:
-            corr_trace = trace_data
-
+        baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
+        corr_trace = np.maximum(trace_data - baseline, 0.0)
+        ns_x, ns_y, ns_text = [], [], []
         for ns_bp in NONSPECIFIC_PEAKS[assay_name]:
-            # Dotted linje (tydeligere nå: dash="dashdot" og litt mørkere)
-            shapes.append(dict(
-                type="line",
-                x0=float(ns_bp), x1=float(ns_bp),
-                y0=0, y1=1, xref="x", yref="paper",
-                line=dict(color="rgba(100, 116, 139, 0.7)", width=1.5, dash="dashdot"),
-                name=f"NS_{ns_bp}"
-            ))
-
-            # Peak deteksjon i ±3 bp vindu
-            mask = (bp_trace >= (ns_bp - 3)) & (bp_trace <= (ns_bp + 3))
-            if np.any(mask):
-                idx_in_mask = np.where(mask)[0]
-                y_win = corr_trace[time_all[mask]]
+            shapes.append(dict(type="line", x0=float(ns_bp), x1=float(ns_bp), y0=0, y1=1, xref="x", yref="paper", line=dict(color="rgba(100, 116, 139, 0.7)", width=1.5, dash="dashdot")))
+            mask_ns = (bp_trace >= (ns_bp - 3)) & (bp_trace <= (ns_bp + 3))
+            if np.any(mask_ns):
+                y_win = corr_trace[time_all[mask_ns]]
                 if y_win.size > 0:
-                    best_local_idx = np.argmax(y_win)
-                    peak_h = float(y_win[best_local_idx])
-                    peak_bp = float(bp_trace[idx_in_mask[best_local_idx]])
-                    
-                    # Markér hvis peak er "tydelig" (> 100 RFU)
-                    if peak_h > 100:
-                        ns_x.append(peak_bp)
-                        ns_y.append(peak_h)
-                        ns_text.append(f"Potensiell uspesifikk peak ({ns_bp}bp)<br>Høyde: {peak_h:.0f}")
-
+                    best_idx = np.argmax(y_win)
+                    if float(y_win[best_idx]) > 100:
+                        ns_x.append(float(bp_trace[np.where(mask_ns)[0][best_idx]]))
+                        ns_y.append(float(y_win[best_idx]))
+                        ns_text.append(f"Potensiell uspesifikk peak ({ns_bp}bp)<br>Høyde: {float(y_win[best_idx]):.0f}")
         if ns_x:
-            fig.add_trace(go.Scatter(
-                x=ns_x, y=ns_y, mode="markers",
-                name="Uspesifikke peaks",
-                marker=dict(symbol="x", size=8, color="#64748b", line=dict(color="white", width=0.5)),
-                hovertext=ns_text, hoverinfo="text"
-            ))
+            fig.add_trace(go.Scatter(x=ns_x, y=ns_y, mode="markers", name="Uspesifikke peaks", marker=dict(symbol="x", size=8, color="#64748b", line=dict(color="white", width=0.5)), hovertext=ns_text, hoverinfo="text"))
 
-    sample_id = f"{fsa.file_name}_{primary_ch}"
-    nice_title = f"{assay_name} – {sample_id}" if assay_name else sample_id
+    fig.update_layout(shapes=shapes)
+    return fig, ymax, len(channels_to_plot)
 
+
+def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
+    """Main entry point for building an interactive peak plot."""
+    data = _prepare_plot_data(entry)
+    if not data: return None
+
+    initial_peaks = []
+    if data["assay_name"] == "SL":
+        df0 = data["peaks_by_channel"].get(data["primary_ch"])
+        if df0 is not None and not df0.empty:
+            for _, row in df0.iterrows():
+                x, y = float(row.get("basepairs", np.nan)), float(row.get("peaks", np.nan))
+                if np.isfinite(x) and np.isfinite(y): initial_peaks.append({"x": x, "y": y, "active": True})
+
+    fig, ymax, peaks_trace_index = _create_plotly_figure(data)
+    
+    nice_title = f"{data['assay_name']} – {data['sample_id']}" if data["assay_name"] else data["sample_id"]
     fig.update_layout(
-        title=nice_title,
-        xaxis_title="Basepairs (bp)",
-        yaxis_title="RFU",
-        height=420,
-        margin=dict(l=60, r=30, t=40, b=40),
-        shapes=shapes,
-        paper_bgcolor="white",
-        plot_bgcolor="white",
-        clickmode="event",
-        showlegend=True,
-        template="simple_white",
-        font=dict(family="Inter, -apple-system, sans-serif", color="#0f172a"),
-        hoverlabel=dict(bgcolor="white", font_size=12, font_family="Inter, -apple-system, sans-serif"),
+        title=nice_title, xaxis_title="Basepairs (bp)", yaxis_title="RFU", height=420,
+        margin=dict(l=60, r=30, t=40, b=40), paper_bgcolor="white", plot_bgcolor="white",
+        template="simple_white", font=dict(family="Inter, sans-serif", color="#0f172a"),
+        clickmode="event", showlegend=True,
+        hoverlabel=dict(bgcolor="white", font_size=12, font_family="Inter, sans-serif"),
+        hoverdistance=20, spikedistance=20
     )
+    fig.update_yaxes(range=[0.0, ymax * YMAX_PADDING_FACTOR], gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
+    fig.update_xaxes(range=[data["bp_min"], data["bp_max"]], gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
 
-    # Y-akse og X-akse
-    fig.update_yaxes(
-        range=[0.0, ymax * 1.1],
-        gridcolor="#f1f5f9",
-        zerolinecolor="#cbd5e1"
-    )
-    fig.update_xaxes(
-        range=[bp_min, bp_max],
-        gridcolor="#f1f5f9",
-        zerolinecolor="#cbd5e1"
-    )
+    # Empty peaks trace for JS
+    fig.add_trace(go.Scatter(x=[], y=[], mode="markers", name="Peaks", marker=dict(size=8, color="red", line=dict(color="black", width=1)), hovertemplate="bp=%{x:.2f}<br>height=%{y:.0f}<extra></extra>"))
+    
+    # The Peaks trace is always the LAST trace added so far.
+    final_peaks_trace_index = len(fig.data) - 1
 
+    div_id = f"peakplot_{data['sample_id'].replace('.','_')}_{uuid.uuid4().hex}"
     fig_json = json.dumps(fig.to_plotly_json())
+    initial_peaks_json = json.dumps(initial_peaks)
 
-    safe_id = (
-        sample_id.replace(" ", "_")
-        .replace(".", "_")
-        .replace("/", "_")
-        .replace("\\", "_")
-        .replace(":", "_")
-    )
-    div_id = f"peakplot_{safe_id}_{uuid.uuid4().hex}"
-
-    # Merk: dobbeltklammer {{ }} er for f-string escaping i Python
     html_fragment = f"""
 <div id="{div_id}" class="peak-editor-block"></div>
 <script type="text/javascript">
@@ -521,27 +347,17 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var gd = document.getElementById(divId);
   if (!gd) return;
 
-  var peaksTraceIndex = {peaks_trace_index};
+  var peaksTraceIndex = {final_peaks_trace_index};
 
-  Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
+  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
 
-    // 1) Get peaks from PeakManager (if we have a match) or initialPeaks (from SL detection)
     var peaks = [];
-    if (window.PeakManager) {{
-        peaks = window.PeakManager.getInitialPeaksForPlot(divId);
-    }}
-    if (!peaks || peaks.length === 0) {{
-        peaks = (initialPeaks && Array.isArray(initialPeaks)) ? initialPeaks.slice() : [];
-    }}
+    if (window.PeakManager) {{ peaks = window.PeakManager.getInitialPeaksForPlot(divId); }}
+    if (!peaks || peaks.length === 0) {{ peaks = (initialPeaks && Array.isArray(initialPeaks)) ? initialPeaks.slice() : []; }}
 
-    // 2) Register this plot with PeakManager
-    if (window.PeakManager) {{
-        window.PeakManager.registerPlot(divId, {{
-            getPeaks: function() {{ return peaks; }}
-        }});
-    }}
+    if (window.PeakManager) {{ window.PeakManager.registerPlot(divId, {{ getPeaks: function() {{ return peaks; }} }}); }}
 
     function nearestPeakIdx(xClick) {{
       if (!peaks.length) return -1;
@@ -549,10 +365,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       var bestDist = Math.abs(peaks[0].x - xClick);
       for (var i = 1; i < peaks.length; i++) {{
         var d = Math.abs(peaks[i].x - xClick);
-        if (d < bestDist) {{
-          bestDist = d;
-          bestIdx = i;
-        }}
+        if (d < bestDist) {{ bestDist = d; bestIdx = i; }}
       }}
       return bestIdx;
     }}
@@ -564,79 +377,48 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       var col = peaks.map(function(p) {{ return p.active ? "red" : "gray"; }});
       var texts = peaks.map(function(p) {{ return p.active ? p.x.toFixed(1) : ""; }});
 
-      Plotly.restyle(g, {{
-        x: [xs],
-        y: [ys],
-        "marker.opacity": [op],
-        "marker.color": [col],
-        text: [texts]
-      }}, [peaksTraceIndex]);
+      Plotly.restyle(g, {{ x: [xs], y: [ys], "marker.opacity": [op], "marker.color": [col], text: [texts] }}, [peaksTraceIndex]);
 
       var ann = [];
       for (var i = 0; i < peaks.length; i++) {{
         var p = peaks[i];
         if (!p.active) continue;
-        ann.push({{
-          x: p.x,
-          y: p.y * 1.03,
-          xref: "x",
-          yref: "y",
-          text: p.x.toFixed(1),
-          showarrow: false,
-          font: {{ size: 9, color: "#222" }},
-          xanchor: "left",
-          yanchor: "bottom"
-        }});
+        ann.push({{ x: p.x, y: p.y * 1.03, xref: "x", yref: "y", text: p.x.toFixed(1), showarrow: false, font: {{ size: 9, color: "#222" }}, xanchor: "left", yanchor: "bottom" }});
       }}
 
-      Plotly.relayout(g, {{
-        shapes: baseShapes,
-        annotations: baseAnnots.concat(ann)
-      }});
+      Plotly.relayout(g, {{ shapes: baseShapes, annotations: baseAnnots.concat(ann) }});
     }}
 
-    // Tegn initielle peaks hvis vi har noen
-    if (peaks.length) {{
-      rebuild();
-    }}
+    if (peaks.length) {{ rebuild(); }}
 
     gd.on("plotly_click", function(ev) {{
       if (!ev.points || !ev.points.length) return;
-
       var pt = ev.points[0];
       var xVal = pt.x;
       var yVal = pt.y;
-      var isShift = ev.event && ev.event.shiftKey;
+      var isShift = !!(ev.event && ev.event.shiftKey);
 
       if (isShift) {{
-        // Slett nærmeste peak
         var idxDel = nearestPeakIdx(xVal);
-        if (idxDel >= 0) {{
-          peaks.splice(idxDel, 1);
-          rebuild();
-        }}
+        if (idxDel >= 0) {{ peaks.splice(idxDel, 1); rebuild(); }}
         return;
       }}
 
-      // Sjekk om vi treffer en eksisterende peak (lite bp-vindu rundt)
       var idx = nearestPeakIdx(xVal);
       if (idx >= 0 && Math.abs(peaks[idx].x - xVal) < 0.4) {{
-        // Toggle aktiv / inaktiv
         peaks[idx].active = !peaks[idx].active;
         rebuild();
         return;
       }}
 
-      // Ellers: legg til ny peak (aktiv)
       peaks.push({{ x: xVal, y: yVal, active: true }});
-      rebuild();
+      rebuild(); // <--- FIXED: Call rebuild immediately!
     }});
   }});
-}})();
+}}).call(this);
 </script>
 """
     return html_fragment
-
 
 def build_interactive_assay_batch_plot_html(
     entries: list[dict],
@@ -793,7 +575,7 @@ def build_interactive_assay_batch_plot_html(
             ns_x, ns_y, ns_text = [], [], []
             trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
             try:
-                baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
+                baseline = estimate_running_baseline(trace_data, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
                 corr_trace = trace_data - baseline
                 corr_trace[corr_trace < 0] = 0.0
             except Exception:

@@ -8,6 +8,7 @@ from __future__ import annotations
 import numpy as np
 
 from fraggler.fraggler import print_warning
+from core.utils import CHANNEL_COLORS
 
 from core.assay_config import (
     ASSAY_REFERENCE_RANGES,
@@ -157,12 +158,7 @@ def draw_multi_channel_zoom_on_ax(
     available = [k for k in fsa.fsa.keys() if k.startswith("DATA")]
     channels_to_plot = [ch for ch in trace_channels if ch in available]
 
-    colors = {
-        "DATA1": "tab:blue",
-        "DATA2": "tab:green",
-        "DATA3": "gold",
-        "DATA105": "tab:red",
-    }
+    colors = CHANNEL_COLORS
 
     for ch in channels_to_plot:
         trace = np.asarray(fsa.fsa[ch])

@@ -62,6 +62,8 @@ def normalize_assay_qc(name: str) -> str:
 # ----------------------------
 # QC-regler (justerbare)
 # ----------------------------
+NK_YMAX_FLOOR = 250.0
+
 @dataclass
 class QCRules:
     # Ladder-fit
@@ -70,7 +72,7 @@ class QCRules:
 
 
     # NK: auto-scale, men ymax skal ikke bli mindre enn dette
-    nk_ymax_floor: float = 250.
+    nk_ymax_floor: float = NK_YMAX_FLOOR
 
 
     # Peak search vinduer (bp)
@@ -81,7 +83,7 @@ class QCRules:
     min_sl_total_area: float = 1e4
 
 
-CONTROL_PREFIX_RE = re.compile(r"^(PK1|PK2|PK|NK|RK)_", re.IGNORECASE)
+from core.utils import CONTROL_PREFIX_RE
 
 RUN_CODE_RE = re.compile(r"_([A-Za-z0-9]{6,})\\.fsa$", re.IGNORECASE)
 

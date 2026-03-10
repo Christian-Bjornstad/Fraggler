@@ -65,6 +65,9 @@ class MainWindow(QMainWindow):
         self.tab_log = TabLog()
         self.tab_settings = TabSettings()
         
+        # Connect settings saved to reload in batch tab
+        self.tab_settings.settings_saved.connect(self.tab_run.load_from_settings)
+        
         # Connect global core logging to this tab
         from gui_qt.log_handler import qt_log_handler
         qt_log_handler.emitter.log_signal.connect(self.tab_log.append_log)

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_squared_error, r2_score
 
+import json
 from fraggler.fraggler import (
     FsaFile,
     find_size_standard_peaks,
@@ -33,12 +34,45 @@ from core.assay_config import (
     SL_WINDOW_BP,
 )
 
+# --------------------------------------------------------------
+# Analysis Constants (extracted magic numbers)
+# --------------------------------------------------------------
+LADDER_MAX_ITERATIONS = 20
+BASELINE_BIN_SIZE = 200
+BASELINE_QUANTILE = 0.10
+PEAK_MIN_HEIGHT = 800.0
+YMAX_PADDING_FACTOR = 1.15
+
 
 # ==================================================================
 # ==================== ANALYSEFUNKSJONER ===========================
 # ==================================================================
 
-def analyse_fsa_liz(fsa_path: Path, sample_channel: str):
+def save_ladder_adjustment(fsa: FsaFile, mapping: dict[int, int]) -> None:
+    """Saves a manual mapping to a .json file alongside the .fsa file."""
+    adj_path = fsa.file.with_suffix(".ladder_adj.json")
+    try:
+        with open(adj_path, "w") as f:
+            json.dump(mapping, f)
+        print_green(f"Saved ladder adjustment to {adj_path.name}")
+    except Exception as e:
+        print_warning(f"Could not save ladder adjustment: {e}")
+
+
+def load_ladder_adjustment(fsa: FsaFile) -> dict[int, int] | None:
+    """Loads a manual mapping from a .json file if it exists."""
+    adj_path = fsa.file.with_suffix(".ladder_adj.json")
+    if adj_path.exists():
+        try:
+            with open(adj_path, "r") as f:
+                mapping = json.load(f)
+                return {int(k): int(v) for k, v in mapping.items()}
+        except Exception as e:
+            print_warning(f"Could not load ladder adjustment {adj_path.name}: {e}")
+    return None
+
+
+def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     """Ladder-fit for LIZ (TCRg/IGK/KDE)."""
     print_green(
         f"=== Analysing {fsa_path} (LIZ, sample {sample_channel}, Python API) ==="
@@ -54,6 +88,12 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str):
     )
 
     fsa = find_size_standard_peaks(fsa)
+
+    # CHECK FOR MANUAL OVERRIDE
+    mapping = load_ladder_adjustment(fsa)
+    if mapping:
+        print_green(f"[LIZ] Applying manual ladder adjustment for {fsa.file_name}")
+        return apply_manual_ladder_mapping(fsa, mapping)
 
     ss_peaks = getattr(fsa, "size_standard_peaks", None)
     n_ss = 0
@@ -78,7 +118,7 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str):
         )
         return None
 
-    for _ in range(20):
+    for _ in range(LADDER_MAX_ITERATIONS):
         fsa = generate_combinations(fsa)
         best = getattr(fsa, "best_size_standard_combinations", None)
         if best is not None and best.shape[0] > 0:
@@ -110,7 +150,7 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str):
     return fsa
 
 
-def analyse_fsa_rox(fsa_path: Path, sample_channel: str):
+def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     """Ladder-fit for ROX (FR1–3, TCRbA/B/C, SL, DHJH_D/E)."""
     print_green(
         f"=== Analysing {fsa_path} (ROX, sample {sample_channel}, Python API) ==="
@@ -126,6 +166,12 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str):
     )
 
     fsa = find_size_standard_peaks(fsa)
+
+    # CHECK FOR MANUAL OVERRIDE
+    mapping = load_ladder_adjustment(fsa)
+    if mapping:
+        print_green(f"[ROX] Applying manual ladder adjustment for {fsa.file_name}")
+        return apply_manual_ladder_mapping(fsa, mapping)
 
     ss_peaks = getattr(fsa, "size_standard_peaks", None)
     n_ss = 0
@@ -150,7 +196,7 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str):
         )
         return None
 
-    for _ in range(20):
+    for _ in range(LADDER_MAX_ITERATIONS):
         fsa = generate_combinations(fsa)
         best = getattr(fsa, "best_size_standard_combinations", None)
         if best is not None and best.shape[0] > 0:
@@ -201,8 +247,8 @@ def _find_local_maxima(y: np.ndarray) -> np.ndarray:
 
 def estimate_running_baseline(
     trace: np.ndarray,
-    bin_size: int = 200,
-    quantile: float = 0.10,
+    bin_size: int = BASELINE_BIN_SIZE,
+    quantile: float = BASELINE_QUANTILE,
 ) -> np.ndarray:
     """Rask tilnærming til rullende baseline (O(N), for plotting)."""
     n = trace.size
@@ -240,7 +286,7 @@ def estimate_running_baseline(
 # ================= LADDER-QC: METRIKKER ===========================
 # ==================================================================
 
-def compute_ladder_qc_metrics(fsa) -> dict:
+def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
     """Beregner MSE og R² for ladder-fit."""
     ladder_size = fsa.ladder_steps
     best_combination = fsa.best_size_standard
@@ -260,15 +306,66 @@ def compute_ladder_qc_metrics(fsa) -> dict:
 
 
 # ==================================================================
+# ================= MANUAL LADDER ADJUSTMENT =======================
+# ==================================================================
+
+def get_ladder_candidates(fsa: FsaFile) -> pd.DataFrame:
+    """
+    Returns all detected peaks in the size standard channel as a DataFrame.
+    Useful for manual selection.
+    """
+    ss_peaks = getattr(fsa, "size_standard_peaks", None)
+    if ss_peaks is None:
+        return pd.DataFrame(columns=["index", "time", "intensity"])
+    
+    trace = fsa.size_standard
+    return pd.DataFrame({
+        "index": np.arange(len(ss_peaks)),
+        "time": ss_peaks,
+        "intensity": trace[ss_peaks]
+    })
+
+
+def apply_manual_ladder_mapping(fsa: FsaFile, mapping: dict[int, int]) -> FsaFile:
+    """
+    Applies a manual mapping of ladder steps to candidate peak indices.
+    
+    mapping: {ladder_step_index: candidate_peak_index}
+    """
+    ladder_steps = fsa.ladder_steps
+    ss_peaks = fsa.size_standard_peaks
+    
+    if ss_peaks is None:
+        raise ValueError("No size standard peaks found in FsaFile.")
+    
+    # Initialize best_size_standard with zeros
+    selected_peaks = np.zeros_like(ladder_steps, dtype=int)
+    
+    for step_idx, peak_idx in mapping.items():
+        if step_idx < 0 or step_idx >= len(ladder_steps):
+            continue
+        if peak_idx < 0 or peak_idx >= len(ss_peaks):
+            continue
+        selected_peaks[step_idx] = ss_peaks[peak_idx]
+        
+    fsa.best_size_standard = selected_peaks
+    
+    # Re-run fitting
+    fsa = fit_size_standard_to_ladder(fsa)
+    
+    return fsa
+
+
+# ==================================================================
 # =========== SL AREA METRICS =====================================
 # ==================================================================
 
 def compute_sl_area_metrics(
-    fsa,
+    fsa: FsaFile,
     trace_channel: str,
     targets_bp: list[float],
     window_bp: float = SL_WINDOW_BP,
-) -> dict:
+) -> dict[str, list[float] | float]:
     """Beregner area for SL-fragmenter ved å integrere råtrace i et bp-vindu."""
     raw_df = getattr(fsa, "sample_data_with_basepairs", None)
     if raw_df is None or raw_df.empty:
@@ -320,11 +417,11 @@ def compute_sl_area_metrics(
 # ==================================================================
 
 def auto_detect_sl_peaks(
-    fsa,
+    fsa: FsaFile,
     peak_channels: list[str],
     targets_bp: list[float],
     window_bp: float,
-    min_height: float = 200.0,
+    min_height: float = PEAK_MIN_HEIGHT,
 ) -> dict[str, pd.DataFrame]:
     """Automatisk peak-detection for SL."""
     peaks_by_channel: dict[str, pd.DataFrame] = {}

@@ -74,22 +74,53 @@ def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
             result[k] = v
     return result
 
+import os
+
+def _validate_settings(settings: Dict[str, Any]) -> None:
+    """Basic validation for critical settings."""
+    pipeline = settings.get("pipeline", {})
+    if not isinstance(pipeline.get("out_folder_name"), str):
+        pipeline["out_folder_name"] = "ASSAY_REPORTS"
+    
+    # Ensure min_r2 is within 0-1 range
+    qc = settings.get("qc", {})
+    if not (0 <= qc.get("min_r2_ok", 0.995) <= 1):
+        qc["min_r2_ok"] = 0.995
 
 def load_settings() -> Dict[str, Any]:
-    """Load settings from YAML, merged over defaults."""
+    """Load settings from YAML, merged over defaults, then env vars."""
+    settings = DEFAULT_SETTINGS.copy()
+    
+    # 1) Load from YAML if exists
     if SETTINGS_PATH.exists():
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                 user = yaml.safe_load(f) or {}
-            return _deep_update(DEFAULT_SETTINGS.copy(), user)
+            settings = _deep_update(settings, user)
         except Exception:
             pass
-    return DEFAULT_SETTINGS.copy()
+            
+    # 2) Override with Environment Variables (e.g. FRAGGLER_THEME=dark)
+    # Mapping: FRAGGLER_CATEGORY_KEY
+    for key, value in os.environ.items():
+        if key.startswith("FRAGGLER_"):
+            parts = key.split("_")[1:] # E.g. ["PIPELINE", "INPUT", "DIR"]
+            if len(parts) == 1:
+                settings[parts[0].lower()] = value
+            elif len(parts) == 2:
+                cat, k = parts[0].lower(), parts[1].lower()
+                if cat in settings and isinstance(settings[cat], dict):
+                    settings[cat][k] = value
+
+    _validate_settings(settings)
+    return settings
 
 
 def save_settings(settings: Dict[str, Any]) -> None:
     """Persist settings to YAML."""
     try:
+        # Avoid saving ephemeral env overrides back to file if desired, 
+        # but here we just save the current active state.
         with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
             yaml.safe_dump(settings, f, sort_keys=False, allow_unicode=True)
     except Exception:

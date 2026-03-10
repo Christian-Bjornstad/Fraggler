@@ -12,6 +12,7 @@ from pathlib import Path
 from fraggler.fraggler import print_warning
 
 from core.assay_config import ASSAY_CONFIG
+from core.utils import strip_stage_prefix
 
 
 # ==================================================================
@@ -113,9 +114,9 @@ def detect_assay(name: str) -> str:
         return "FR3"
 
     # 6) DHJH-mikser
-    if "dhjh_d" in lower or "dhjhd" in lower or "dhjh_mixd" in lower or "dhjh_mix_d" in lower:
+    if "dhjh_d" in lower or "dhjhd" in lower or "dhjh_mixd" in lower or "dhjh_mix_d" in lower or "dhjhmixd" in lower:
         return "DHJH_D"
-    if "dhjh_e" in lower or "dhjhe" in lower or "dhjh_mixe" in lower or "dhjh_mix_e" in lower:
+    if "dhjh_e" in lower or "dhjhe" in lower or "dhjh_mixe" in lower or "dhjh_mix_e" in lower or "dhjhmixe" in lower:
         return "DHJH_E"
 
     # 7) LIZ IgK / KDE
@@ -128,10 +129,8 @@ def detect_assay(name: str) -> str:
     return "UNKNOWN"
 
 
-def strip_stage_prefix(name: str) -> str:
-    return re.sub(r"^\d{5}_[a-f0-9]{8}_", "", name, flags=re.IGNORECASE)
 
-def classify_fsa(fsa_path: Path):
+def classify_fsa(fsa_path: Path) -> tuple[str, str, str, list[str], list[str], str, float, float] | None:
     """
     Returnerer:
       assay (str),

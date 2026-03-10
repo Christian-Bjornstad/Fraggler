@@ -28,7 +28,7 @@ class PlotOptions:
 # ======================= KONFIG =============================
 # ============================================================
 
-DEFAULT_FSA_DIR = Path("/Users/christian/Desktop/OUS/data/Euroclonality/kjøring 1")
+DEFAULT_FSA_DIR = Path.cwd() / "data"
 
 LIZ_LADDER = "LIZ500_250"
 ROX_LADDER = "ROX400HD"
@@ -223,14 +223,7 @@ ASSAY_REFERENCE_LABEL: dict[str, str] = {
 # --------------------------------------------------
 # Farger per kanal (brukes i både Matplotlib & Plotly)
 # --------------------------------------------------
-CHANNEL_COLORS = {
-    "DATA1": "#3b82f6",     # Vibrant Blue
-    "DATA2": "#10b981",     # Vibrant Emerald Green
-    "DATA3": "#334155",     # Slate/Black
-    "DATA4": "#ef4444",     # Vibrant Red/Rose
-    "DATA105": "#f97316",   # Vibrant Orange
-}
-DEFAULT_TRACE_COLOR = "#3b82f6"
+from core.utils import CHANNEL_COLORS, DEFAULT_TRACE_COLOR
  
 # --------------------------------------------------
 # Non-specific peaks (bp) per assay
@@ -249,8 +242,16 @@ NONSPECIFIC_PEAKS: dict[str, list[float]] = {
     # TCRg: NO non-specific peaks
 }
 
+import datetime
+
 # --------------------------------------------------
 # Output directory names
 # --------------------------------------------------
-import datetime
-OUTDIR_NAME = datetime.datetime.now().strftime("%Y-%m-%d")
+OUTDIR_NAME_TEMPLATE = "reports_{date}"
+
+def get_default_outdir_name() -> str:
+    """Returns a formatted output directory name using the current date."""
+    now_str = datetime.datetime.now().strftime("%Y-%m-%d")
+    return OUTDIR_NAME_TEMPLATE.format(date=now_str)
+
+OUTDIR_NAME = get_default_outdir_name()
