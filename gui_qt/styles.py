@@ -50,6 +50,47 @@ QMainWindow {
     font-weight: 700;
 }
 
+/* Analysis Group Styles */
+#AnalysisGroupHeader {
+    background: transparent;
+    color: #f8fafc;
+    text-align: left;
+    padding: 12px 20px;
+    border: none;
+    font-weight: 700;
+    font-size: 14px;
+    letter-spacing: 0.5px;
+}
+
+#AnalysisGroupHeader:hover {
+    background: #1e293b;
+}
+
+#AnalysisGroupHeader:checked {
+    color: #38bdf8;
+    background: #1e293b;
+}
+
+#AnalysisSubButton {
+    background: transparent;
+    color: #94a3b8;
+    text-align: left;
+    padding: 10px 20px 10px 40px;
+    border: none;
+    font-weight: 500;
+    font-size: 13px;
+}
+
+#AnalysisSubButton:hover {
+    color: #ffffff;
+    background: #1e293b;
+}
+
+#AnalysisSubButton:checked {
+    color: #38bdf8;
+    font-weight: 700;
+}
+
 /* Cards */
 #Card {
     background: #ffffff;

@@ -15,12 +15,13 @@ import panel as pn
 _CSS_PATH = Path(__file__).resolve().parent.parent / "assets" / "app.css"
 _APP_CSS = _CSS_PATH.read_text(encoding="utf-8") if _CSS_PATH.exists() else ""
 
-def build_app() -> pn.Tabs:
-    """Build the full application as a pn.Tabs (templateless)."""
+def build_app() -> pn.Column:
+    """Build the full application as a pn.Column (templateless)."""
     from gui.tab_batch    import make_batch_tab
     from gui.tab_qc       import make_qc_tab
     from gui.tab_log      import make_log_tab
     from gui.tab_settings import make_settings_tab
+    from gui.analysis_selector import make_analysis_selector
 
     def _wrap(content: pn.viewable.Viewable) -> pn.Column:
         return pn.Column(
@@ -41,4 +42,19 @@ def build_app() -> pn.Tabs:
         stylesheets=[_APP_CSS],
         styles={"background": "transparent"},
     )
-    return tabs
+
+    header = pn.Row(
+        pn.pane.HTML('<div style="font-size:20px; font-weight:bold; color:var(--accent)">Fraggler Diagnostics</div>'),
+        pn.HSpacer(),
+        pn.Column(make_analysis_selector(), width=250),
+        sizing_mode="stretch_width",
+        styles={"padding": "10px 20px", "background": "var(--bg-card)", "border-bottom": "1px solid var(--border)"},
+        css_classes=["app-header"]
+    )
+
+    return pn.Column(
+        header,
+        tabs,
+        sizing_mode="stretch_both",
+        styles={"background": "var(--bg-app)"}
+    )

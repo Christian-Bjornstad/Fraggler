@@ -22,6 +22,7 @@ SETTINGS_PATH = Path.home() / ".fraggler_gui.yaml"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "theme": "default",  # "default" | "dark"
+    "active_analysis": "clonality",
     "pipeline": {
         "input_dir": str(Path.home()),
         "output_base": str(Path.home()),
