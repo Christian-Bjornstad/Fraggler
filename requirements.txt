@@ -12,7 +12,6 @@ cycler==0.12.1
 dill==0.4.1
 et_xmlfile==2.0.0
 fonttools==4.61.1
-fraggler==3.0.3
 idna==3.11
 Jinja2==3.1.6
 joblib==1.5.3

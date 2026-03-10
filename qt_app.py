@@ -8,6 +8,31 @@ from pathlib import Path
 
 from gui_qt.main_window import MainWindow
 
+def exception_hook(exctype, value, tb):
+    """Global exception handler to prevent silent crashes in slots."""
+    import traceback
+    from PyQt6.QtWidgets import QMessageBox
+    
+    err_msg = "".join(traceback.format_exception(exctype, value, tb))
+    print(err_msg, file=sys.stderr)
+    
+    # Try to show a message box
+    try:
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setText("An unexpected error occurred.")
+        msg.setInformativeText(str(value))
+        msg.setDetailedText(err_msg)
+        msg.setWindowTitle("Error")
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+    except:
+        pass
+    
+    sys.__excepthook__(exctype, value, tb)
+
+sys.excepthook = exception_hook
+
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Fraggler")
