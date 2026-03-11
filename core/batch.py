@@ -104,7 +104,8 @@ def group_files_by_patient(fsa_files: List[Path], regex_pattern: str) -> Dict[st
         except Exception as e:
             log(f"[ERROR] Invalid regex '{regex_pattern}': {e}")
             
-    qc_pattern = re.compile(r'^(PK1?|PK2?|NK|RK)', re.I)
+    from core.utils import CONTROL_PREFIX_RE
+    qc_pattern = CONTROL_PREFIX_RE
 
     for f in sorted(fsa_files):
         if qc_pattern.match(f.name):
@@ -118,7 +119,14 @@ def group_files_by_patient(fsa_files: List[Path], regex_pattern: str) -> Dict[st
                 pid = match.group()
         
         if not pid:
-            continue
+            # Fallback 1: Split by underscore and take first part
+            stem = f.stem
+            parts = stem.split("_")
+            if len(parts) > 1:
+                pid = parts[0]
+            else:
+                # Fallback 2: Just use the stem
+                pid = stem
             
         grouped.setdefault(pid, []).append(f)
     
@@ -178,7 +186,8 @@ def generate_jobs(
         if jobs:
             log(f"[INFO] Aggregated {len(all_fsa)} files into {len(jobs)} jobs.")
     else:
-        qc_pattern = re.compile(r'^(PK1?|PK2?|NK|RK)', re.I)
+        from core.utils import CONTROL_PREFIX_RE
+        qc_pattern = CONTROL_PREFIX_RE
         all_qc_files = []
         for folder in folders_to_scan:
             fsa_files = list(folder.glob("*.fsa"))

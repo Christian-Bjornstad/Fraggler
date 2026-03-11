@@ -26,6 +26,12 @@ def build_app():
         '--hidden-import=PyQt6',
         '--hidden-import=pandas',
         '--hidden-import=plotly',
+        '--hidden-import=core.analyses.clonality.config',
+        '--hidden-import=core.analyses.clonality.classification',
+        '--hidden-import=core.analyses.clonality.pipeline',
+        '--hidden-import=core.analyses.flt3.config',
+        '--hidden-import=core.analyses.flt3.classification',
+        '--hidden-import=core.analyses.flt3.pipeline',
     ]
     
     if sys.platform == 'darwin':
@@ -35,7 +41,12 @@ def build_app():
     elif sys.platform == 'win32':
         args.append('--icon=assets/app_icon.ico')
     elif sys.platform == 'linux':
-        pass
+        # Add critical system libraries for maximum offline compatibility
+        # On Debian Bullseye (Docker image), these are in /usr/lib/x86_64-linux-gnu/
+        xcb_cursor = '/usr/lib/x86_64-linux-gnu/libxcb-cursor.so.0'
+        if os.path.exists(xcb_cursor):
+            print(f"Bundling {xcb_cursor}...")
+            args.append(f'--add-binary={xcb_cursor}:.')
         
     PyInstaller.__main__.run(args)
     

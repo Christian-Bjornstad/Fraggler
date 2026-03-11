@@ -1,0 +1,40 @@
+FROM python:3.10-slim-bullseye
+
+# Avoid prompts
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install System Dependencies for Qt6 and X11
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc g++ \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender1 \
+    libx11-xcb1 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-xinerama0 \
+    libxcb-xfixes0 \
+    libxcb-cursor0 \
+    libxkbcommon-x11-0 \
+    libfontconfig1 \
+    libdbus-1-3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY . .
+
+# Set environment for GUI
+ENV QT_QPA_PLATFORM=xcb
+
+# Run the app
+CMD ["python3", "qt_app.py"]

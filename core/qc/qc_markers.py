@@ -278,7 +278,8 @@ def find_peak_near_bp(fsa, channel: str, target_bp: float, window_bp: float, bas
         return {"ok": False, "reason": "mangler time/basepairs kolonner"}
 
     if channel not in fsa.fsa:
-        return {"ok": False, "reason": f"kanal {channel} finnes ikke i fsa"}
+        # Fallback for weird channel names or missing channels
+        return {"ok": False, "reason": f"Channel {channel} not found in FSA file"}
 
     bp = raw_df["basepairs"].to_numpy()
     t = raw_df["time"].astype(int).to_numpy()

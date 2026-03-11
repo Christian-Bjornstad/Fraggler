@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 
 # Centralized Regex for Control identification
-CONTROL_PREFIX_RE = re.compile(r"^(PK1|PK2|PK|NK|RK)_", re.IGNORECASE)
+CONTROL_PREFIX_RE = re.compile(r"^(PK1|PK2|PK|NK|RK|DIT|KTR)_", re.IGNORECASE)
 WATER_RE = re.compile(r"^(v|water|h2o)[_\-]?", re.IGNORECASE)
 
 def strip_stage_prefix(name: str) -> str:

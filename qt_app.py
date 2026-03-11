@@ -2,6 +2,12 @@
 Fraggler Diagnostics — Main Entry Point for PyQt6 UI
 """
 import sys
+import os
+
+# Force X11 (xcb) on Linux to avoid Wayland symbol mismatches (e.g., wl_proxy_marshal_flags)
+if sys.platform == "linux":
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 from pathlib import Path
