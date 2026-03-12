@@ -34,8 +34,8 @@ else
     exit 1
 fi
 
-# Install PyInstaller 5.13.2 (compatible with Python 3.10)
-pip install 'pyinstaller==5.13.2' 2>/dev/null || true
+# Install PyInstaller if not present (prefer 6.x)
+pip install pyinstaller 2>/dev/null || true
 
 # Clean previous builds
 rm -rf packaging/build packaging/dist
