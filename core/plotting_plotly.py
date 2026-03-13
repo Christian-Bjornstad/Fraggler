@@ -339,6 +339,14 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
 
     html_fragment = f"""
 <div id="{div_id}" class="peak-editor-block"></div>
+<div id="{div_id}_table_container" class="peak-table-container" style="display:none;">
+    <table id="{div_id}_table">
+        <thead>
+            <tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th></tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
 <script type="text/javascript">
 (function() {{
   var fig = {fig_json};
@@ -380,13 +388,29 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       Plotly.restyle(g, {{ x: [xs], y: [ys], "marker.opacity": [op], "marker.color": [col], text: [texts] }}, [peaksTraceIndex]);
 
       var ann = [];
-      for (var i = 0; i < peaks.length; i++) {{
-        var p = peaks[i];
+      var tbody = document.querySelector("#{div_id}_table tbody");
+      var tableHtml = "";
+      
+      // Sort peaks by size (X) before rendering the table
+      var sortedPeaks = peaks.slice().sort(function(a, b) {{ return a.x - b.x; }});
+
+      for (var i = 0; i < sortedPeaks.length; i++) {{
+        var p = sortedPeaks[i];
         if (!p.active) continue;
+        
+        // Add annotation
         ann.push({{ x: p.x, y: p.y * 1.03, xref: "x", yref: "y", text: p.x.toFixed(1), showarrow: false, font: {{ size: 9, color: "#222" }}, xanchor: "left", yanchor: "bottom" }});
+        
+        // Add table row
+        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td></tr>";
       }}
 
       Plotly.relayout(g, {{ shapes: baseShapes, annotations: baseAnnots.concat(ann) }});
+      
+      // Update Table
+      if (tbody) tbody.innerHTML = tableHtml;
+      var tCont = document.getElementById("{div_id}_table_container");
+      if (tCont) tCont.style.display = (tableHtml !== "") ? "block" : "none";
     }}
 
     if (peaks.length) {{ rebuild(); }}
@@ -662,6 +686,12 @@ def build_interactive_assay_batch_plot_html(
         html_parts.append(f"<h3>{escape(fsa.file_name)} – {escape(primary_ch)}</h3>")
         html_parts.append(f"<div id='{div_id}'></div>")
         html_parts.append(
+            f"<div id='{div_id}_table_container' class='peak-table-container' style='display:none;'>"
+            f"<table id='{div_id}_table'>"
+            "<thead><tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th></tr></thead>"
+            "<tbody></tbody></table></div>"
+        )
+        html_parts.append(
             "<p class='small'>Klikk på tracen for å legge til peaks. "
             "Shift+klikk for å slette nærmeste peak.</p>"
         )
@@ -719,6 +749,21 @@ def build_interactive_assay_batch_plot_html(
       if (pre) {{
         pre.textContent = JSON.stringify(arr, null, 2);
       }}
+
+      // --- Table Rendering ---
+      var tbody = document.querySelector("#" + divId + "_table tbody");
+      var tableHtml = "";
+      
+      var sortedPeaks = peaks.slice().sort(function(a, b) {{ return a.x - b.x; }});
+      for (var i = 0; i < sortedPeaks.length; i++) {{
+        var p = sortedPeaks[i];
+        if (!p.active) continue;
+        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td></tr>";
+      }}
+      
+      if (tbody) tbody.innerHTML = tableHtml;
+      var tCont = document.getElementById(divId + "_table_container");
+      if (tCont) tCont.style.display = (tableHtml !== "") ? "block" : "none";
     }}
 
     function findNearestPeakIdx(xClick) {{

@@ -167,6 +167,61 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 .save-peaks-btn:hover {
     box-shadow: 0 10px 20px rgba(14, 165, 233, 0.5);
 }
+
+/* ── Interactive Peak Tables ── */
+.peak-table-container {
+    margin-top: 10px;
+    padding: 0 10px 10px 10px;
+}
+.peak-table-container table {
+    width: auto;
+    min-width: 300px;
+    margin: 0;
+    box-shadow: none;
+    border: 1px solid #e2e8f0;
+}
+.peak-table-container th {
+    padding: 8px 12px;
+    background: #f1f5f9;
+}
+.peak-table-container td {
+    padding: 6px 12px;
+}
+
+/* ── Comment Boxes ── */
+.comment-box-container {
+    margin-top: 15px;
+    padding: 15px;
+    background: #f8fafc;
+    border-radius: 8px;
+    border: 1px dashed #cbd5e1;
+}
+.comment-box-container h4 {
+    margin: 0 0 8px 0;
+    font-size: 0.9rem;
+    color: #475569;
+}
+.report-comment {
+    width: 100%;
+    min-height: 80px;
+    padding: 10px;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 0.9rem;
+    resize: vertical;
+    box-sizing: border-box;
+}
+.report-comment:focus {
+    outline: none;
+    border-color: #0ea5e9;
+    box-shadow: 0 0 0 2px rgba(14, 165, 233, 0.2);
+}
+
+@media print {
+    .comment-box-container { border: none; padding: 0; background: transparent; }
+    .report-comment { border: none; padding: 0; resize: none; overflow: hidden; }
+}
 </style>
 """
 
@@ -198,6 +253,12 @@ window.PeakManager = {
     getAllPeaks: function() { var all = {}; for (var id in this.plots) { all[id] = this.plots[id].getPeaks(); } return all; },
     getInitialPeaksForPlot: function(id) { try { var data = JSON.parse(document.getElementById('peak-data').textContent); return data[id] || []; } catch(e) { return []; } },
     downloadUpdatedHtml: function() {
+        // Force textareas back to innerHTML so they persist
+        var tas = document.querySelectorAll('textarea.report-comment');
+        for (var i = 0; i < tas.length; i++) {
+            tas[i].innerHTML = tas[i].value;
+        }
+        
         var allPeaks = this.getAllPeaks();
         var currentHtml = document.documentElement.outerHTML;
         var peakDataStr = JSON.stringify(allPeaks);
@@ -320,8 +381,15 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
         # Add detailed ratio tables directly below the plot for FLT3 targets
         if assay_name == "FLT3-ITD":
             html_lines.append(_build_itd_detailed_table(e))
-        elif assay_name == "FLT3-D835":
             html_lines.append(_build_d835_detailed_table(e))
+
+    # Add Comment Box for the overall assay
+    html_lines.append(
+        "<div class='comment-box-container'>"
+        f"<h4>Vurdering / Kommentar ({escape(assay_name)}):</h4>"
+        "<textarea class='report-comment' placeholder='Skriv inn eventuelle kommentarer her...'></textarea>"
+        "</div>"
+    )
 
     html_lines.append("</div>")
 
