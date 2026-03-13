@@ -9,6 +9,7 @@ from config import APP_SETTINGS
 
 def get_active_analysis_name() -> str:
     """Returns the name of the active analysis (clonality, flt3, etc)."""
+    from config import APP_SETTINGS
     return APP_SETTINGS.get("active_analysis", "clonality")
 
 def get_analysis_module(submodule: str) -> Any:

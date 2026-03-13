@@ -12,6 +12,9 @@ from pathlib import Path
 from collections import defaultdict
 from html import escape
 from datetime import datetime
+import pandas as pd
+
+from core.analyses.registry import get_active_analysis_name
 
 import numpy as np
 
@@ -182,8 +185,9 @@ def dit_to_year(dit: str) -> int | None:
 
 def _create_html_header(dit: str, year: int | None, num_entries: int, dit_root: Path, html_lines: list[str]):
     """Appends the HTML head and page header to html_lines."""
+    analysis_name = get_active_analysis_name().capitalize()
     html_lines.extend(["<!DOCTYPE html>", "<html lang='no'>", "<head>", "<meta charset='utf-8'>"])
-    html_lines.append(f"<title>{escape(dit)}_Klonalitet_Resultater</title>")
+    html_lines.append(f"<title>{escape(dit)}_{analysis_name}_Resultater</title>")
     html_lines.append(REPORT_STYLE)
     html_lines.append('<script id="peak-data" type="application/json">{}</script>')
     html_lines.append("""
@@ -216,13 +220,14 @@ function printReport() { window.print(); }
     meta.extend([f"{num_entries} analyserte filer", f"Generert: {gen_date}"])
     meta_str = " &nbsp;&bull;&nbsp; ".join(meta)
     
+    analysis_name = get_active_analysis_name().capitalize()
     html_lines.append(f"""
 <div class='report-header no-print'>
-  <h1>{escape(dit)}_Klonalitet_Resultater</h1>
+  <h1>{escape(dit)}_{analysis_name}_Resultater</h1>
   <div class='meta'>{meta_str}</div>
 </div>
 <div style='display:none' class='print-only-header'>
-  <h1>{escape(dit)}_Klonalitet_Resultater</h1>
+  <h1>{escape(dit)}_{analysis_name}_Resultater</h1>
   <p>{" | ".join(meta)}</p>
 </div>
 """)
@@ -240,6 +245,56 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
             f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
             f"<td>{escape(e['ladder'])}</td><td>{int(e['bp_min'])}–{int(e['bp_max'])} bp</td>"
             f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+        )
+    html_lines.append("</table>")
+
+def _render_flt3_results_table(dit_entries: list[dict], html_lines: list[str]):
+    """Renders a specialized summary table for FLT3/NPM1 results."""
+    html_lines.append("<h2>Analyseresultater – FLT3 / NPM1</h2>")
+    html_lines.append(
+        "<table><tr><th>Assay</th><th>Prøvetype</th><th>Parallell</th><th>Behandling</th>"
+        "<th>Resultat</th></tr>"
+    )
+    
+    for e in sorted(dit_entries, key=lambda x: (x["assay"], x["analysis_type"])):
+        assay = e["assay"]
+        g = e["group"]
+        atype = e["analysis_type"]
+        inj = e.get("injection_time", 0)
+        ratio = e.get("ratio", 0.0)
+        par = e.get("parallel") or "&mdash;"
+        
+        # Treatment description
+        treatment = "Standard"
+        if atype == "TKD_digested": treatment = "Digert (EcoRV)"
+        elif atype == "10x_diluted": treatment = "Fortynnet 1:10"
+        elif atype == "25x_diluted": treatment = "Fortynnet 1:25"
+        elif atype == "ratio_quant": treatment = "Ratio-sett"
+        elif atype == "undiluted": treatment = "Ufortynnet"
+
+        # Extract peak areas
+        wt_area, mut_area = 0.0, 0.0
+        peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
+        if not peaks.empty:
+            wt_row = peaks[peaks.label == "WT"]
+            if not wt_row.empty: wt_area = wt_row.sort_values("peaks", ascending=False).iloc[0].area
+            
+            mut_row = peaks[peaks.label.isin(["MUT", "ITD"])]
+            if not mut_row.empty: mut_area = mut_row.area.sum()
+
+        ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+        
+        # Simple interpretation
+        label = "Villtype"
+        if assay == "FLT3-ITD" and mut_area > 0: label = "MUTERT (ITD)"
+        elif assay == "FLT3-D835" and ratio > 0.01: label = "MUTERT (D835)"
+        elif assay == "NPM1" and mut_area > 0: label = "MUTERT (NPM1)"
+        
+        html_lines.append(
+            f"<tr><td><strong>{escape(assay)}</strong></td>"
+            f"<td>{escape(g)}</td><td>{escape(par)}</td>"
+            f"<td>{escape(treatment)}<br><span class='small'>{inj}s inj.</span></td>"
+            f"<td><strong>{label}</strong></td></tr>"
         )
     html_lines.append("</table>")
 
@@ -261,7 +316,115 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
             html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
         except Exception as ex:
             html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+            
+        # Add detailed ratio tables directly below the plot for FLT3 targets
+        if assay_name == "FLT3-ITD":
+            html_lines.append(_build_itd_detailed_table(e))
+        elif assay_name == "FLT3-D835":
+            html_lines.append(_build_d835_detailed_table(e))
+
     html_lines.append("</div>")
+
+def _build_itd_detailed_table(e: dict) -> str:
+    """Builds the detailed Excel-like table for ITD (separated Green/Blue)."""
+    peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
+    if peaks.empty: return ""
+    
+    wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
+    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])]
+    
+    # Extract channel 1 (Green) and channel 2 (Blue) if available
+    # Default to 0 if missing
+    wt_g, wt_b = 0.0, 0.0
+    mut_g, mut_b = 0.0, 0.0
+    
+    if not wt_row.empty:
+        r = wt_row.iloc[0]
+        wt_g = r.get("area_DATA1", 0.0)
+        wt_b = r.get("area_DATA2", 0.0)
+        
+    if not mut_rows.empty:
+        mut_g = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
+        mut_b = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
+        
+    ratio = e.get("ratio", 0.0)
+    ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+    
+    # Check if ratio suggests a positive result (e.g. > 0.01)
+    # The summary already does this, but here it's clearly for the ratio
+    label = "Negativ"
+    if ratio > 0.01: label = "Positiv"
+    
+    t = []
+    t.append("<div style='margin-top: 10px; margin-bottom: 24px;'>")
+    t.append("<table style='width: 100%; border: 1px solid #e2e8f0;'>")
+    t.append(
+        "<tr><th colspan='2' style='text-align:center;'>Villtype (WT)</th>"
+        "<th colspan='2' style='text-align:center;'>Mutert (ITD)</th>"
+        "<th>Ratio</th><th>Tolkning</th></tr>"
+    )
+    t.append("<tr><th>Grønn (Area)</th><th>Blå (Area)</th><th>Grønn (Area)</th><th>Blå (Area)</th><th>ITD-ratio</th><th></th></tr>")
+    
+    t.append("<tr>")
+    t.append(f"<td>{wt_g:,.0f}</td><td>{wt_b:,.0f}</td>")
+    t.append(f"<td>{mut_g:,.0f}</td><td>{mut_b:,.0f}</td>")
+    t.append(f"<td><strong>{ratio_str}</strong></td><td><strong>{label}</strong></td>")
+    t.append("</tr>")
+    t.append("</table></div>")
+    return "".join(t)
+
+def _build_d835_detailed_table(e: dict) -> str:
+    """Builds the detailed Excel-like table for D835 (separate mutant peaks)."""
+    peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
+    if peaks.empty: return ""
+    
+    wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
+    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("peaks", ascending=False)
+    
+    wt_area = wt_row.iloc[0].area if not wt_row.empty else 0.0
+    
+    t = []
+    t.append("<div style='margin-top: 10px; margin-bottom: 24px;'>")
+    t.append("<table style='width: 100%; border: 1px solid #e2e8f0;'>")
+    
+    if mut_rows.empty:
+        t.append("<tr><th>WT (Sort Area)</th><th>Mutert</th><th>Ratio</th><th>Tolkning</th></tr>")
+        t.append(f"<tr><td>{wt_area:,.0f}</td><td>Ingen mutasjoner detektert</td><td>&mdash;</td><td><strong>Negativ</strong></td></tr>")
+    else:
+        # Build headers for up to N mutant peaks (usually 1 or 2)
+        n_muts = len(mut_rows)
+        headers = ["WT (Sort Area)"]
+        for i in range(1, n_muts + 1):
+            headers.append(f"Mutert Peak {i} (Area) [Størrelse]")
+            headers.append(f"Ratio {i}")
+        headers.append("Total Ratio")
+        headers.append("Tolkning")
+        
+        t.append("<tr>")
+        for h in headers: t.append(f"<th>{h}</th>")
+        t.append("</tr>")
+        
+        t.append("<tr>")
+        t.append(f"<td>{wt_area:,.0f}</td>")
+        
+        tot_mut = 0.0
+        for _, r in mut_rows.iterrows():
+            m_area = r.area
+            m_bp = r.basepairs
+            tot_mut += m_area
+            r_val = m_area / wt_area if wt_area > 0 else 0.0
+            t.append(f"<td>{m_area:,.0f} <span class='small'>[{m_bp:.1f} bp]</span></td>")
+            t.append(f"<td>{r_val:.4f}</td>")
+            
+        tot_ratio = tot_mut / wt_area if wt_area > 0 else 0.0
+        label = "Positiv" if tot_ratio > 0.01 else "Negativ"
+        
+        t.append(f"<td><strong>{tot_ratio:.4f}</strong></td>")
+        t.append(f"<td><strong>{label}</strong></td>")
+        t.append("</tr>")
+        
+    t.append("</table></div>")
+    return "".join(t)
 
 def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: list[str]):
     """Renders a combination block for TCRb replicates."""
@@ -353,6 +516,9 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
         _create_html_header(dit, year, len(dit_entries), assay_outdir, html_lines)
         _render_file_summary_table(dit_entries, html_lines)
 
+        if get_active_analysis_name() == "flt3":
+            _render_flt3_results_table(dit_entries, html_lines)
+
         html_lines.append("<h2>Assay-spesifikke oversikter</h2>")
         ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER]
         
@@ -384,7 +550,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
 </div>
 </body></html>""")
         
-        out_html = assay_outdir / f"{dit}_Klonalitet_Resultater.html"
+        analysis_name = get_active_analysis_name().capitalize()
+        out_html = assay_outdir / f"{dit}_{analysis_name}_Resultater.html"
         out_html.write_text("\n".join(html_lines), encoding="utf-8")
         print_green(f"[DIT] Lagret: {out_html}")
 

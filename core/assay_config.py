@@ -28,8 +28,8 @@ class PlotOptions:
 
 DEFAULT_FSA_DIR = Path.cwd() / "data"
 
-LIZ_LADDER = "LIZ500_250"
-ROX_LADDER = "ROX400HD"
+DEFAULT_LIZ_LADDER = "LIZ500_250"
+DEFAULT_ROX_LADDER = "ROX400HD"
 
 MIN_DISTANCE_BETWEEN_PEAKS_LIZ = 30
 MIN_SIZE_STANDARD_HEIGHT_LIZ = 300
@@ -90,9 +90,10 @@ def __getattr__(name: str) -> Any:
     if name == "REFERENCE_SHADE_COLOR":
         return _get_analysis_attr("REFERENCE_SHADE_COLOR", "#ebe8cb")
     
-    # Static constants from this module
-    if name == "LIZ_LADDER": return LIZ_LADDER
-    if name == "ROX_LADDER": return ROX_LADDER
+    if name == "ROX_LADDER":
+        return _get_analysis_attr("ROX_LADDER", DEFAULT_ROX_LADDER)
+    if name == "LIZ_LADDER":
+        return _get_analysis_attr("LIZ_LADDER", DEFAULT_LIZ_LADDER)
     
     raise AttributeError(f"module {__name__} has no attribute {name}")
 

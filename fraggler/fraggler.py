@@ -295,7 +295,7 @@ class FsaFile:
         self.file_name = self.file.parts[-1]
 
         if ladder not in LADDERS.keys():
-            print_fail(f"'{ladder}' is not a valid ladder")
+            print_fail(f"'{ladder}' is not a valid ladder. Available: {list(LADDERS.keys())}")
             sys.exit(1)
         self.ladder = ladder
 
