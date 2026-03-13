@@ -1,5 +1,9 @@
-# Fraggler Diagnostics v1.1.0 Release Notes
+# Fraggler Diagnostics v1.1.1 Release Notes
 
+## New in v1.1.1
+- **Fixed Basepair Shift**: Improved ladder fitting robustness by increasing the peak consideration limit and tightening contaminant filtering. This resolves observed shifts in samples with high primer/dye blobs (e.g., SL assay).
+
+## v1.1.0 Overview
 This version establishes Fraggler Diagnostics as a comprehensive, standalone solution for the automated processing and clinical validation of DNA fragment analysis data. The application is designed to provide clinical genomics labs with a secure, offline environment for high-throughput FSA trace analysis.
 
 ## Core Capabilities

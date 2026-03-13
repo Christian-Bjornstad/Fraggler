@@ -86,7 +86,7 @@ class AnalysisGroup(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Fraggler Diagnostics")
+        self.setWindowTitle("Fraggler Diagnostics v1.1.1")
         self.setStyleSheet(VIBRANT_PRO_QSS)
         
         # Central widget

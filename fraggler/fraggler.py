@@ -327,7 +327,7 @@ class FsaFile:
             self.size_standard_channel = self.find_size_standard_channel()
 
         self.min_distance_between_peaks = min_distance_between_peaks
-        self.max_peaks_allow_in_size_standard = self.n_ladder_peaks + 5
+        self.max_peaks_allow_in_size_standard = self.n_ladder_peaks + 15
 
 
         ### properties updateded by external functions
