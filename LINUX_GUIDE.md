@@ -1,33 +1,66 @@
-# Fraggler Diagnostics — Linux (Offline Guide)
+# Fraggler Diagnostics — Linux Offline Guide
 
-This guide is for running Fraggler on a Linux machine (like Fedora 35) without an internet connection.
+This guide is for the **Fedora 35 x86_64 work machine** and other Linux systems with similar compatibility characteristics.
 
-## 🚀 Recommended: Full Portable Bundle
+Fraggler is shipped on Linux as a **portable offline desktop bundle**.
 
-We have created a "Full Bundle" that includes its own copy of critical system libraries (like `libxcb-cursor`) so you don't need to install anything on the host.
+## Recommended Artifact
 
-1. **Locate the package**: Use `Fraggler_Linux_offline.zip`.
-2. **Transfer to Linux**: Use a USB drive to copy it to your Fedora machine.
-3. **Extract and Run**:
-   ```bash
-   unzip Fraggler_Linux_offline.zip -d ~/Fraggler
-   cd ~/Fraggler/dist/Fraggler_Linux
-   chmod +x Fraggler
-   ./Fraggler
-   ```
+Use:
+- `Fraggler_Linux_offline.zip`
 
-## 🛠 Prerequisites
+The bundle includes:
+- the `Fraggler` launcher
+- the `_internal` runtime folder from PyInstaller
+- bundled Qt/XCB runtime libraries needed for the Fedora 35 target
+- a Linux-specific README inside the bundle
 
-- **GLIBC 2.31 or newer**: Check with `ldd --version` (Fedora 35 is 2.34, so it works).
-- **Architecture**: 64-bit Intel/AMD (x86_64).
+## Supported Runtime Assumptions
 
-## ❓ Troubleshooting
+- `glibc >= 2.31`
+- `x86_64`
+- offline deployment supported
+- packaged Linux runs with `QT_QPA_PLATFORM=xcb`
+
+Fedora 35 typically reports glibc 2.34, so it satisfies the baseline.
+
+## Install and Run
+
+```bash
+unzip Fraggler_Linux_offline.zip -d ~/Fraggler
+cd ~/Fraggler/Fraggler_Linux
+chmod +x Fraggler
+./Fraggler
+```
+
+## Validation Checklist
+
+Check glibc:
+```bash
+ldd --version
+```
+
+Check runtime dependencies:
+```bash
+ldd ./Fraggler
+```
+
+Expected:
+- no unresolved XCB/Qt runtime libraries that were meant to be bundled
+- the application stays in X11/xcb mode
+
+## Troubleshooting
 
 ### "Symbol lookup error" or "Library not found"
-The **v2 Offline** version includes all known missing libraries. If you still see errors, check that you extracted the entire zip file, as the `_internal` folder contains the required `.so` files.
+- Confirm the full zip was extracted
+- Keep the `_internal` folder next to `Fraggler`
+- Run `ldd ./Fraggler` to identify unresolved libraries
 
 ### Wayland vs X11
-The application is configured to force the **X11 (xcb)** platform for maximum compatibility. This is handled automatically by the `Fraggler` binary.
+Fraggler forces **X11/xcb** in packaged Linux builds for compatibility with the Fedora 35 target environment.
 
 ### Permission Denied
-Run `chmod +x Fraggler` in the terminal inside the `Fraggler_Linux` folder.
+Run:
+```bash
+chmod +x Fraggler
+```

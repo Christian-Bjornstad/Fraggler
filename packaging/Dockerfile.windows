@@ -2,6 +2,7 @@ FROM tobix/pywine:3.10
 
 # Wine pip needs to install PyInstaller
 RUN wine python -m pip install --no-cache-dir pyinstaller
+RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .

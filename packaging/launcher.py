@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Fraggler Diagnostics — Standalone Launcher
+Legacy launcher for the old browser-first packaging model.
 
-This is the entry point for the packaged executable.
-It starts a Panel/Bokeh server on localhost and opens the browser.
+Current desktop release builds use `qt_app.py` directly and do not use this file
+as the packaged entrypoint.
 """
 from __future__ import annotations
 

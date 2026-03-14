@@ -1,102 +1,122 @@
-# Fraggler Diagnostics — Packaging
+# Fraggler Diagnostics — Desktop Packaging
 
-Build standalone executables for **macOS**, **Linux**, and **Windows**.
+Fraggler is packaged as a **native PyQt desktop app** on all supported platforms.
+The canonical packaged entrypoint is `qt_app.py`.
+
+The embedded/local Panel server is now treated as legacy support only:
+- it is not the default packaged startup path
+- packaged builds disable it by default via a runtime hook
+- it can still be re-enabled explicitly with `FRAGGLER_ENABLE_LEGACY_PANEL=1`
+
+## Supported Release Outputs
+
+Every platform is built from the same desktop packaging contract in `build_qt.py`.
+
+Artifacts:
+- macOS: `dist/Fraggler.app` and `dist/releases/Fraggler_macOS.zip`
+- Linux: `dist/Fraggler_Linux` and `dist/releases/Fraggler_Linux_offline.zip`
+- Windows: `dist/Fraggler_Windows` and `dist/releases/Fraggler_Windows.zip`
+
+## Platform Targets
+
+### macOS
+- Native `.app` bundle
+- Includes `qt.conf` post-build fix for macOS translocation compatibility
+
+### Linux
+- Primary target: **offline Fedora 35 x86_64 machine**
+- Runtime assumption: **glibc 2.31 or newer**
+- Desktop startup forces **`QT_QPA_PLATFORM=xcb`**
+- Offline bundle includes critical XCB/Qt runtime libraries inside the artifact
+
+### Windows
+- Native desktop bundle with `Fraggler.exe`
+- Same packaged app behavior as macOS/Linux
 
 ## Quick Start
 
-### Build for Mac (current machine)
+### Build macOS
 ```bash
 cd /Users/christian/Desktop/OUS
-chmod +x packaging/build_mac.sh
 ./packaging/build_mac.sh
 ```
 
-Result: `packaging/dist/fraggler-diagnostics/fraggler-diagnostics`
-
-### Build for Linux (via Docker)
+### Build Linux Offline Bundle
 ```bash
 cd /Users/christian/Desktop/OUS
-chmod +x packaging/build_linux.sh
 ./packaging/build_linux.sh
 ```
 
-Result: `packaging/dist/fraggler-diagnostics-linux/fraggler-diagnostics`
-
-### Build for Windows
-Run on a Windows machine with Python 3.10+:
+### Build Windows on Windows
 ```cmd
 packaging\build_windows.bat
 ```
 
-## Running the Executable
-
+### Build Windows via Docker
 ```bash
-# Mac / Linux
-./fraggler-diagnostics
-
-# Windows
-fraggler-diagnostics.exe
+cd /Users/christian/Desktop/OUS
+./packaging/build_windows.sh
 ```
 
-The app will:
-1. Start a local web server on port 5078
-2. Automatically open your browser at `http://localhost:5078/app`
-3. Show logs in the terminal
+## Linux Offline Deployment
 
-Press `Ctrl+C` in the terminal to stop.
+Use `dist/releases/Fraggler_Linux_offline.zip`.
 
-## How It Works
+Target machine:
+- Fedora 35
+- x86_64
+- offline supported
 
+Run on Linux:
+```bash
+unzip Fraggler_Linux_offline.zip -d ~/Fraggler
+cd ~/Fraggler/Fraggler_Linux
+chmod +x Fraggler
+./Fraggler
 ```
-┌─────────────────────────────────────────────┐
-│  fraggler-diagnostics (executable)          │
-│  ┌───────────────────┐                      │
-│  │  launcher.py       │ ← Entry point       │
-│  │  - Starts Panel    │                      │
-│  │  - Opens browser   │                      │
-│  └────────┬──────────┘                      │
-│           ↓                                  │
-│  ┌───────────────────┐                      │
-│  │  _internal/        │ ← Bundled deps       │
-│  │  - Python 3.10     │                      │
-│  │  - numpy, scipy    │                      │
-│  │  - panel, bokeh    │                      │
-│  │  - plotly.js       │                      │
-│  │  - all app code    │                      │
-│  └───────────────────┘                      │
-└─────────────────────────────────────────────┘
+
+Validation checklist:
+```bash
+ldd --version
+ldd ./Fraggler
 ```
+
+Expected:
+- glibc 2.31+
+- no unresolved bundled XCB/Qt runtime dependencies
 
 ## Files
 
 | File | Purpose |
 |------|---------|
-| `launcher.py` | Entry point — starts server & opens browser |
-| `fraggler_diagnostics.spec` | PyInstaller config — what to bundle |
-| `hooks/hook-*.py` | PyInstaller hooks for Panel/Bokeh/fraggler |
-| `build_mac.sh` | Mac build script |
-| `build_linux.sh` | Linux build via Docker |
-| `build_windows.bat` | Windows build script |
-| `Dockerfile.linux` | Docker image for Linux builds |
+| `build_qt.py` | Canonical PyInstaller desktop build contract |
+| `packaging/build_mac.sh` | macOS wrapper around the shared desktop build |
+| `packaging/build_linux.sh` | Docker-based Linux offline bundle build |
+| `packaging/build_windows.bat` | Native Windows desktop build |
+| `packaging/build_windows.sh` | Docker/Wine-based Windows desktop build |
+| `packaging/hooks/runtime_desktop.py` | Packaged runtime defaults |
+| `packaging/Dockerfile.linux` | Older-compatible Linux build image |
+| `LINUX_GUIDE.md` | Fedora 35 deployment notes merged into mainline docs |
+
+## Release Uploads
+
+Recommended GitHub release assets:
+- `Fraggler_macOS.zip`
+- `Fraggler_Linux_offline.zip`
+- `Fraggler_Windows.zip`
 
 ## Troubleshooting
 
-### "Port 5078 already in use"
-Another instance is running. Kill it:
-```bash
-# Mac/Linux
-lsof -i :5078 -t | xargs kill
+### Linux launch fails with missing library errors
+- Ensure the full zip was extracted, including `_internal`
+- Run `ldd ./Fraggler`
+- Keep the offline bundle contents together; do not move the binary out of the folder
 
-# Windows
-netstat -ano | findstr :5078
-taskkill /PID <pid> /F
-```
+### Linux opens with Wayland/X11 issues
+Fraggler forces `QT_QPA_PLATFORM=xcb` in packaged Linux builds for compatibility.
 
-### Large executable size (~150-250 MB)
-This is expected — it includes Python + numpy + scipy + sklearn + pandas + plotly.js.
+### macOS unsigned app warning
+Use right-click → `Open` the first time, or sign/notarize the zip before release.
 
-### Linux executable won't run
-Make sure it's executable:
-```bash
-chmod +x fraggler-diagnostics
-```
+### Windows or Linux build size is large
+Expected. The bundle includes Python, scientific libraries, Qt, and packaged assets.

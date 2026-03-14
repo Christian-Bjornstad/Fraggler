@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "============================================================"
-echo "  Building Fraggler Diagnostics for Windows (.exe via Docker)"
+echo "  Building Fraggler Diagnostics for Windows Desktop Bundle"
 echo "============================================================"
 
 # Ensure Docker binaries are in PATH (common for Docker Desktop on Mac)
@@ -22,7 +22,10 @@ echo "Building Docker image..."
 docker build -f packaging/Dockerfile.windows -t fraggler-windows-build .
 
 echo "Running build..."
-# We map the dist/ folder to /output, build internally, and copy the artifacts out to avoid OS locks
-docker run --rm -v "$PROJECT_ROOT/dist:/output" fraggler-windows-build sh -c "wine python build_qt.py && cp -r dist/Fraggler /output/Fraggler_Windows"
+rm -rf "$PROJECT_ROOT/dist"
+mkdir -p "$PROJECT_ROOT/dist"
+docker run --rm -v "$PROJECT_ROOT/dist:/app/dist" fraggler-windows-build wine python build_qt.py
 
-echo "Done! Windows executable is available in dist/"
+echo "Done!"
+echo "Portable folder: dist/Fraggler_Windows"
+echo "Release zip    : dist/releases/Fraggler_Windows.zip"

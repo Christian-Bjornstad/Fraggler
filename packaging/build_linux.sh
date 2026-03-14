@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "============================================================"
-echo "  Building Fraggler Diagnostics for Linux (via Docker)"
+echo "  Building Fraggler Diagnostics for Linux Offline Bundle"
 echo "============================================================"
 
 # Ensure Docker binaries are in PATH (common for Docker Desktop on Mac)
@@ -22,7 +22,10 @@ echo "Building Docker image..."
 docker build -f packaging/Dockerfile.linux -t fraggler-linux-build .
 
 echo "Running build..."
-# We map the dist/ folder to export the compiled executable, avoiding host collisions
-docker run --rm -v "$PROJECT_ROOT/dist:/output" fraggler-linux-build sh -c "python3 build_qt.py && cp -r dist/Fraggler /output/Fraggler_Linux"
+rm -rf "$PROJECT_ROOT/dist"
+mkdir -p "$PROJECT_ROOT/dist"
+docker run --rm -v "$PROJECT_ROOT/dist:/app/dist" fraggler-linux-build python3 build_qt.py
 
-echo "Done! Linux executable is available in dist/"
+echo "Done!"
+echo "Portable folder: dist/Fraggler_Linux"
+echo "Offline zip    : dist/releases/Fraggler_Linux_offline.zip"

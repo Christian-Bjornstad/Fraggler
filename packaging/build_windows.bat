@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM Build Fraggler Diagnostics — Windows Executable
+REM Build Fraggler Diagnostics — Windows Desktop Bundle
 REM ============================================================
 REM Prerequisites:
 REM   - Python 3.10+ installed
@@ -10,7 +10,7 @@ REM Usage:
 REM   packaging\build_windows.bat
 REM
 REM Output:
-REM   packaging\dist\fraggler-diagnostics\
+REM   dist\Fraggler_Windows and dist\releases\Fraggler_Windows.zip
 REM ============================================================
 
 echo ============================================================
@@ -32,27 +32,24 @@ pip install -r requirements.txt
 pip install pyinstaller
 
 REM Clean previous builds
-if exist packaging\build rmdir /s /q packaging\build
-if exist packaging\dist rmdir /s /q packaging\dist
+if exist build rmdir /s /q build
+if exist dist rmdir /s /q dist
 
 REM Build
 echo.
-echo Running PyInstaller...
+echo Running unified desktop build...
 echo.
 
-pyinstaller packaging\fraggler_diagnostics.spec ^
-    --distpath packaging\dist ^
-    --workpath packaging\build ^
-    --clean ^
-    --noconfirm
+python build_qt.py
 
 echo.
 echo ============================================================
 echo   Build complete!
-echo   Executable: packaging\dist\fraggler-diagnostics\
+echo   Folder: dist\Fraggler_Windows
+echo   Zip   : dist\releases\Fraggler_Windows.zip
 echo.
 echo   To run:
-echo     packaging\dist\fraggler-diagnostics\fraggler-diagnostics.exe
+echo     dist\Fraggler_Windows\Fraggler.exe
 echo ============================================================
 
 pause
