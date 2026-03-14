@@ -218,6 +218,8 @@ def _prepare_plot_data(entry: dict) -> dict | None:
         "bp_max": float(entry["bp_max"]),
         "assay_name": entry.get("assay"),
         "forced_ymax": entry.get("forced_ymax") or entry.get("force_ymax"),
+        "forced_xmin": entry.get("forced_xmin"),
+        "forced_xmax": entry.get("forced_xmax"),
         "peaks_by_channel": entry["peaks_by_channel"],
         "sample_id": f"{fsa.file_name}_{primary_ch}"
     }
@@ -324,8 +326,16 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         hoverlabel=dict(bgcolor="white", font_size=12, font_family="Inter, sans-serif"),
         hoverdistance=20, spikedistance=20
     )
+    # Select final x-range
+    forced_xmin = data.get("forced_xmin")
+    forced_xmax = data.get("forced_xmax")
+    x_range = [
+        float(forced_xmin) if forced_xmin is not None else data["bp_min"],
+        float(forced_xmax) if forced_xmax is not None else data["bp_max"]
+    ]
+
     fig.update_yaxes(range=[0.0, ymax * YMAX_PADDING_FACTOR], gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
-    fig.update_xaxes(range=[data["bp_min"], data["bp_max"]], gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
+    fig.update_xaxes(range=x_range, gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
 
     # Empty peaks trace for JS
     fig.add_trace(go.Scatter(x=[], y=[], mode="markers", name="Peaks", marker=dict(size=8, color="red", line=dict(color="black", width=1)), hovertemplate="bp=%{x:.2f}<br>height=%{y:.0f}<extra></extra>"))

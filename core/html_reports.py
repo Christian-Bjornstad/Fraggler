@@ -191,16 +191,45 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 /* ── Comment Boxes ── */
 .comment-box-container {
     margin-top: 15px;
-    padding: 15px;
-    background: #f8fafc;
     border-radius: 8px;
     border: 1px dashed #cbd5e1;
+    background: #f8fafc;
+    overflow: hidden;
+    transition: border-color 0.2s ease;
 }
-.comment-box-container h4 {
-    margin: 0 0 8px 0;
-    font-size: 0.9rem;
-    color: #475569;
+.comment-box-container:has(.comment-body.open) {
+    border-color: #0ea5e9;
 }
+.comment-toggle-btn {
+    width: 100%;
+    background: none;
+    border: none;
+    padding: 10px 14px;
+    text-align: left;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #64748b;
+    transition: color 0.15s ease, background 0.15s ease;
+    user-select: none;
+}
+.comment-toggle-btn:hover { color: #0ea5e9; background: #f1f5f9; }
+.comment-toggle-btn .caret {
+    margin-left: auto;
+    transition: transform 0.2s ease;
+    font-style: normal;
+    font-size: 0.75rem;
+    opacity: 0.6;
+}
+.comment-body {
+    display: none;
+    padding: 0 14px 14px;
+}
+.comment-body.open { display: block; }
 .report-comment {
     width: 100%;
     min-height: 80px;
@@ -211,6 +240,7 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
     font-size: 0.9rem;
     resize: vertical;
     box-sizing: border-box;
+    background: white;
 }
 .report-comment:focus {
     outline: none;
@@ -219,8 +249,10 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 }
 
 @media print {
-    .comment-box-container { border: none; padding: 0; background: transparent; }
-    .report-comment { border: none; padding: 0; resize: none; overflow: hidden; }
+    .comment-box-container { border: none; background: transparent; }
+    .comment-toggle-btn { display: none; }
+    .comment-body { display: block !important; padding: 0; }
+    .report-comment { border: none; padding: 0; resize: none; overflow: hidden; background: transparent; }
 }
 </style>
 """
@@ -240,13 +272,25 @@ def dit_to_year(dit: str) -> int | None:
 
 def _create_html_header(dit: str, year: int | None, num_entries: int, dit_root: Path, html_lines: list[str]):
     """Appends the HTML head and page header to html_lines."""
-    analysis_name = get_active_analysis_name().capitalize()
+    analysis_name = get_active_analysis_name()
+    display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
+    
     html_lines.extend(["<!DOCTYPE html>", "<html lang='no'>", "<head>", "<meta charset='utf-8'>"])
-    html_lines.append(f"<title>{escape(dit)}_{analysis_name}_Resultater</title>")
+    html_lines.append(f"<title>{escape(dit)}_{display_name}_Resultater</title>")
     html_lines.append(REPORT_STYLE)
     html_lines.append('<script id="peak-data" type="application/json">{}</script>')
     html_lines.append("""
 <script>
+// Toggle comment boxes
+function toggleComment(btn) {
+    var body = btn.nextElementSibling;
+    var caret = btn.querySelector('.caret');
+    var isOpen = body.classList.toggle('open');
+    caret.textContent = isOpen ? '▲' : '▼';
+    if (isOpen) btn.querySelector('.comment-label').textContent = 'Skjul kommentar';
+    else btn.querySelector('.comment-label').textContent = 'Legg til kommentar';
+}
+
 window.PeakManager = {
     plots: {},
     registerPlot: function(id, plotObj) { this.plots[id] = plotObj; },
@@ -256,7 +300,19 @@ window.PeakManager = {
         // Force textareas back to innerHTML so they persist
         var tas = document.querySelectorAll('textarea.report-comment');
         for (var i = 0; i < tas.length; i++) {
-            tas[i].innerHTML = tas[i].value;
+            var val = tas[i].value.trim();
+            tas[i].innerHTML = val;
+            
+            var container = tas[i].closest('.comment-box-container');
+            var body = tas[i].closest('.comment-body');
+            
+            if (val !== "") {
+                // If there's content, make sure it's open/visible
+                body.classList.add('open');
+            } else {
+                // If empty, hide it (even from print)
+                body.classList.remove('open');
+            }
         }
         
         var allPeaks = this.getAllPeaks();
@@ -281,14 +337,16 @@ function printReport() { window.print(); }
     meta.extend([f"{num_entries} analyserte filer", f"Generert: {gen_date}"])
     meta_str = " &nbsp;&bull;&nbsp; ".join(meta)
     
-    analysis_name = get_active_analysis_name().capitalize()
+    analysis_name = get_active_analysis_name()
+    display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
+    
     html_lines.append(f"""
 <div class='report-header no-print'>
-  <h1>{escape(dit)}_{analysis_name}_Resultater</h1>
+  <h1>{escape(dit)}_{display_name}_Resultater</h1>
   <div class='meta'>{meta_str}</div>
 </div>
 <div style='display:none' class='print-only-header'>
-  <h1>{escape(dit)}_{analysis_name}_Resultater</h1>
+  <h1>{escape(dit)}_{display_name}_Resultater</h1>
   <p>{" | ".join(meta)}</p>
 </div>
 """)
@@ -383,11 +441,17 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
             html_lines.append(_build_itd_detailed_table(e))
             html_lines.append(_build_d835_detailed_table(e))
 
-    # Add Comment Box for the overall assay
+    # Add collapsible Comment Box for the overall assay
     html_lines.append(
         "<div class='comment-box-container'>"
-        f"<h4>Vurdering / Kommentar ({escape(assay_name)}):</h4>"
+        "<button class='comment-toggle-btn' onclick='toggleComment(this)'>"
+        "💬 <span class='comment-label'>Legg til kommentar</span>"
+        f" <em style='font-weight:400;opacity:0.7;'>({escape(assay_name)})</em>"
+        "<i class='caret'>&#x25BC;</i>"
+        "</button>"
+        "<div class='comment-body'>"
         "<textarea class='report-comment' placeholder='Skriv inn eventuelle kommentarer her...'></textarea>"
+        "</div>"
         "</div>"
     )
 
@@ -502,9 +566,18 @@ def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: 
     html_lines.append("<p class='small'>TCRβ mix A, B og C med felles y-akse for enkel sammenligning.</p>")
     html_lines.append("<div class='combo-grid'>")
     group_y = compute_group_ymax_for_entries(entries)
+    
+    # Calculate global X range
+    forced_xmin = min((float(e["bp_min"]) for e in entries), default=0)
+    forced_xmax = max((float(e["bp_max"]) for e in entries), default=1000)
+
     for e in sorted(entries, key=lambda x: x["assay"]):
         fsa, primary_ch = e["fsa"], e["primary_peak_channel"]
-        e_combo = dict(e); e_combo["forced_ymax"] = group_y
+        e_combo = dict(e)
+        e_combo["forced_ymax"] = group_y
+        e_combo["forced_xmin"] = forced_xmin
+        e_combo["forced_xmax"] = forced_xmax
+        
         html_lines.append("<div class='combo-item'>")
         html_lines.append(f"<p class='sample-header'>{escape(e_combo['assay'])} – {escape(fsa.file_name)}</p>")
         try:
@@ -519,12 +592,21 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
     """Renders a combined block for TCRg assays."""
     if not tcrg_entries: return
     group_y = compute_group_ymax_for_entries(tcrg_entries)
+    
+    # Calculate global X range
+    forced_xmin = min((float(e["bp_min"]) for e in tcrg_entries), default=0)
+    forced_xmax = max((float(e["bp_max"]) for e in tcrg_entries), default=1000)
+
     html_lines.append("<h2>Kombinasjonsfigur – TCRγ</h2><div class='assay-block'>")
-    html_lines.append("<p class='small'>TCRγ mix A og mix B (begge paralleller) med felles y-akse.</p>")
+    html_lines.append("<p class='small'>TCRγ mix A og mix B (begge paralleller) med felles x- og y-akse.</p>")
     html_lines.append("<div class='combo-grid'>")
     for e in tcrg_entries:
         fsa, primary_ch = e["fsa"], e["primary_peak_channel"]
-        e_combo = dict(e); e_combo["forced_ymax"] = group_y
+        e_combo = dict(e)
+        e_combo["forced_ymax"] = group_y
+        e_combo["forced_xmin"] = forced_xmin
+        e_combo["forced_xmax"] = forced_xmax
+        
         html_lines.append("<div class='combo-item'>")
         html_lines.append(f"<p class='sample-header'>{escape(e_combo['assay'])} – {escape(fsa.file_name)}</p>")
         try:
@@ -618,8 +700,9 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
 </div>
 </body></html>""")
         
-        analysis_name = get_active_analysis_name().capitalize()
-        out_html = assay_outdir / f"{dit}_{analysis_name}_Resultater.html"
+        analysis_name = get_active_analysis_name()
+        display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
+        out_html = assay_outdir / f"{dit}_{display_name}_Resultater.html"
         out_html.write_text("\n".join(html_lines), encoding="utf-8")
         print_green(f"[DIT] Lagret: {out_html}")
 

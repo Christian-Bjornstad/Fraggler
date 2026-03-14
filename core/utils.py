@@ -6,7 +6,7 @@ import re
 
 # Centralized Regex for Control identification
 CONTROL_PREFIX_RE = re.compile(r"^(PK1|PK2|PK|NK|RK|DIT|KTR)_", re.IGNORECASE)
-WATER_RE = re.compile(r"^(v|water|h2o)[_\-]?", re.IGNORECASE)
+WATER_RE = re.compile(r"^(v|water|h2o)([_\-]|(?=\.fsa)|$)", re.IGNORECASE)
 
 def strip_stage_prefix(name: str) -> str:
     """Removes the 5-digit prefix and 8-character hash from filenames."""

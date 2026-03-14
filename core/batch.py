@@ -104,23 +104,26 @@ def group_files_by_patient(fsa_files: List[Path], regex_pattern: str) -> Dict[st
         except Exception as e:
             log(f"[ERROR] Invalid regex '{regex_pattern}': {e}")
             
-    from core.utils import CONTROL_PREFIX_RE
+    from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
     qc_pattern = CONTROL_PREFIX_RE
 
     for f in sorted(fsa_files):
-        if qc_pattern.match(f.name):
+        # Use the stripped name for identification logic
+        clean_name = strip_stage_prefix(f.name)
+        
+        if qc_pattern.match(clean_name):
             grouped.setdefault("QC", []).append(f)
             continue
             
         pid = None
         if pattern:
-            match = pattern.search(f.name)
+            match = pattern.search(clean_name)
             if match:
                 pid = match.group()
         
         if not pid:
             # Fallback 1: Split by underscore and take first part
-            stem = f.stem
+            stem = Path(clean_name).stem
             parts = stem.split("_")
             if len(parts) > 1:
                 pid = parts[0]
@@ -186,13 +189,13 @@ def generate_jobs(
         if jobs:
             log(f"[INFO] Aggregated {len(all_fsa)} files into {len(jobs)} jobs.")
     else:
-        from core.utils import CONTROL_PREFIX_RE
+        from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
         qc_pattern = CONTROL_PREFIX_RE
         all_qc_files = []
         for folder in folders_to_scan:
             fsa_files = list(folder.glob("*.fsa"))
-            qc_files = [f for f in fsa_files if qc_pattern.match(f.name)]
-            pat_files = [f for f in fsa_files if not qc_pattern.match(f.name)]
+            qc_files = [f for f in fsa_files if qc_pattern.match(strip_stage_prefix(f.name))]
+            pat_files = [f for f in fsa_files if not qc_pattern.match(strip_stage_prefix(f.name))]
             
             all_qc_files.extend(qc_files)
             

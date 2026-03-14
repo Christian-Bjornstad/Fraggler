@@ -20,95 +20,37 @@ def detect_assay(name: str) -> str:
     lower = s.lower()
 
     # 1) SIZE LADDER synonymer
-    if (
-        "_sl_" in lower
-        or lower.endswith("_sl.fsa")
-        or "sizeladder" in lower
-        or "size_ladder" in lower
-        or "size-ladder" in lower
-        or "sladder" in lower
-    ):
+    if any(m in lower for m in ["_sl_", "sizeladder", "size_ladder", "size-ladder", "sladder"]) or lower.endswith("_sl.fsa"):
         return "SL"
 
-    # 2) MIX-deteksjon (robust)
-    mix_pat_beta = re.compile(
-        r"(tcrbeta|tcrb|trb)[\s\-_]*mix[\s\-_]*([abc])",
-        re.IGNORECASE,
-    )
-    mix_pat_gamma = re.compile(
-        r"(tcrg|trg)[\s\-_]*mix[\s\-_]*([ab])",
-        re.IGNORECASE,
-    )
-
-    m_beta = mix_pat_beta.search(s)
-    if m_beta:
-        mix_letter = m_beta.group(2).lower()
-        if mix_letter == "a":
-            return "TCRbA"
-        if mix_letter == "b":
-            return "TCRbB"
-        if mix_letter == "c":
-            return "TCRbC"
-
-    m_gamma = mix_pat_gamma.search(s)
-    if m_gamma:
-        mix_letter = m_gamma.group(2).lower()
-        if mix_letter == "a":
-            return "TCRgA"
-        if mix_letter == "b":
-            return "TCRgB"
-
-    # 3) TCRγ (LIZ) synonymer
-    if (
-        "tcrga" in lower or "tcrg_a" in lower or "tcrg-a" in lower
-        or "trga" in lower or "trg_a" in lower or "trg-a" in lower
-    ):
+    # 2) TCRγ (LIZ) - try specific patterns first
+    if any(m in lower for m in ["tcrga", "tcrg_a", "tcrg-a", "trga", "trg_a", "trg-a", "tcrg_mix_a", "tcrgmixa"]):
         return "TCRgA"
-
-    if (
-        "tcrgb" in lower or "tcrg_b" in lower or "tcrg-b" in lower
-        or "trgb" in lower or "trg_b" in lower or "trg-b" in lower
-    ):
+    if any(m in lower for m in ["tcrgb", "tcrg_b", "tcrg-b", "trgb", "trg_b", "trg-b", "tcrg_mix_b", "tcrgmixb"]):
         return "TCRgB"
 
-    # 4) TCRβ (ROX) synonymer
-    if (
-        "tcrba" in lower or "tcrb_a" in lower or "tcrb-a" in lower
-        or "trba" in lower or "trb_a" in lower or "trb-a" in lower
-    ):
+    # 3) TCRβ (ROX)
+    if any(m in lower for m in ["tcrba", "tcrb_a", "tcrb-a", "trba", "trb_a", "trb-a", "tcrb_mix_a", "tcrbmixa"]):
         return "TCRbA"
-
-    if (
-        "tcrbb" in lower or "tcrb_b" in lower or "tcrb-b" in lower
-        or "trbb" in lower or "trb_b" in lower or "trb-b" in lower
-    ):
+    if any(m in lower for m in ["tcrbb", "tcrb_b", "tcrb-b", "trbb", "trb_b", "trb-b", "tcrb_mix_b", "tcrbmixb"]):
         return "TCRbB"
-
-    if (
-        "tcrbc" in lower or "tcrb_c" in lower or "tcrb-c" in lower
-        or "trbc" in lower or "trb_c" in lower or "trb-c" in lower
-    ):
+    if any(m in lower for m in ["tcrbc", "tcrb_c", "tcrb-c", "trbc", "trb_c", "trb-c", "tcrb_mix_c", "tcrbmixc"]):
         return "TCRbC"
 
-    # 5) IgH-regionene
-    if "fr1" in lower:
-        return "FR1"
-    if "fr2" in lower:
-        return "FR2"
-    if "fr3" in lower:
-        return "FR3"
+    # 4) IgH-regionene
+    if "fr1" in lower: return "FR1"
+    if "fr2" in lower: return "FR2"
+    if "fr3" in lower: return "FR3"
 
-    # 6) DHJH-mikser
-    if "dhjh_d" in lower or "dhjhd" in lower or "dhjh_mixd" in lower or "dhjh_mix_d" in lower or "dhjhmixd" in lower:
+    # 5) DHJH-mikser
+    if any(m in lower for m in ["dhjh_d", "dhjhd", "dhjh_mixd", "dhjh_mix_d", "dhjhmixd"]):
         return "DHJH_D"
-    if "dhjh_e" in lower or "dhjhe" in lower or "dhjh_mixe" in lower or "dhjh_mix_e" in lower or "dhjhmixe" in lower:
+    if any(m in lower for m in ["dhjh_e", "dhjhe", "dhjh_mixe", "dhjh_mix_e", "dhjhmixe"]):
         return "DHJH_E"
 
-    # 7) LIZ IgK / KDE
-    if "igk" in lower:
-        return "IGK"
-    if "kde" in lower:
-        return "KDE"
+    # 6) LIZ IgK / KDE
+    if "igk" in lower: return "IGK"
+    if "kde" in lower: return "KDE"
 
     return "UNKNOWN"
 
