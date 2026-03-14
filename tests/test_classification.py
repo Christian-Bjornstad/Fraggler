@@ -1,8 +1,16 @@
 import unittest
 from pathlib import Path
 from core.classification import detect_assay, strip_stage_prefix, classify_fsa
+from config import APP_SETTINGS
 
 class TestClassification(unittest.TestCase):
+    def setUp(self):
+        self._active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
+        APP_SETTINGS["active_analysis"] = "clonality"
+
+    def tearDown(self):
+        APP_SETTINGS["active_analysis"] = self._active_analysis
+
     def test_detect_assay_sl(self):
         self.assertEqual(detect_assay("sample_sl.fsa"), "SL")
         self.assertEqual(detect_assay("sample_SIZELADDER.fsa"), "SL")
@@ -50,6 +58,22 @@ class TestClassification(unittest.TestCase):
         self.assertEqual(res[0], "IGK")
         self.assertEqual(res[1], "negative")
         self.assertEqual(res[2], "LIZ")
+
+    def test_detect_assay_dispatch_for_flt3(self):
+        APP_SETTINGS["active_analysis"] = "flt3"
+        self.assertEqual(detect_assay("patient_itd_ratio_p1.fsa"), "FLT3-ITD")
+
+    def test_classify_fsa_dispatch_for_flt3(self):
+        APP_SETTINGS["active_analysis"] = "flt3"
+        from unittest.mock import patch
+        from core.analyses.flt3 import classification as flt3_classification
+
+        with patch.object(flt3_classification, "get_injection_metadata", return_value={"injection_time": 3, "injection_voltage": 15}):
+            res = classify_fsa(Path("ivs-p001_itd_p1_ufort.fsa"))
+        self.assertIsNotNone(res)
+        self.assertEqual(res["group"], "positive_control")
+        self.assertEqual(res["parallel"], "p1")
+        self.assertEqual(res["injection_time"], 3)
 
 if __name__ == "__main__":
     unittest.main()

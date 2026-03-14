@@ -1,4 +1,11 @@
 import sys
+import os
+import tempfile
+from pathlib import Path
+
+_mpl_cache_root = Path(tempfile.gettempdir()) / "fraggler-mpl-cache"
+os.environ.setdefault("MPLCONFIGDIR", str(_mpl_cache_root))
+Path(os.environ["MPLCONFIGDIR"]).mkdir(parents=True, exist_ok=True)
 
 
 class bcolors:
@@ -43,17 +50,14 @@ def print_fail(text, prefix="[ERROR]"):
 def print_blue(text, prefix="[SUMMARIZE]"):
     print(f"{bcolors.OKBLUE}{prefix}: {text}{bcolors.ENDC}")
 
-
-print_green(f"Starting fraggler, importing libraries...")
-
 import numpy as np
+import matplotlib
 from sklearn.preprocessing import PolynomialFeatures
 from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import SplineTransformer
 from sklearn.metrics import mean_squared_error, r2_score
 from scipy.interpolate import UnivariateSpline
-from pathlib import Path
 from scipy import sparse
 from scipy.sparse import linalg
 from numpy.linalg import norm
@@ -1455,9 +1459,18 @@ def parse_fsa(
 
 
 ### REPORT ###
-pn.extension("tabulator")
-pn.extension("vega", sizing_mode="stretch_width", template="fast")
-pn.widgets.Tabulator.theme = "modern"
+_REPORT_EXTENSIONS_READY = False
+
+
+def _ensure_report_extensions() -> None:
+    """Initialize Panel extensions only when report views are requested."""
+    global _REPORT_EXTENSIONS_READY
+    if _REPORT_EXTENSIONS_READY:
+        return
+    pn.extension("tabulator")
+    pn.extension("vega", sizing_mode="stretch_width", template="fast")
+    pn.widgets.Tabulator.theme = "modern"
+    _REPORT_EXTENSIONS_READY = True
 
 
 def header(
@@ -1470,6 +1483,7 @@ def header(
     """
     Template for markdown header like block
     """
+    _ensure_report_extensions()
     return pn.pane.Markdown(
         f"""
         {text}
@@ -1611,6 +1625,7 @@ def generate_area_report(fsa):
     """
     Generates the area report
     """
+    _ensure_report_extensions()
 
     ### ----- Raw Data ----- ###
     channel_header = header(
@@ -1736,6 +1751,7 @@ def generate_no_peaks_report(fsa):
     Generates the no peak report if the area or peak report fails for some reason.
     Lets the user inspect the raw data channels.
     """
+    _ensure_report_extensions()
     channel_header = header(
         text="## Plot of channels",
         bg_color="#04c273",

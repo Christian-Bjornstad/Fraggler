@@ -3,6 +3,7 @@ Fraggler Diagnostics — Main Entry Point for PyQt6 UI
 """
 import sys
 import os
+from pathlib import Path
 
 # Force X11 (xcb) on Linux to avoid Wayland symbol mismatches (e.g., wl_proxy_marshal_flags)
 if sys.platform == "linux":
@@ -10,16 +11,20 @@ if sys.platform == "linux":
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
-from pathlib import Path
 
 from gui_qt.main_window import MainWindow
+from core.log import log
 
-# ── Web Server Integration ──
-import threading
-import time
+LEGACY_PANEL_HOST = "localhost"
+LEGACY_PANEL_PORT = 5078
+LEGACY_PANEL_ENABLED = os.environ.get("FRAGGLER_ENABLE_LEGACY_PANEL", "").lower() in {
+    "1",
+    "true",
+    "yes",
+}
 
 def start_panel_server():
-    """Start the Panel server in a separate thread."""
+    """Start the legacy Panel server when explicitly requested."""
     try:
         import panel as pn
         # Resolve path to app.py relative to this file
@@ -27,21 +32,24 @@ def start_panel_server():
         app_path = os.path.join(bundle_dir, "app.py")
         
         if not os.path.exists(app_path):
-            print(f"WARN: Could not find app.py at {app_path}. Server not started.")
+            log(f"[WARN] Could not find legacy app.py at {app_path}. Server not started.")
             return
 
-        print(f"✦ Starting background web server at http://{HOST}:{PORT}/app")
+        log(
+            f"[INFO] Starting legacy Panel server at "
+            f"http://{LEGACY_PANEL_HOST}:{LEGACY_PANEL_PORT}/app"
+        )
 
         pn.serve(
             {"app": app_path},
-            port=PORT,
-            address=HOST,
+            port=LEGACY_PANEL_PORT,
+            address=LEGACY_PANEL_HOST,
             show=False,
             title="Fraggler Diagnostics",
             verbose=False,
         )
     except Exception as e:
-        print(f"ERROR: Failed to start web server: {e}")
+        log(f"[ERROR] Failed to start legacy web server: {e}")
 
 def exception_hook(exctype, value, tb):
     """Global exception handler to prevent silent crashes in slots."""
@@ -78,11 +86,10 @@ def main():
         app_icon = QIcon(str(icon_path))
         app.setWindowIcon(app_icon)
     
-    # Check if Inter font is available, else we fallback automatically defined in styles.py
-    
-    # Start web server in background thread
-    server_thread = threading.Thread(target=start_panel_server, daemon=True)
-    server_thread.start()
+    if LEGACY_PANEL_ENABLED:
+        import threading
+        server_thread = threading.Thread(target=start_panel_server, daemon=True)
+        server_thread.start()
 
     window = MainWindow()
     window.resize(1200, 800)

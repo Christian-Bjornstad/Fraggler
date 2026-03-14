@@ -2,8 +2,20 @@
 Fraggler Diagnostics — Pipeline Dispatcher.
 """
 from __future__ import annotations
+import inspect
 from pathlib import Path
 from core.analyses.registry import get_analysis_module
+
+def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
+    """Compatibility wrapper for tests and shared callers."""
+    mod = get_analysis_module("pipeline")
+    scanner = getattr(mod, "_scan_files", None)
+    if scanner is None:
+        return []
+    params = inspect.signature(scanner).parameters
+    if "mode" in params:
+        return scanner(fsa_dir, mode=mode)
+    return scanner(fsa_dir)
 
 def run_pipeline(
     fsa_dir: Path,

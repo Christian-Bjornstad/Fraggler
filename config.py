@@ -7,8 +7,10 @@ Compatible with Python 3.10+.
 from __future__ import annotations
 
 import yaml
+import copy
+import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Mapping
 
 # ============================================================
 # PATHS
@@ -23,6 +25,12 @@ SETTINGS_PATH = Path.home() / ".fraggler_gui.yaml"
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "theme": "default",  # "default" | "dark"
     "active_analysis": "clonality",
+    "general": {
+        "author": "OUS",
+        "default_output": "",
+    },
+    # Keep the legacy top-level key for backward compatibility.
+    "default_output": "",
     "pipeline": {
         "input_dir": str(Path.home()),
         "output_base": str(Path.home()),
@@ -67,7 +75,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
     """Recursively merge *override* into *base*."""
-    result = base.copy()
+    result = copy.deepcopy(base)
     for k, v in override.items():
         if isinstance(v, dict) and isinstance(result.get(k), dict):
             result[k] = _deep_update(result[k], v)
@@ -75,55 +83,140 @@ def _deep_update(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, An
             result[k] = v
     return result
 
-import os
+def _coerce_env_value(value: str) -> Any:
+    lower = value.strip().lower()
+    if lower in {"true", "false"}:
+        return lower == "true"
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def _apply_env_overrides(settings: Dict[str, Any], env: Mapping[str, str]) -> None:
+    """Apply FRAGGLER_* environment overrides to nested settings."""
+    def _assign(target: Dict[str, Any], schema: Any, parts: list[str], raw_value: str) -> None:
+        if not parts:
+            return
+
+        if not isinstance(schema, dict):
+            target["_".join(parts)] = _coerce_env_value(raw_value)
+            return
+
+        for width in range(len(parts), 0, -1):
+            key = "_".join(parts[:width])
+            if key not in schema:
+                continue
+
+            if width == len(parts) or not isinstance(schema.get(key), dict):
+                target[key] = _coerce_env_value(raw_value)
+            else:
+                if key not in target or not isinstance(target.get(key), dict):
+                    target[key] = {}
+                _assign(target[key], schema[key], parts[width:], raw_value)
+            return
+
+        target["_".join(parts)] = _coerce_env_value(raw_value)
+
+    for key, value in env.items():
+        if not key.startswith("FRAGGLER_"):
+            continue
+
+        parts = [part.lower() for part in key.split("_")[1:] if part]
+        if not parts:
+            continue
+
+        _assign(settings, DEFAULT_SETTINGS, parts, value)
+
+
+def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
+    """Fold legacy keys into the canonical settings structure."""
+    general = settings.setdefault("general", {})
+    batch = settings.setdefault("batch", {})
+    pipeline = settings.setdefault("pipeline", {})
+
+    legacy_default_output = settings.get("default_output", "")
+    if legacy_default_output and not general.get("default_output"):
+        general["default_output"] = legacy_default_output
+
+    default_output = general.get("default_output", "") or legacy_default_output
+    if default_output:
+        if not batch.get("output_base") or batch.get("output_base") == DEFAULT_SETTINGS["batch"]["output_base"]:
+            batch["output_base"] = default_output
+        if not pipeline.get("output_base") or pipeline.get("output_base") == DEFAULT_SETTINGS["pipeline"]["output_base"]:
+            pipeline["output_base"] = default_output
+
+    return settings
 
 def _validate_settings(settings: Dict[str, Any]) -> None:
     """Basic validation for critical settings."""
     pipeline = settings.get("pipeline", {})
     if not isinstance(pipeline.get("out_folder_name"), str):
         pipeline["out_folder_name"] = "ASSAY_REPORTS"
+    for key in ("input_dir", "output_base", "assay_filter_substring"):
+        if key in pipeline and not isinstance(pipeline.get(key), str):
+            pipeline[key] = str(pipeline.get(key, ""))
+    if pipeline.get("mode") not in {"all", "controls", "custom"}:
+        pipeline["mode"] = "all"
     
     # Ensure min_r2 is within 0-1 range
     qc = settings.get("qc", {})
     if not (0 <= qc.get("min_r2_ok", 0.995) <= 1):
         qc["min_r2_ok"] = 0.995
+    if not (0 <= qc.get("min_r2_warn", 0.990) <= 1):
+        qc["min_r2_warn"] = 0.990
 
-def load_settings() -> Dict[str, Any]:
+    batch = settings.get("batch", {})
+    if not isinstance(batch.get("base_input_dir"), str):
+        batch["base_input_dir"] = str(Path.home())
+    if not isinstance(batch.get("output_base"), str):
+        batch["output_base"] = str(Path.home())
+    if not isinstance(batch.get("patient_id_regex"), str):
+        batch["patient_id_regex"] = r"\d{2}OUM\d{5}"
+
+    general = settings.get("general", {})
+    if not isinstance(general.get("author", "OUS"), str):
+        general["author"] = "OUS"
+    if not isinstance(general.get("default_output", ""), str):
+        general["default_output"] = ""
+
+    settings["default_output"] = general.get("default_output", "")
+
+def load_settings(
+    settings_path: Path | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Dict[str, Any]:
     """Load settings from YAML, merged over defaults, then env vars."""
-    settings = DEFAULT_SETTINGS.copy()
+    settings = copy.deepcopy(DEFAULT_SETTINGS)
+    settings_path = settings_path or SETTINGS_PATH
+    env = env or os.environ
     
     # 1) Load from YAML if exists
-    if SETTINGS_PATH.exists():
+    if settings_path.exists():
         try:
-            with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
+            with open(settings_path, "r", encoding="utf-8") as f:
                 user = yaml.safe_load(f) or {}
             settings = _deep_update(settings, user)
         except Exception:
             pass
-            
-    # 2) Override with Environment Variables (e.g. FRAGGLER_THEME=dark)
-    # Mapping: FRAGGLER_CATEGORY_KEY
-    for key, value in os.environ.items():
-        if key.startswith("FRAGGLER_"):
-            parts = key.split("_")[1:] # E.g. ["PIPELINE", "INPUT", "DIR"]
-            if len(parts) == 1:
-                settings[parts[0].lower()] = value
-            elif len(parts) == 2:
-                cat, k = parts[0].lower(), parts[1].lower()
-                if cat in settings and isinstance(settings[cat], dict):
-                    settings[cat][k] = value
 
+    _apply_env_overrides(settings, env)
+    settings = _migrate_legacy_settings(settings)
     _validate_settings(settings)
     return settings
 
 
-def save_settings(settings: Dict[str, Any]) -> None:
+def save_settings(settings: Dict[str, Any], settings_path: Path | None = None) -> None:
     """Persist settings to YAML."""
+    settings_path = settings_path or SETTINGS_PATH
     try:
-        # Avoid saving ephemeral env overrides back to file if desired, 
-        # but here we just save the current active state.
-        with open(SETTINGS_PATH, "w", encoding="utf-8") as f:
-            yaml.safe_dump(settings, f, sort_keys=False, allow_unicode=True)
+        payload = copy.deepcopy(settings)
+        payload = _migrate_legacy_settings(payload)
+        payload["default_output"] = payload.get("general", {}).get("default_output", "")
+        with open(settings_path, "w", encoding="utf-8") as f:
+            yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
     except Exception:
         pass
 

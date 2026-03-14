@@ -15,8 +15,6 @@ from typing import Dict, List, Any
 
 from core.log import log
 from core.runner import run_pipeline_job, run_pipeline_job_collect, run_qc_job, run_dit_job
-from core.log import log
-from core.runner import run_pipeline_job, run_pipeline_job_collect, run_qc_job, run_dit_job
 
 # Lazy load fraggler modules to prevent global Panel state pollution on import
 

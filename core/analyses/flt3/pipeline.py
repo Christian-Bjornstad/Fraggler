@@ -27,21 +27,16 @@ from core.analysis import (
 from core.plotting_mpl import compute_zoom_ymax
 from core.html_reports import (
     extract_dit_from_name,
-    build_dit_html_reports,
 )
-from core.utils import is_water_file
+from core.analyses.shared_pipeline import (
+    finalize_pipeline_run,
+    normalize_pipeline_paths,
+    scan_fsa_files,
+)
 
-def _scan_files(fsa_dir: Path) -> list[Path]:
+def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
     """Scans for .fsa files, filtering out water files."""
-    if not fsa_dir.exists():
-        print_warning(f"FSA-katalog finnes ikke: {fsa_dir}")
-        return []
-
-    fsa_files = [
-        p for p in sorted(fsa_dir.glob("*.fsa"))
-        if not is_water_file(p.name)
-    ]
-    return fsa_files
+    return scan_fsa_files(fsa_dir, mode=mode)
 
 def _filter_best_injections(classified_files: list[tuple[Path, dict]]) -> list[tuple[Path, dict]]:
     """
@@ -340,11 +335,9 @@ def run_pipeline(
     """
     Kjør FLT3-pipeline på alle .fsa-filer i fsa_dir.
     """
-    fsa_dir = Path(fsa_dir).expanduser()
-    base_outdir = Path(base_outdir or fsa_dir).expanduser()
-    assay_dir = base_outdir / (assay_folder_name or "REPORTS")
+    fsa_dir, assay_dir = normalize_pipeline_paths(fsa_dir, base_outdir, assay_folder_name)
 
-    raw_files = _scan_files(fsa_dir)
+    raw_files = _scan_files(fsa_dir, mode=mode)
     classified = []
     for p in raw_files:
         c = classify_fsa(p)
@@ -416,7 +409,10 @@ def run_pipeline(
     # Generate QC Report
     generate_flt3_qc_report(entries, assay_dir)
 
-    if make_dit_reports and mode != "controls":
-        build_dit_html_reports(entries, assay_dir)
-
-    return entries if return_entries else None
+    return finalize_pipeline_run(
+        entries,
+        assay_dir,
+        return_entries=return_entries,
+        make_dit_reports=make_dit_reports,
+        mode=mode,
+    )

@@ -7,6 +7,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from core.analyses.registry import get_analysis_module
+from core.utils import strip_stage_prefix
 
 def detect_assay(name: str) -> str:
     """Delegates assay detection to the active analysis module."""

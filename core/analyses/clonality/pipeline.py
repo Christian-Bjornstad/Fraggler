@@ -36,31 +36,20 @@ from core.plotting_plotly import (
 from core.plotting_mpl import compute_zoom_ymax
 from core.html_reports import (
     extract_dit_from_name,
-    build_dit_html_reports,
 )
-from core.utils import strip_stage_prefix, is_water_file, is_control_file
+from core.analyses.shared_pipeline import (
+    finalize_pipeline_run,
+    normalize_pipeline_paths,
+    scan_fsa_files,
+)
+from core.utils import strip_stage_prefix
 
 
 def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
     """Scans for .fsa files, filtering out water files and optionally non-controls."""
-    if not fsa_dir.exists():
-        print_warning(f"FSA-katalog finnes ikke: {fsa_dir}")
-        return []
-
-    fsa_files = [
-        p for p in sorted(fsa_dir.glob("*.fsa"))
-        if not is_water_file(p.name)
-    ]
-
-    if mode == "controls":
-        fsa_files = [p for p in fsa_files if is_control_file(p.name)]
-        print_green(f"[INFO] Controls mode: {len(fsa_files)} control files selected.")
-
-    if not fsa_files:
-        print_warning(f"Fant ingen .fsa-filer i {fsa_dir}.")
-    else:
+    fsa_files = scan_fsa_files(fsa_dir, mode=mode)
+    if fsa_files:
         print_green(f"Fant {len(fsa_files)} .fsa-filer: {[p.name for p in fsa_files]}")
-    
     return fsa_files
 
 
@@ -172,10 +161,7 @@ def run_pipeline(
     """
     Kjør full Fraggler-pipeline på alle .fsa-filer i fsa_dir.
     """
-    fsa_dir = Path(fsa_dir).expanduser()
-    base_outdir = Path(base_outdir or fsa_dir).expanduser()
-    assay_folder_name = (assay_folder_name or "REPORTS").strip()
-    assay_dir = base_outdir / assay_folder_name
+    fsa_dir, assay_dir = normalize_pipeline_paths(fsa_dir, base_outdir, assay_folder_name)
 
     # 1) Scan
     fsa_files = _scan_files(fsa_dir, mode)
@@ -188,8 +174,10 @@ def run_pipeline(
         print_warning("Ingen gyldige entries etter analyse – avslutter.")
         return [] if return_entries else None
 
-    # 3) DIT Reports
-    if make_dit_reports and mode != "controls":
-        build_dit_html_reports(entries, assay_dir)
-
-    return entries if return_entries else None
+    return finalize_pipeline_run(
+        entries,
+        assay_dir,
+        return_entries=return_entries,
+        make_dit_reports=make_dit_reports,
+        mode=mode,
+    )

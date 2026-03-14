@@ -24,17 +24,17 @@ def detect_assay(name: str) -> str:
         return "SL"
 
     # 2) TCRγ (LIZ) - try specific patterns first
-    if any(m in lower for m in ["tcrga", "tcrg_a", "tcrg-a", "trga", "trg_a", "trg-a", "tcrg_mix_a", "tcrgmixa"]):
+    if any(m in lower for m in ["tcrga", "tcrg a", "tcrg_a", "tcrg-a", "trga", "trg a", "trg_a", "trg-a", "tcrg_mix_a", "tcrg-mix-a", "tcrg mix a", "tcrgmixa", "trg_mix_a", "trg-mix-a", "trg mix a", "trgmixa"]):
         return "TCRgA"
-    if any(m in lower for m in ["tcrgb", "tcrg_b", "tcrg-b", "trgb", "trg_b", "trg-b", "tcrg_mix_b", "tcrgmixb"]):
+    if any(m in lower for m in ["tcrgb", "tcrg b", "tcrg_b", "tcrg-b", "trgb", "trg b", "trg_b", "trg-b", "tcrg_mix_b", "tcrg-mix-b", "tcrg mix b", "tcrgmixb", "trg_mix_b", "trg-mix-b", "trg mix b", "trgmixb"]):
         return "TCRgB"
 
     # 3) TCRβ (ROX)
-    if any(m in lower for m in ["tcrba", "tcrb_a", "tcrb-a", "trba", "trb_a", "trb-a", "tcrb_mix_a", "tcrbmixa"]):
+    if any(m in lower for m in ["tcrba", "tcrb a", "tcrb_a", "tcrb-a", "trba", "trb a", "trb_a", "trb-a", "tcrb_mix_a", "tcrb-mix-a", "tcrb mix a", "tcrbmixa", "trb_mix_a", "trb-mix-a", "trb mix a", "trbmixa"]):
         return "TCRbA"
-    if any(m in lower for m in ["tcrbb", "tcrb_b", "tcrb-b", "trbb", "trb_b", "trb-b", "tcrb_mix_b", "tcrbmixb"]):
+    if any(m in lower for m in ["tcrbb", "tcrb b", "tcrb_b", "tcrb-b", "trbb", "trb b", "trb_b", "trb-b", "tcrb_mix_b", "tcrb-mix-b", "tcrb mix b", "tcrbmixb", "trb_mix_b", "trb-mix-b", "trb mix b", "trbmixb"]):
         return "TCRbB"
-    if any(m in lower for m in ["tcrbc", "tcrb_c", "tcrb-c", "trbc", "trb_c", "trb-c", "tcrb_mix_c", "tcrbmixc"]):
+    if any(m in lower for m in ["tcrbc", "tcrb c", "tcrb_c", "tcrb-c", "trbc", "trb c", "trb_c", "trb-c", "tcrb_mix_c", "tcrb-mix-c", "tcrb mix c", "tcrbmixc", "trb_mix_c", "trb-mix-c", "trb mix c", "trbmixc"]):
         return "TCRbC"
 
     # 4) IgH-regionene
