@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import copy
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, 
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
@@ -192,10 +193,10 @@ class LadderAdjustmentDialog(QDialog):
             return
             
         from core.analysis import apply_manual_ladder_mapping, compute_ladder_qc_metrics
-        orig_best = self.fsa.best_size_standard
         try:
-            apply_manual_ladder_mapping(self.fsa, self.mapping)
-            metrics = compute_ladder_qc_metrics(self.fsa)
+            preview_fsa = copy.deepcopy(self.fsa)
+            preview_fsa = apply_manual_ladder_mapping(preview_fsa, self.mapping)
+            metrics = compute_ladder_qc_metrics(preview_fsa)
             r2 = metrics['r2']
             self.stats_label.setText(f"Preview R²: {r2:.6f}")
             if r2 > 0.999:
@@ -204,8 +205,6 @@ class LadderAdjustmentDialog(QDialog):
                 self.stats_label.setStyleSheet("color: #f59e0b;")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Could not fit: {e}")
-        finally:
-            self.fsa.best_size_standard = orig_best
 
     def get_mapping(self):
         return self.mapping

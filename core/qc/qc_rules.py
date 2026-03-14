@@ -77,6 +77,7 @@ class QCRules:
 
     # Peak search vinduer (bp)
     sample_peak_window_bp: float = 2.0
+    sample_peak_window_bp_fallback: float = 4.0
     ladder_peak_window_bp: float = 2.0
 
     # SL signal

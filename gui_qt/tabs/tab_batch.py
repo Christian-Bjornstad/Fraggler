@@ -103,6 +103,8 @@ class TabBatch(QWidget):
         self.btn_run.setObjectName("PrimaryButton")
         self.btn_run.setEnabled(False)
         self.btn_open = QPushButton("Open Output")
+        self.btn_adjust_ladder = QPushButton("Adjust Ladder")
+        self.btn_adjust_ladder.setEnabled(False)
         
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -113,6 +115,7 @@ class TabBatch(QWidget):
         a_layout.addWidget(self.btn_scan)
         a_layout.addWidget(self.btn_run)
         a_layout.addWidget(self.btn_open)
+        a_layout.addWidget(self.btn_adjust_ladder)
         a_layout.addStretch()
         
         # 3. Jobs Table
@@ -145,6 +148,8 @@ class TabBatch(QWidget):
         self.btn_scan.clicked.connect(self.on_scan)
         self.btn_run.clicked.connect(self.on_run)
         self.btn_open.clicked.connect(self.on_open_output)
+        self.btn_adjust_ladder.clicked.connect(self._on_adjust_ladder)
+        self.table.itemSelectionChanged.connect(self._update_action_buttons)
         
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self.on_context_menu)
@@ -237,6 +242,11 @@ class TabBatch(QWidget):
             self.table.setItem(row_idx, 2, item_src)
             self.table.setItem(row_idx, 3, item_files)
             self.table.setItem(row_idx, 4, item_state)
+        self._update_action_buttons()
+
+    def _update_action_buttons(self):
+        selected_count = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
+        self.btn_adjust_ladder.setEnabled(selected_count == 1)
             
     def on_scan(self):
         from core.batch import generate_jobs

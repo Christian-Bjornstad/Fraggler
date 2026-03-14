@@ -9,7 +9,12 @@ from html import escape
 import json
 
 from core.qc.qc_rules import QCRules
-from core.qc.qc_markers import markers_for_entry, find_peak_near_bp, control_id_from_filename
+from core.qc.qc_markers import (
+    control_id_from_filename,
+    find_peak_near_bp,
+    find_peak_near_bp_with_fallback,
+    markers_for_entry,
+)
 from core.assay_config import (
     ASSAY_REFERENCE_RANGES,
     CHANNEL_COLORS,
@@ -152,13 +157,23 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     if marker_specs:
         for m in marker_specs:
             ch = primary_ch if m["channel"] == "primary" else m["channel"]
-            res = find_peak_near_bp(
-                fsa=fsa,
-                channel=ch,
-                target_bp=float(m["expected_bp"]),
-                window_bp=float(m["window_bp"]),
-                baseline_correct=True
-            )
+            if m["kind"] == "sample":
+                res = find_peak_near_bp_with_fallback(
+                    fsa=fsa,
+                    channel=ch,
+                    target_bp=float(m["expected_bp"]),
+                    window_bp=float(m["window_bp"]),
+                    fallback_window_bp=float(getattr(rules, "sample_peak_window_bp_fallback", m["window_bp"])),
+                    baseline_correct=True,
+                )
+            else:
+                res = find_peak_near_bp(
+                    fsa=fsa,
+                    channel=ch,
+                    target_bp=float(m["expected_bp"]),
+                    window_bp=float(m["window_bp"]),
+                    baseline_correct=True,
+                )
             res2 = dict(m)
             res2.update(res)
             marker_results.append(res2)
@@ -180,6 +195,8 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
                 f"{mr['name']}: exp {mr['expected_bp']:.1f} → {mr['found_bp']:.2f} "
                 f"(Δ {delta:+.2f})<br>H={mr['height']:.0f}, A={mr['area']:.0f}"
             )
+            if mr.get("search_mode") == "fallback":
+                txt += f"<br>Fallback window used: ±{float(mr.get('search_window_bp', 0.0)):.1f} bp"
             if mr["kind"] == "ladder":
                 xs_ladder.append(mr["found_bp"]); ys_ladder.append(mr["height"]); text_ladder.append(txt)
             else:

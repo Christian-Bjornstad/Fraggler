@@ -7,9 +7,11 @@ SL area metrics, local-maxima helpers, and running-baseline estimation.
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 
 import numpy as np
 import pandas as pd
+from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import mean_squared_error, r2_score
 
 import json
@@ -43,6 +45,7 @@ BASELINE_QUANTILE = 0.10
 PEAK_MIN_HEIGHT = 800.0
 YMAX_PADDING_FACTOR = 1.15
 MIN_R2_QUALITY = 0.998  # Post-fit quality gate
+LADDER_CANDIDATE_COUNT = 5
 
 
 def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
@@ -97,6 +100,64 @@ def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
     except Exception as e:
         print_warning(f"[{label}] Polynomial refinement feilet for {fsa_path.name}: {e}")
         return None
+
+
+def _rank_size_standard_combinations(fsa: FsaFile) -> list[np.ndarray]:
+    """Return the smoothest ladder candidates, matching the original spline heuristic."""
+    combinations = getattr(fsa, "best_size_standard_combinations", None)
+    if combinations is None or getattr(combinations, "empty", True):
+        return []
+
+    ranked = (
+        combinations.assign(
+            der=lambda x: [
+                UnivariateSpline(fsa.ladder_steps, y, s=0).derivative(n=2)
+                for y in x.combinations
+            ]
+        )
+        .assign(max_value=lambda x: [max(abs(y(fsa.ladder_steps))) for y in x.der])
+        .sort_values("max_value", ascending=True)
+    )
+    return [
+        np.asarray(row.combinations, dtype=float)
+        for row in ranked.head(LADDER_CANDIDATE_COUNT).itertuples()
+    ]
+
+
+def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float]:
+    metrics = compute_ladder_qc_metrics(fsa)
+    return (
+        float(metrics.get("mean_abs_error_bp", float("inf"))),
+        float(metrics.get("max_abs_error_bp", float("inf"))),
+        -float(metrics.get("r2", float("-inf"))),
+    )
+
+
+def _select_best_ladder_candidate(fsa: FsaFile) -> FsaFile | None:
+    """Fit the top smooth candidates and keep the best actual ladder fit."""
+    ranked_combinations = _rank_size_standard_combinations(fsa)
+    if not ranked_combinations:
+        return None
+
+    best_fit = None
+    best_score = None
+
+    for combo in ranked_combinations:
+        trial = copy.deepcopy(fsa)
+        trial.best_size_standard = combo
+        try:
+            trial = fit_size_standard_to_ladder(trial)
+        except Exception:
+            continue
+        if not getattr(trial, "fitted_to_model", False):
+            continue
+
+        score = _candidate_fit_score(trial)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_fit = trial
+
+    return best_fit
 
 
 # ==================================================================
@@ -204,13 +265,18 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
             if best is None or best.shape[0] == 0:
                 continue
                 
-            fsa = calculate_best_combination_of_size_standard_peaks(fsa)
+            selected_fit = _select_best_ladder_candidate(fsa)
+            if selected_fit is not None:
+                fsa = selected_fit
+            else:
+                fsa = calculate_best_combination_of_size_standard_peaks(fsa)
             if best_fallback_fsa is None:
                 import copy
                 best_fallback_fsa = copy.deepcopy(fsa) 
             
             try:
-                fsa = fit_size_standard_to_ladder(fsa)
+                if not getattr(fsa, "fitted_to_model", False):
+                    fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     # Quality gate: check R² and refine if needed
                     qc = compute_ladder_qc_metrics(fsa)
@@ -314,13 +380,18 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
             if best is None or best.shape[0] == 0:
                 continue
                 
-            fsa = calculate_best_combination_of_size_standard_peaks(fsa)
+            selected_fit = _select_best_ladder_candidate(fsa)
+            if selected_fit is not None:
+                fsa = selected_fit
+            else:
+                fsa = calculate_best_combination_of_size_standard_peaks(fsa)
             if best_fallback_fsa is None:
                 import copy
                 best_fallback_fsa = copy.deepcopy(fsa)
             
             try:
-                fsa = fit_size_standard_to_ladder(fsa)
+                if not getattr(fsa, "fitted_to_model", False):
+                    fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     # Quality gate: check R² and refine if needed
                     qc = compute_ladder_qc_metrics(fsa)
@@ -471,8 +542,11 @@ def apply_manual_ladder_mapping(fsa: FsaFile, mapping: dict[int, int]) -> FsaFil
     if ss_peaks is None:
         raise ValueError("No size standard peaks found in FsaFile.")
     
-    # Initialize best_size_standard with zeros
-    selected_peaks = np.zeros_like(ladder_steps, dtype=int)
+    current = getattr(fsa, "best_size_standard", None)
+    if current is not None and len(current) == len(ladder_steps):
+        selected_peaks = np.asarray(current, dtype=float).copy()
+    else:
+        selected_peaks = np.full(len(ladder_steps), np.nan, dtype=float)
     
     for step_idx, peak_idx in mapping.items():
         if step_idx < 0 or step_idx >= len(ladder_steps):
@@ -480,12 +554,21 @@ def apply_manual_ladder_mapping(fsa: FsaFile, mapping: dict[int, int]) -> FsaFil
         if peak_idx < 0 or peak_idx >= len(ss_peaks):
             continue
         selected_peaks[step_idx] = ss_peaks[peak_idx]
-        
+
+    missing = np.isnan(selected_peaks)
+    if np.any(missing):
+        raise ValueError("Manual ladder mapping is incomplete. Start from an auto-fit or map every missing ladder step.")
+
+    if np.any(np.diff(selected_peaks) <= 0):
+        raise ValueError("Selected ladder peaks must be strictly increasing in time.")
+
     fsa.best_size_standard = selected_peaks
-    
+
     # Re-run fitting
     fsa = fit_size_standard_to_ladder(fsa)
-    
+    if not getattr(fsa, "fitted_to_model", False):
+        raise ValueError("Manual ladder mapping did not produce a valid fit.")
+
     return fsa
 
 

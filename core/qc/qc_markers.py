@@ -318,4 +318,66 @@ def find_peak_near_bp(fsa, channel: str, target_bp: float, window_bp: float, bas
     height = float(y[j])
     area = float(np.nansum(y))
 
-    return {"ok": True, "found_bp": found_bp, "height": height, "area": area}
+    return {
+        "ok": True,
+        "found_bp": found_bp,
+        "height": height,
+        "area": area,
+        "search_window_bp": float(window_bp),
+        "search_mode": "primary",
+    }
+
+
+def find_peak_near_bp_with_fallback(
+    fsa,
+    channel: str,
+    target_bp: float,
+    window_bp: float,
+    fallback_window_bp: float | None = None,
+    baseline_correct: bool = True,
+):
+    """Retry with a wider window when the peak is missed or sits on the window edge."""
+    primary = find_peak_near_bp(
+        fsa=fsa,
+        channel=channel,
+        target_bp=target_bp,
+        window_bp=window_bp,
+        baseline_correct=baseline_correct,
+    )
+    fallback_window_bp = float(fallback_window_bp or window_bp)
+    if fallback_window_bp <= float(window_bp):
+        return primary
+
+    fallback = find_peak_near_bp(
+        fsa=fsa,
+        channel=channel,
+        target_bp=target_bp,
+        window_bp=fallback_window_bp,
+        baseline_correct=baseline_correct,
+    )
+    if not fallback.get("ok", False):
+        return primary
+
+    fallback["search_mode"] = "fallback"
+    fallback["search_window_bp"] = float(fallback_window_bp)
+
+    if not primary.get("ok", False):
+        fallback["fallback_from_window_bp"] = float(window_bp)
+        return fallback
+
+    primary_delta = abs(float(primary["found_bp"]) - float(target_bp))
+    fallback_delta = abs(float(fallback["found_bp"]) - float(target_bp))
+    if fallback_delta < primary_delta:
+        fallback["fallback_from_window_bp"] = float(window_bp)
+        return fallback
+
+    primary_height = float(primary.get("height", 0.0) or 0.0)
+    fallback_height = float(fallback.get("height", 0.0) or 0.0)
+    if primary_height <= 0:
+        primary_height = 1.0
+    if fallback_height >= (primary_height * 2.0):
+        fallback["fallback_from_window_bp"] = float(window_bp)
+        fallback["search_mode"] = "fallback"
+        return fallback
+
+    return primary
