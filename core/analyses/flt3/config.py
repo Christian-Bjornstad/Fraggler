@@ -18,7 +18,7 @@ ASSAY_CONFIG = {
         "trace_channels": ["DATA3"],
         "peak_channels": ["DATA3"],
         "bp_min": 50.0,
-        "bp_max": 200.0,
+        "bp_max": 250.0,
         "wt_bp": 80.0,
         "mut_bp": 129.0,
         "wt_range": (76.0, 83.5),
@@ -51,12 +51,12 @@ ASSAY_DISPLAY_ORDER = ["FLT3-ITD", "FLT3-D835", "NPM1"]
 NONSPECIFIC_PEAKS = {}
 ASSAY_REFERENCE_RANGES = {
     "FLT3-ITD": [(300.0, 1000.0)],
-    "FLT3-D835": [(80.0, 80.0), (129.0, 129.0)],
+    "FLT3-D835": [(50.0, 250.0)],
     "NPM1": [(299.0, 301.0), (303.0, 305.0)],
 }
 ASSAY_REFERENCE_LABEL = {
     "FLT3-ITD": "Analysevindu: 300-1000 bp. Villtype forventet rundt 330 bp, mutert >335 bp.",
-    "FLT3-D835": "Villtype: 80 bp, Mutert: 129 bp",
+    "FLT3-D835": "Analysevindu: 50-250 bp. Villtype: 80 bp, Mutert >129 bp.",
     "NPM1": "Villtype: 299/300-301 bp, Mutert: 303-305 bp",
 }
 

@@ -81,7 +81,22 @@ def _peak_area_half_width_bp(assay: str, label: str, center_bp: float) -> float:
         if abs(center_bp - 150.0) <= 6.0:
             return 0.8
         return 0.8
+    if assay == "FLT3-ITD":
+        if label == "WT" or abs(center_bp - 330.0) <= 8.0:
+            return 2.0
+        if label in {"ITD", "MUT"} or center_bp >= 335.0:
+            return 1.0
+        return 2.0
     return 5.0
+
+
+def _resolve_peak_area(assay: str, combined_area: float, channel_areas: dict[str, float]) -> float:
+    if assay != "FLT3-ITD":
+        return combined_area
+    finite_channel_areas = [float(v) for v in channel_areas.values() if np.isfinite(v)]
+    if not finite_channel_areas:
+        return combined_area
+    return max(finite_channel_areas)
 
 
 def _calculate_peak_area(
@@ -173,7 +188,7 @@ def _detect_peaks(
     mut_ranges = assay_cfg.get("mut_ranges")
 
     channel_traces: dict[str, np.ndarray] = {}
-    for ch in ["DATA1", "DATA2", "DATA3"]:
+    for ch in assay_cfg.get("peak_channels", ["DATA1", "DATA2", "DATA3"]):
         if ch not in fsa.fsa:
             continue
         raw = np.asarray(fsa.fsa[ch]).astype(float)
@@ -192,7 +207,18 @@ def _detect_peaks(
         elif _bp_in_ranges(p_bp, mut_ranges) or (mut_bp and abs(p_bp - mut_bp) < (wt_tol + 2)):
             label = "MUT"
 
-        p_area = _calculate_peak_area(
+        channel_areas = {
+            ch: _calculate_peak_area(
+                trace=corr_trace,
+                time_all=time_all,
+                bp_all=bp_all,
+                center_bp=p_bp,
+                assay=assay,
+                label=label,
+            )
+            for ch, corr_trace in channel_traces.items()
+        }
+        combined_area = _calculate_peak_area(
             trace=trace,
             time_all=time_all,
             bp_all=bp_all,
@@ -200,6 +226,7 @@ def _detect_peaks(
             assay=assay,
             label=label,
         )
+        p_area = _resolve_peak_area(assay=assay, combined_area=combined_area, channel_areas=channel_areas)
 
         peak_info = {
             "basepairs": p_bp,
@@ -208,15 +235,8 @@ def _detect_peaks(
             "label": label,
             "keep": True,
         }
-        for ch, corr_trace in channel_traces.items():
-            peak_info[f"area_{ch}"] = _calculate_peak_area(
-                trace=corr_trace,
-                time_all=time_all,
-                bp_all=bp_all,
-                center_bp=p_bp,
-                assay=assay,
-                label=label,
-            )
+        for ch, channel_area in channel_areas.items():
+            peak_info[f"area_{ch}"] = channel_area
         peaks.append(peak_info)
 
     if not peaks:
@@ -495,6 +515,7 @@ def _calculate_ratios(entries: list[dict]) -> None:
         wt_area = float(wt_main.area)
 
         if entry["assay"] == "FLT3-ITD":
+            mut_rows = _reportable_itd_mut_rows(entry, peaks, wt_rows=wt_rows, mut_rows=mut_rows)
             mut_area = float(mut_rows.area.sum()) if not mut_rows.empty else 0.0
         elif not mut_rows.empty:
             mut_area = float(mut_rows.sort_values("area", ascending=False).iloc[0].area)
@@ -509,6 +530,35 @@ def _calculate_ratios(entries: list[dict]) -> None:
 
 def _summarize_peak_areas(entry: dict) -> tuple[float, float]:
     return float(entry.get("ratio_denominator_area", 0.0)), float(entry.get("ratio_numerator_area", 0.0))
+
+
+def _reportable_itd_mut_rows(
+    entry: dict,
+    peaks: pd.DataFrame,
+    wt_rows: pd.DataFrame | None = None,
+    mut_rows: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if entry.get("assay") != "FLT3-ITD" or peaks.empty:
+        return mut_rows if mut_rows is not None else pd.DataFrame()
+
+    wt_rows = wt_rows if wt_rows is not None else peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
+    mut_rows = mut_rows if mut_rows is not None else peaks[peaks.label.isin(["MUT", "ITD"])].copy()
+    if mut_rows.empty or wt_rows.empty:
+        return mut_rows
+    if entry.get("analysis_type") == "ratio_quant":
+        return mut_rows
+
+    wt_main = wt_rows.iloc[0]
+    wt_bp = float(wt_main.basepairs)
+    wt_area = float(wt_main.area)
+    shoulder_bp_limit = wt_bp + 12.0
+    shoulder_area_limit = max(4000.0, wt_area * 0.02)
+
+    keep_mask = ~(
+        (mut_rows.basepairs <= shoulder_bp_limit)
+        & (mut_rows.area <= shoulder_area_limit)
+    )
+    return mut_rows[keep_mask].copy()
 
 
 def _summarize_detected_peaks(entry: dict) -> dict:
@@ -541,9 +591,11 @@ def _interpret_entry(entry: dict) -> str:
     positive_ratio = _assay_positive_ratio(assay)
 
     if assay == "FLT3-ITD":
+        peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+        reportable_mut_rows = _reportable_itd_mut_rows(entry, peaks)
         if ratio >= positive_ratio:
             return "Positiv FLT3-ITD"
-        if peak_summary["mut_bps"]:
+        if not reportable_mut_rows.empty:
             return "Negativ FLT3-ITD - lavniva dokumentert"
         return "Ingen FLT3-ITD pavist"
     if assay == "FLT3-D835":

@@ -412,8 +412,12 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       return [];
     }}
 
-    var primaryX = decodePlotlyArray(primaryTrace.x);
-    var primaryY = decodePlotlyArray(primaryTrace.y);
+    var traceXYCache = g.data.map(function(trace) {{
+      return {{
+        x: decodePlotlyArray(trace && trace.x),
+        y: decodePlotlyArray(trace && trace.y)
+      }};
+    }});
 
     function peakHalfWidthBp(xCenter) {{
       if (assayName === "FLT3-D835") {{
@@ -422,15 +426,23 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         if (Math.abs(xCenter - 150.0) <= 6.0) return 0.8;
         return 0.8;
       }}
+      if (assayName === "FLT3-ITD") {{
+        if (Number.isFinite(expectedWtBp) && Math.abs(xCenter - Number(expectedWtBp)) <= 8.0) return 2.0;
+        if (xCenter >= 335.0) return 1.0;
+        return 2.0;
+      }}
       return areaWindowBp;
     }}
 
-    function computePeakArea(xCenter) {{
+    function computePeakArea(xCenter, traceIndex) {{
+      var traceData = traceXYCache[Number.isFinite(traceIndex) ? traceIndex : primaryTraceIndex] || traceXYCache[primaryTraceIndex] || {{}};
+      var traceX = Array.isArray(traceData.x) ? traceData.x : [];
+      var traceY = Array.isArray(traceData.y) ? traceData.y : [];
       var halfWidth = peakHalfWidthBp(xCenter);
       var total = 0.0;
-      for (var i = 0; i < primaryX.length; i++) {{
-        var x = Number(primaryX[i]);
-        var y = Number(primaryY[i]);
+      for (var i = 0; i < traceX.length; i++) {{
+        var x = Number(traceX[i]);
+        var y = Number(traceY[i]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
         if (Math.abs(x - xCenter) <= halfWidth) total += y;
       }}
@@ -444,7 +456,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       return {{
         x: x,
         y: y,
-        area: Number.isFinite(area) ? area : computePeakArea(x),
+        area: Number.isFinite(area) ? area : computePeakArea(x, primaryTraceIndex),
         active: !(p && p.active === false)
       }};
     }}
@@ -524,7 +536,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal), active: true }});
+      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal, pt.curveNumber), active: true }});
       rebuild(); // <--- FIXED: Call rebuild immediately!
     }});
   }});
@@ -838,8 +850,12 @@ def build_interactive_assay_batch_plot_html(
       return [];
     }}
 
-    var primaryX = decodePlotlyArray(primaryTrace.x);
-    var primaryY = decodePlotlyArray(primaryTrace.y);
+    var traceXYCache = g.data.map(function(trace) {{
+      return {{
+        x: decodePlotlyArray(trace && trace.x),
+        y: decodePlotlyArray(trace && trace.y)
+      }};
+    }});
 
     function peakHalfWidthBp(xCenter) {{
       if (assayName === "FLT3-D835") {{
@@ -848,15 +864,23 @@ def build_interactive_assay_batch_plot_html(
         if (Math.abs(xCenter - 150.0) <= 6.0) return 0.8;
         return 0.8;
       }}
+      if (assayName === "FLT3-ITD") {{
+        if (Number.isFinite(expectedWtBp) && Math.abs(xCenter - Number(expectedWtBp)) <= 8.0) return 2.0;
+        if (xCenter >= 335.0) return 1.0;
+        return 2.0;
+      }}
       return areaWindowBp;
     }}
 
-    function computePeakArea(xCenter) {{
+    function computePeakArea(xCenter, traceIndex) {{
+      var traceData = traceXYCache[Number.isFinite(traceIndex) ? traceIndex : primaryTraceIndex] || traceXYCache[primaryTraceIndex] || {{}};
+      var traceX = Array.isArray(traceData.x) ? traceData.x : [];
+      var traceY = Array.isArray(traceData.y) ? traceData.y : [];
       var halfWidth = peakHalfWidthBp(xCenter);
       var total = 0.0;
-      for (var i = 0; i < primaryX.length; i++) {{
-        var x = Number(primaryX[i]);
-        var y = Number(primaryY[i]);
+      for (var i = 0; i < traceX.length; i++) {{
+        var x = Number(traceX[i]);
+        var y = Number(traceY[i]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
         if (Math.abs(x - xCenter) <= halfWidth) total += y;
       }}
@@ -870,7 +894,7 @@ def build_interactive_assay_batch_plot_html(
       return {{
         x: x,
         y: y,
-        area: Number.isFinite(area) ? area : computePeakArea(x),
+        area: Number.isFinite(area) ? area : computePeakArea(x, primaryTraceIndex),
         active: !(p && p.active === false)
       }};
     }}
@@ -969,7 +993,7 @@ def build_interactive_assay_batch_plot_html(
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal), active: true }});
+      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal, pt.curveNumber), active: true }});
       redrawPeaks();
     }});
   }});

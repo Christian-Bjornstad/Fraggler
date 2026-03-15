@@ -7,7 +7,14 @@ import pandas as pd
 
 from core.analyses.flt3.classification import classify_fsa
 from core.analyses.flt3.config import ASSAY_REFERENCE_LABEL, ASSAY_REFERENCE_RANGES
-from core.analyses.flt3.pipeline import _peak_area_half_width_bp, _scan_files, _select_best_entry
+from core.analyses.flt3.pipeline import (
+    _calculate_ratios,
+    _interpret_entry,
+    _peak_area_half_width_bp,
+    _resolve_peak_area,
+    _scan_files,
+    _select_best_entry,
+)
 from core.html_reports import _build_flt3_summary_table, _flt3_report_blocks
 
 
@@ -177,7 +184,7 @@ class TestFlt3PipelineHardening(unittest.TestCase):
             [
                 {"basepairs": 80.0, "peaks": 1000.0, "area": 8000.0, "label": "WT"},
                 {"basepairs": 129.0, "peaks": 400.0, "area": 2400.0, "label": "MUT"},
-                {"basepairs": 150.0, "peaks": 200.0, "area": 900.0, "label": "unspecific"},
+                {"basepairs": 150.0, "peaks": 120.0, "area": 900.0, "label": "unspecific"},
             ]
         )
         entry = {
@@ -198,12 +205,18 @@ class TestFlt3PipelineHardening(unittest.TestCase):
         html = _build_flt3_summary_table(entry)
 
         self.assertIn("0.3000", html)
-        self.assertIn("Injeksjonsvalg:", html)
-        self.assertNotIn("Skjules i rapport", html)
+        self.assertNotIn("Injeksjonsvalg:", html)
+        self.assertNotIn("Digest-status", html)
+        self.assertIn("150.0 bp", html)
 
     def test_itd_reference_window_is_300_to_1000(self):
         self.assertEqual(ASSAY_REFERENCE_RANGES["FLT3-ITD"], [(300.0, 1000.0)])
         self.assertIn("300-1000 bp", ASSAY_REFERENCE_LABEL["FLT3-ITD"])
+
+    def test_d835_reference_window_and_label_are_report_friendly(self):
+        self.assertEqual(ASSAY_REFERENCE_RANGES["FLT3-D835"], [(50.0, 250.0)])
+        self.assertIn("50-250 bp", ASSAY_REFERENCE_LABEL["FLT3-D835"])
+        self.assertIn("Mutert >129 bp", ASSAY_REFERENCE_LABEL["FLT3-D835"])
 
     def test_flt3_report_blocks_show_ratio_before_d835_before_other_itd(self):
         ratio_entry = {"assay": "FLT3-ITD", "analysis_type": "ratio_quant"}
@@ -230,7 +243,38 @@ class TestFlt3PipelineHardening(unittest.TestCase):
         self.assertEqual(_peak_area_half_width_bp("FLT3-D835", "WT", 80.0), 1.2)
         self.assertEqual(_peak_area_half_width_bp("FLT3-D835", "MUT", 129.0), 0.5)
         self.assertEqual(_peak_area_half_width_bp("FLT3-D835", "unspecific", 150.0), 0.8)
-        self.assertEqual(_peak_area_half_width_bp("FLT3-ITD", "ITD", 350.0), 5.0)
+        self.assertEqual(_peak_area_half_width_bp("FLT3-ITD", "WT", 330.0), 2.0)
+        self.assertEqual(_peak_area_half_width_bp("FLT3-ITD", "ITD", 350.0), 1.0)
+
+    def test_itd_peak_area_prefers_strongest_single_channel(self):
+        self.assertEqual(
+            _resolve_peak_area("FLT3-ITD", combined_area=596576.0, channel_areas={"DATA1": 384822.0, "DATA2": 160385.0}),
+            384822.0,
+        )
+        self.assertEqual(
+            _resolve_peak_area("FLT3-D835", combined_area=1612.0, channel_areas={"DATA3": 797.0}),
+            1612.0,
+        )
+
+    def test_small_standard_itd_shoulders_do_not_trigger_positive_interpretation(self):
+        peaks = pd.DataFrame(
+            [
+                {"basepairs": 328.0, "peaks": 10000.0, "area": 100000.0, "label": "WT"},
+                {"basepairs": 336.5, "peaks": 180.0, "area": 2500.0, "label": "ITD"},
+                {"basepairs": 337.4, "peaks": 160.0, "area": 1800.0, "label": "ITD"},
+            ]
+        )
+        entry = {
+            "assay": "FLT3-ITD",
+            "analysis_type": "standard",
+            "primary_peak_channel": "DATA1",
+            "peaks_by_channel": {"DATA1": peaks},
+        }
+
+        _calculate_ratios([entry])
+
+        self.assertEqual(entry["ratio"], 0.0)
+        self.assertEqual(_interpret_entry(entry), "Ingen FLT3-ITD pavist")
 
 
 if __name__ == "__main__":

@@ -489,9 +489,28 @@ def _find_peak_in_range(peaks: pd.DataFrame, bp_min: float, bp_max: float) -> pd
         return pd.DataFrame()
     return peaks[(peaks.basepairs >= bp_min) & (peaks.basepairs <= bp_max)].copy()
 
+
+def _reportable_itd_mut_rows_for_report(entry: dict, peaks: pd.DataFrame, wt_rows: pd.DataFrame, mut_rows: pd.DataFrame) -> pd.DataFrame:
+    if entry.get("assay") != "FLT3-ITD" or peaks.empty or mut_rows.empty or wt_rows.empty:
+        return mut_rows
+    if entry.get("analysis_type") == "ratio_quant":
+        return mut_rows
+
+    wt_main = wt_rows.iloc[0]
+    wt_bp = float(wt_main.basepairs)
+    wt_area = float(wt_main.area)
+    shoulder_bp_limit = wt_bp + 12.0
+    shoulder_area_limit = max(4000.0, wt_area * 0.02)
+
+    keep_mask = ~(
+        (mut_rows.basepairs <= shoulder_bp_limit)
+        & (mut_rows.area <= shoulder_area_limit)
+    )
+    return mut_rows[keep_mask].copy()
+
 def _itd_concordance_text(wt_row: pd.Series | None, mut_rows: pd.DataFrame) -> str:
     if wt_row is None and mut_rows.empty:
-        return "Ingen tydelige ITD-signaler"
+        return ""
     wt_blue = float(wt_row.get("area_DATA1", 0.0)) if wt_row is not None else 0.0
     wt_green = float(wt_row.get("area_DATA2", 0.0)) if wt_row is not None else 0.0
     mut_blue = float(mut_rows.get("area_DATA1", pd.Series(0.0)).sum()) if not mut_rows.empty else 0.0
@@ -505,24 +524,25 @@ def _itd_concordance_text(wt_row: pd.Series | None, mut_rows: pd.DataFrame) -> s
         return "Mutant signal mest tydelig i bla kanal"
     if seen_green:
         return "Mutant signal mest tydelig i gronn kanal"
-    return "Ingen sikker kanal-konkordans"
+    return ""
+
+D835_DIGEST_HEIGHT_MIN = 100.0
+D835_DIGEST_AREA_MIN = 500.0
+
 
 def _d835_digest_status(peaks: pd.DataFrame, wt_row: pd.Series | None, mut_row: pd.Series | None) -> tuple[str, pd.Series | None]:
     digest_rows = _find_peak_in_range(peaks, 145.0, 155.5)
     digest_row = _dominant_peak(digest_rows)
     digest_area = float(digest_row.area) if digest_row is not None else 0.0
+    digest_height = float(digest_row.peaks) if digest_row is not None else 0.0
     wt_area = float(wt_row.area) if wt_row is not None else 0.0
     mut_area = float(mut_row.area) if mut_row is not None else 0.0
 
-    if digest_row is None:
-        return "Ingen tydelig 150 bp digest-kontroll", None
+    if digest_row is None or digest_height < D835_DIGEST_HEIGHT_MIN or digest_area < D835_DIGEST_AREA_MIN:
+        return "", None
     if digest_area >= max(wt_area, mut_area) * 0.60:
         return "Mulig ufullstendig kutting", digest_row
-    if mut_row is not None and mut_area > wt_area:
-        return "Mutert digest-mønster", digest_row
-    if wt_row is not None and wt_area >= mut_area:
-        return "WT digest-mønster", digest_row
-    return "Uavklart digest-mønster", digest_row
+    return "", digest_row
 
 def _build_flt3_summary_table(e: dict) -> str:
     """Validation-oriented FLT3/NPM1 table below each figure."""
@@ -538,54 +558,63 @@ def _build_flt3_summary_table(e: dict) -> str:
     mut_main = _dominant_peak(mut_rows)
 
     if assay == "FLT3-ITD":
-        wt_g = wt_b = mut_g = mut_b = 0.0
+        wt_blue = wt_green = mut_blue = mut_green = 0.0
+        reportable_mut_rows = peaks[0:0].copy() if peaks.empty else peaks.iloc[0:0].copy()
         if wt_main is not None:
             r = wt_main
-            wt_g = r.get("area_DATA1", 0.0)
-            wt_b = r.get("area_DATA2", 0.0)
+            wt_blue = r.get("area_DATA1", 0.0)
+            wt_green = r.get("area_DATA2", 0.0)
         if not mut_rows.empty:
-            mut_g = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
-            mut_b = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
-        mut_prop = (mut_rows.area.sum() / (mut_rows.area.sum() + float(wt_main.area))) if (wt_main is not None and (mut_rows.area.sum() + float(wt_main.area)) > 0) else 0.0
+            mut_blue = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
+            mut_green = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
+            reportable_mut_rows = _reportable_itd_mut_rows_for_report(e, peaks, wt_row, mut_rows)
+        ratio_num = float(e.get("ratio_numerator_area", 0.0))
+        ratio_den = float(e.get("ratio_denominator_area", 0.0))
+        mut_prop = (ratio_num / (ratio_num + ratio_den)) if (ratio_num + ratio_den) > 0 else 0.0
         label = "Positiv" if ratio >= positive_ratio else "Negativ"
-        if ratio < positive_ratio and not mut_rows.empty:
+        if ratio < positive_ratio and not reportable_mut_rows.empty:
             label = "Negativ, dokumentert"
-        concordance = _itd_concordance_text(wt_main, mut_rows)
+        concordance = _itd_concordance_text(wt_main, reportable_mut_rows)
+        validation_text = f"<strong>{label}</strong>"
+        if concordance:
+            validation_text += f"<br><span class='small'>{concordance}</span>"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>WT-topp</th><th>Muterte topper</th><th>Bla kanal</th><th>Gronn kanal</th><th>Ratioer</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td>"
             f"<td>{_format_peak_list(mut_rows, max_peaks=6)}</td>"
-            f"<td>WT: {wt_g:,.0f}<br>Mut: {mut_g:,.0f}</td>"
-            f"<td>WT: {wt_b:,.0f}<br>Mut: {mut_b:,.0f}</td>"
+            f"<td>WT: {wt_blue:,.0f}<br>Mut: {mut_blue:,.0f}</td>"
+            f"<td>WT: {wt_green:,.0f}<br>Mut: {mut_green:,.0f}</td>"
             f"<td>ITD-ratio: <strong>{ratio_str}</strong><br>"
             f"<span class='small'>Mut/WT: {float(e.get('ratio_numerator_area', 0.0)):,.0f} / {float(e.get('ratio_denominator_area', 0.0)):,.0f}<br>"
             f"Mut/(Mut+WT): {mut_prop:.4f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
-            f"<td><strong>{label}</strong><br><span class='small'>{concordance}</span></td></tr></table></div>"
+            f"<td>{validation_text}</td></tr></table></div>"
         )
 
     if assay == "FLT3-D835":
         digest_status, digest_row = _d835_digest_status(peaks, wt_main, mut_main)
         label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Under positiv grense"
+        digest_text = "&mdash;"
+        if digest_row is not None:
+            digest_text = _peak_text(digest_row)
+            if digest_status:
+                digest_text += f"<br><span class='small'>{digest_status}</span>"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
-            "<tr><th>WT-topp</th><th>Mutert topp</th><th>150 bp kontroll</th><th>TKD-ratio</th><th>Digest-status</th><th>Validering</th></tr>"
+            "<tr><th>WT-topp</th><th>Mutert topp</th><th>150 bp kontroll</th><th>TKD-ratio</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td>"
             f"<td>{_peak_text(mut_main)}<br><span class='small'>{_format_peak_list(mut_rows, max_peaks=4)}</span></td>"
-            f"<td>{_peak_text(digest_row)}</td>"
+            f"<td>{digest_text}</td>"
             f"<td><strong>{ratio_str}</strong><br><span class='small'>Mut/WT: {float(e.get('ratio_numerator_area', 0.0)):,.0f} / {float(e.get('ratio_denominator_area', 0.0)):,.0f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
-            f"<td>{digest_status}</td><td><strong>{label}</strong></td></tr></table></div>"
+            f"<td><strong>{label}</strong></td></tr></table></div>"
         )
 
     if assay == "NPM1":
         label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Manuell vurdering"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>Villtype</th><th>Mutert</th><th>Ratio</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td><td>{_format_peak_list(mut_rows, max_peaks=4)}</td>"
@@ -618,7 +647,6 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
             sub = [
                 f"Well: {e.get('well_id') or '&mdash;'}",
                 f"Injeksjon: {e.get('selected_injection') or ''}",
-                f"Kjoring: {e.get('source_run_dir') or ''}",
             ]
             html_lines.append(f"<p class='small'>{escape(' | '.join(sub))}</p>")
         try:
