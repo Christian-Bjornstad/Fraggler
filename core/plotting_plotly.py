@@ -221,6 +221,8 @@ def _prepare_plot_data(entry: dict) -> dict | None:
         "forced_xmin": entry.get("forced_xmin"),
         "forced_xmax": entry.get("forced_xmax"),
         "peaks_by_channel": entry["peaks_by_channel"],
+        "wt_bp": entry.get("wt_bp"),
+        "mut_bp": entry.get("mut_bp"),
         "sample_id": f"{fsa.file_name}_{primary_ch}"
     }
 
@@ -374,6 +376,9 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var areaWindowBp = 5.0;
   var peaksTraceIndex = {final_peaks_trace_index};
   var primaryTraceIndex = {primary_trace_index};
+  var assayName = {json.dumps(data["assay_name"])};
+  var expectedWtBp = {json.dumps(data.get("wt_bp"))};
+  var expectedMutBp = {json.dumps(data.get("mut_bp"))};
 
   Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
     var baseShapes = (g.layout.shapes || []).slice();
@@ -410,13 +415,24 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
     var primaryX = decodePlotlyArray(primaryTrace.x);
     var primaryY = decodePlotlyArray(primaryTrace.y);
 
+    function peakHalfWidthBp(xCenter) {{
+      if (assayName === "FLT3-D835") {{
+        if (Number.isFinite(expectedMutBp) && Math.abs(xCenter - Number(expectedMutBp)) <= 3.0) return 0.5;
+        if (Number.isFinite(expectedWtBp) && Math.abs(xCenter - Number(expectedWtBp)) <= 6.0) return 1.2;
+        if (Math.abs(xCenter - 150.0) <= 6.0) return 0.8;
+        return 0.8;
+      }}
+      return areaWindowBp;
+    }}
+
     function computePeakArea(xCenter) {{
+      var halfWidth = peakHalfWidthBp(xCenter);
       var total = 0.0;
       for (var i = 0; i < primaryX.length; i++) {{
         var x = Number(primaryX[i]);
         var y = Number(primaryY[i]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        if (Math.abs(x - xCenter) <= areaWindowBp) total += y;
+        if (Math.abs(x - xCenter) <= halfWidth) total += y;
       }}
       return total;
     }}
@@ -788,6 +804,9 @@ def build_interactive_assay_batch_plot_html(
   var gd = document.getElementById(divId);
   if (!gd) return;
   var areaWindowBp = 5.0;
+  var assayName = {json.dumps(e.get("assay"))};
+  var expectedWtBp = {json.dumps(e.get("wt_bp"))};
+  var expectedMutBp = {json.dumps(e.get("mut_bp"))};
 
   Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
     var primaryTrace = g.data[0] || {{}};
@@ -822,13 +841,24 @@ def build_interactive_assay_batch_plot_html(
     var primaryX = decodePlotlyArray(primaryTrace.x);
     var primaryY = decodePlotlyArray(primaryTrace.y);
 
+    function peakHalfWidthBp(xCenter) {{
+      if (assayName === "FLT3-D835") {{
+        if (Number.isFinite(expectedMutBp) && Math.abs(xCenter - Number(expectedMutBp)) <= 3.0) return 0.5;
+        if (Number.isFinite(expectedWtBp) && Math.abs(xCenter - Number(expectedWtBp)) <= 6.0) return 1.2;
+        if (Math.abs(xCenter - 150.0) <= 6.0) return 0.8;
+        return 0.8;
+      }}
+      return areaWindowBp;
+    }}
+
     function computePeakArea(xCenter) {{
+      var halfWidth = peakHalfWidthBp(xCenter);
       var total = 0.0;
       for (var i = 0; i < primaryX.length; i++) {{
         var x = Number(primaryX[i]);
         var y = Number(primaryY[i]);
         if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        if (Math.abs(x - xCenter) <= areaWindowBp) total += y;
+        if (Math.abs(x - xCenter) <= halfWidth) total += y;
       }}
       return total;
     }}

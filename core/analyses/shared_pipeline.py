@@ -28,14 +28,16 @@ def scan_fsa_files(
     mode: str = "all",
     *,
     include_controls_only: bool = False,
+    recursive: bool = False,
 ) -> list[Path]:
     """Scan a folder for .fsa files with shared filtering semantics."""
     if not fsa_dir.exists():
         print_warning(f"FSA-katalog finnes ikke: {fsa_dir}")
         return []
 
+    iterator = fsa_dir.rglob("*.fsa") if recursive else fsa_dir.glob("*.fsa")
     fsa_files = [
-        p for p in sorted(fsa_dir.glob("*.fsa"))
+        p for p in sorted(iterator)
         if not is_water_file(p.name)
     ]
 

@@ -107,7 +107,6 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 .peak-editor-block { margin-top: 0.5rem; margin-bottom: 1.2rem; border-radius: 8px; overflow: hidden; }
 .combo-grid { display: block; }
 .combo-item { margin-bottom: 1.2rem; }
-
 /* ── Floating Print Button ── */
 .print-fab {
     position: fixed;
@@ -270,11 +269,25 @@ def dit_to_year(dit: str) -> int | None:
     except ValueError:
         return None
 
-def _create_html_header(dit: str, year: int | None, num_entries: int, dit_root: Path, html_lines: list[str]):
-    """Appends the HTML head and page header to html_lines."""
+def _resolve_report_display_name(entries: list[dict] | None = None) -> str:
     analysis_name = get_active_analysis_name()
-    display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
-    
+    if entries:
+        assays = {e.get("assay") for e in entries}
+        if assays and assays.issubset({"FLT3-ITD", "FLT3-D835", "NPM1"}):
+            return "Flt3"
+    return "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
+
+
+def _create_html_header(
+    dit: str,
+    year: int | None,
+    num_entries: int,
+    dit_root: Path,
+    html_lines: list[str],
+    *,
+    display_name: str,
+):
+    """Appends the HTML head and page header to html_lines."""
     html_lines.extend(["<!DOCTYPE html>", "<html lang='no'>", "<head>", "<meta charset='utf-8'>"])
     html_lines.append(f"<title>{escape(dit)}_{display_name}_Resultater</title>")
     html_lines.append(REPORT_STYLE)
@@ -337,9 +350,6 @@ function printReport() { window.print(); }
     meta.extend([f"{num_entries} analyserte filer", f"Generert: {gen_date}"])
     meta_str = " &nbsp;&bull;&nbsp; ".join(meta)
     
-    analysis_name = get_active_analysis_name()
-    display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
-    
     html_lines.append(f"""
 <div class='report-header no-print'>
   <h1>{escape(dit)}_{display_name}_Resultater</h1>
@@ -355,16 +365,39 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
     """Renders the overview table of all analyzed files."""
     html_lines.append("<h2>Oversikt over analyserte filer</h2>")
     html_lines.append("<p class='small'>Tabellen viser alle filer for dette DIT-nummeret.</p>")
-    html_lines.append("<table><tr><th>Filnavn</th><th>Assay</th><th>Ladder</th><th>bp-område</th><th>Ladder QC</th><th>R²</th></tr>")
-    for e in sorted(dit_entries, key=lambda x: (x["assay"], x["fsa"].file_name)):
-        status = e.get("ladder_qc_status", "unknown")
-        r2 = e.get("ladder_r2", None)
-        r2_str = f"{r2:.4f}" if r2 is not None and not np.isnan(r2) else "&mdash;"
+    is_flt3 = {e.get("assay") for e in dit_entries}.issubset({"FLT3-ITD", "FLT3-D835", "NPM1"})
+    if is_flt3:
         html_lines.append(
-            f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
-            f"<td>{escape(e['ladder'])}</td><td>{int(e['bp_min'])}–{int(e['bp_max'])} bp</td>"
-            f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+            "<table><tr><th>Filnavn</th><th>Assay</th><th>Behandling</th><th>WT</th><th>Mutert</th><th>Ratio</th><th>Ladder QC</th><th>R²</th></tr>"
         )
+        for e in sorted(dit_entries, key=lambda x: (x["assay"], x.get("well_id") or "", x["fsa"].file_name)):
+            status = e.get("ladder_qc_status", "unknown")
+            r2 = e.get("ladder_r2", None)
+            r2_str = f"{r2:.4f}" if r2 is not None and not np.isnan(r2) else "&mdash;"
+            peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
+            wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
+            mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("area", ascending=False) if not peaks.empty else pd.DataFrame()
+            wt_text = _peak_text(_dominant_peak(wt_rows))
+            mut_text = _peak_text(_dominant_peak(mut_rows))
+            ratio = float(e.get("ratio", 0.0))
+            ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+            html_lines.append(
+                f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
+                f"<td>{escape(_format_flt3_treatment(e))}</td>"
+                f"<td>{wt_text}</td><td>{mut_text}</td><td>{ratio_str}</td>"
+                f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+            )
+    else:
+        html_lines.append("<table><tr><th>Filnavn</th><th>Assay</th><th>Ladder</th><th>bp-område</th><th>Ladder QC</th><th>R²</th></tr>")
+        for e in sorted(dit_entries, key=lambda x: (x["assay"], x["fsa"].file_name)):
+            status = e.get("ladder_qc_status", "unknown")
+            r2 = e.get("ladder_r2", None)
+            r2_str = f"{r2:.4f}" if r2 is not None and not np.isnan(r2) else "&mdash;"
+            html_lines.append(
+                f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
+                f"<td>{escape(e['ladder'])}</td><td>{int(e['bp_min'])}–{int(e['bp_max'])} bp</td>"
+                f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+            )
     html_lines.append("</table>")
 
 def _format_flt3_treatment(entry: dict) -> str:
@@ -382,6 +415,51 @@ def _format_flt3_treatment(entry: dict) -> str:
         treatment = "Ufortynnet"
     protocol_inj = entry.get("protocol_injection_time", entry.get("injection_time", 0))
     return f"{treatment} - {protocol_inj}s protokoll"
+
+
+def _format_flt3_selection(entry: dict) -> str:
+    selected = entry.get("selected_injection") or f"{entry.get('injection_time', 0)}s"
+    source = entry.get("source_run_dir") or "ukjent kjøring"
+    sizing = entry.get("sizing_method") or "ukjent sizing"
+    reason = entry.get("selection_reason") or ""
+    return f"Valgt {selected} fra {source} ({sizing}). {reason}".strip()
+
+
+def _flt3_display_priority(entry: dict) -> int:
+    assay = entry.get("assay")
+    analysis_type = entry.get("analysis_type")
+    if assay == "FLT3-ITD" and analysis_type == "ratio_quant":
+        return 0
+    if assay == "FLT3-D835":
+        return 1
+    if assay == "FLT3-ITD":
+        return 2
+    return 3
+
+
+def _flt3_display_sort_key(entry: dict) -> tuple[int, str, str]:
+    return (
+        _flt3_display_priority(entry),
+        entry.get("well_id") or "",
+        entry["fsa"].file_name,
+    )
+
+
+def _flt3_report_blocks(assays: dict[str, list[dict]]) -> list[tuple[str, str, list[dict]]]:
+    blocks: list[tuple[str, str, list[dict]]] = []
+    itd_entries = assays.get("FLT3-ITD", [])
+    itd_ratio_entries = [e for e in itd_entries if e.get("analysis_type") == "ratio_quant"]
+    itd_other_entries = [e for e in itd_entries if e.get("analysis_type") != "ratio_quant"]
+
+    if itd_ratio_entries:
+        blocks.append(("FLT3-ITD", "FLT3-ITD-ratio", itd_ratio_entries))
+    if "FLT3-D835" in assays:
+        blocks.append(("FLT3-D835", "FLT3-D835", assays["FLT3-D835"]))
+    if itd_other_entries:
+        blocks.append(("FLT3-ITD", "FLT3-ITD", itd_other_entries))
+    if "NPM1" in assays:
+        blocks.append(("NPM1", "NPM1", assays["NPM1"]))
+    return blocks
 
 def _format_peak_list(mut_rows: pd.DataFrame, max_peaks: int = 3) -> str:
     if mut_rows.empty:
@@ -475,7 +553,7 @@ def _build_flt3_summary_table(e: dict) -> str:
         concordance = _itd_concordance_text(wt_main, mut_rows)
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>WT-topp</th><th>Muterte topper</th><th>Bla kanal</th><th>Gronn kanal</th><th>Ratioer</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td>"
@@ -483,7 +561,8 @@ def _build_flt3_summary_table(e: dict) -> str:
             f"<td>WT: {wt_g:,.0f}<br>Mut: {mut_g:,.0f}</td>"
             f"<td>WT: {wt_b:,.0f}<br>Mut: {mut_b:,.0f}</td>"
             f"<td>ITD-ratio: <strong>{ratio_str}</strong><br>"
-            f"<span class='small'>Mut/(Mut+WT): {mut_prop:.4f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
+            f"<span class='small'>Mut/WT: {float(e.get('ratio_numerator_area', 0.0)):,.0f} / {float(e.get('ratio_denominator_area', 0.0)):,.0f}<br>"
+            f"Mut/(Mut+WT): {mut_prop:.4f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
             f"<td><strong>{label}</strong><br><span class='small'>{concordance}</span></td></tr></table></div>"
         )
 
@@ -492,13 +571,13 @@ def _build_flt3_summary_table(e: dict) -> str:
         label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Under positiv grense"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>WT-topp</th><th>Mutert topp</th><th>150 bp kontroll</th><th>TKD-ratio</th><th>Digest-status</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td>"
             f"<td>{_peak_text(mut_main)}<br><span class='small'>{_format_peak_list(mut_rows, max_peaks=4)}</span></td>"
             f"<td>{_peak_text(digest_row)}</td>"
-            f"<td><strong>Skjules i rapport</strong><br><span class='small'>Positiv grense > {positive_ratio:.2f}</span></td>"
+            f"<td><strong>{ratio_str}</strong><br><span class='small'>Mut/WT: {float(e.get('ratio_numerator_area', 0.0)):,.0f} / {float(e.get('ratio_denominator_area', 0.0)):,.0f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
             f"<td>{digest_status}</td><td><strong>{label}</strong></td></tr></table></div>"
         )
 
@@ -506,7 +585,7 @@ def _build_flt3_summary_table(e: dict) -> str:
         label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Manuell vurdering"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
-            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}<br><strong>Injeksjonsvalg:</strong> {escape(_format_flt3_selection(e))}</p>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>Villtype</th><th>Mutert</th><th>Ratio</th><th>Validering</th></tr>"
             f"<tr><td>{_peak_text(wt_main)}</td><td>{_format_peak_list(mut_rows, max_peaks=4)}</td>"
@@ -517,24 +596,38 @@ def _build_flt3_summary_table(e: dict) -> str:
 
 def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: list[str]):
     """Renders a single assay block with plots for each file."""
+    display_name = assay_name
+    reference_assay = assay_name
+    if assay_name == "FLT3-ITD-ratio":
+        display_name = "FLT3-ITD-ratio"
+        reference_assay = "FLT3-ITD"
+
     html_lines.append("<div class='assay-block'>")
-    html_lines.append(f"<h3>{escape(assay_name)}</h3>")
-    ref_ranges = ASSAY_REFERENCE_RANGES.get(assay_name)
+    html_lines.append(f"<h3>{escape(display_name)}</h3>")
+    ref_ranges = ASSAY_REFERENCE_RANGES.get(reference_assay)
     if ref_ranges:
         ranges_str = ", ".join(f"{int(a)}–{int(b)} bp" for (a, b) in ref_ranges)
-        label_txt = ASSAY_REFERENCE_LABEL.get(assay_name, ranges_str)
+        label_txt = ASSAY_REFERENCE_LABEL.get(reference_assay, ranges_str)
         html_lines.append(f"<p class='small'><strong>Referanseområde:</strong> {escape(ranges_str)}<br>{escape(label_txt)}</p>")
 
-    for e in sorted(assay_entries, key=lambda x: x["fsa"].file_name):
+    sort_key = _flt3_display_sort_key if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"} else (lambda x: x["fsa"].file_name)
+    for e in sorted(assay_entries, key=sort_key):
         fsa, primary_ch = e["fsa"], e["primary_peak_channel"]
         html_lines.append(f"<p class='sample-header'>{escape(fsa.file_name)} ({escape(primary_ch)})</p>")
+        if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"}:
+            sub = [
+                f"Well: {e.get('well_id') or '&mdash;'}",
+                f"Injeksjon: {e.get('selected_injection') or ''}",
+                f"Kjoring: {e.get('source_run_dir') or ''}",
+            ]
+            html_lines.append(f"<p class='small'>{escape(' | '.join(sub))}</p>")
         try:
             frag = build_interactive_peak_plot_for_entry(e)
             html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
         except Exception as ex:
             html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
             
-        if assay_name in {"FLT3-ITD", "FLT3-D835", "NPM1"}:
+        if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"}:
             html_lines.append(_build_flt3_summary_table(e))
 
     # Add collapsible Comment Box for the overall assay
@@ -542,7 +635,7 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
         "<div class='comment-box-container'>"
         "<button class='comment-toggle-btn' onclick='toggleComment(this)'>"
         "💬 <span class='comment-label'>Legg til kommentar</span>"
-        f" <em style='font-weight:400;opacity:0.7;'>({escape(assay_name)})</em>"
+        f" <em style='font-weight:400;opacity:0.7;'>({escape(display_name)})</em>"
         "<i class='caret'>&#x25BC;</i>"
         "</button>"
         "<div class='comment-body'>"
@@ -651,6 +744,7 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
 
     assay_outdir.mkdir(exist_ok=True, parents=True)
     print_green(f"[DIT] Lager pasientrapporter i {assay_outdir}")
+    display_name = _resolve_report_display_name(entries)
 
     for dit, dit_entries in sorted(per_dit.items()):
         year = dit_to_year(dit)
@@ -658,10 +752,49 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
         for e in dit_entries: assays[e["assay"]].append(e)
 
         html_lines: list[str] = []
-        _create_html_header(dit, year, len(dit_entries), assay_outdir, html_lines)
+        _create_html_header(dit, year, len(dit_entries), assay_outdir, html_lines, display_name=display_name)
         _render_file_summary_table(dit_entries, html_lines)
 
         html_lines.append("<h2>Assay-spesifikke oversikter</h2>")
+        if "FLT3-ITD" in assays or "FLT3-D835" in assays or "NPM1" in assays:
+            flt3_blocks = _flt3_report_blocks(assays)
+            handled = {"FLT3-ITD", "FLT3-D835", "NPM1"}
+            ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays and a not in handled] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER and a not in handled]
+            for assay_key, block_title, block_entries in flt3_blocks:
+                _render_assay_block(block_title, block_entries, html_lines)
+
+            for name in ordered:
+                _render_assay_block(name, assays[name], html_lines)
+                
+                # Special Combination Sections
+                if name == "TCRbC":
+                    present = [a for a in ["TCRbA", "TCRbB", "TCRbC"] if a in assays]
+                    sorted_rep = {a: sorted(assays[a], key=lambda x: x["fsa"].file_name) for a in present}
+                    rep1 = [lst[0] for a, lst in sorted_rep.items() if len(lst) >= 1]
+                    rep2 = [lst[1] for a, lst in sorted_rep.items() if len(lst) >= 2]
+                    if rep1: html_lines.append("<h2>Kombinasjonsfigurer – TCRβ</h2>")
+                    _render_tcrb_rep_block(rep1, "1", html_lines)
+                    _render_tcrb_rep_block(rep2, "2", html_lines)
+                
+                if name == "TCRgB":
+                    tcrg_all = []
+                    for a in ["TCRgA", "TCRgB"]:
+                        if a in assays: tcrg_all.extend(sorted(assays[a], key=lambda x: x["fsa"].file_name))
+                    _render_tcrg_combo_block(tcrg_all, html_lines)
+            _render_sl_section(dit_entries + qc_sl_entries, html_lines)
+            
+            html_lines.append("""
+<div class="print-fab no-print">
+  <button class="print-btn save-peaks-btn" onclick="PeakManager.downloadUpdatedHtml()">💾&nbsp; Save Peaks</button>
+  <button class="print-btn" onclick="printReport()">🖨&nbsp; Print / PDF</button>
+</div>
+</body></html>""")
+            
+            out_html = assay_outdir / f"{dit}_{display_name}_Resultater.html"
+            out_html.write_text("\n".join(html_lines), encoding="utf-8")
+            print_green(f"[DIT] Lagret: {out_html}")
+            continue
+
         ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER]
         
         for name in ordered:
@@ -692,8 +825,6 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
 </div>
 </body></html>""")
         
-        analysis_name = get_active_analysis_name()
-        display_name = "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
         out_html = assay_outdir / f"{dit}_{display_name}_Resultater.html"
         out_html.write_text("\n".join(html_lines), encoding="utf-8")
         print_green(f"[DIT] Lagret: {out_html}")
