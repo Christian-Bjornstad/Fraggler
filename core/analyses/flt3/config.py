@@ -1,6 +1,4 @@
-"""
-FLT3 Analysis Configuration (Skeleton).
-"""
+"""FLT3 / NPM1 analysis configuration."""
 from __future__ import annotations
 
 ASSAY_CONFIG = {
@@ -11,6 +9,9 @@ ASSAY_CONFIG = {
         "bp_min": 50.0,
         "bp_max": 1000.0,
         "wt_bp": 330.0,
+        "itd_min_bp": 335.0,
+        "positive_ratio": 0.02,
+        "control_wt_min_area": 10000.0,
     },
     "FLT3-D835": {
         "dye": "ROX",
@@ -18,8 +19,14 @@ ASSAY_CONFIG = {
         "peak_channels": ["DATA3"],
         "bp_min": 50.0,
         "bp_max": 200.0,
-        "wt_bp": 77.0,
-        "mut_bp": 126.0,
+        "wt_bp": 80.0,
+        "mut_bp": 129.0,
+        "wt_range": (76.0, 83.5),
+        "mut_ranges": [(121.0, 130.5)],
+        "peak_height_min": 50.0,
+        "peak_distance": 8,
+        "positive_ratio": 0.05,
+        "control_wt_min_area": 1000.0,
     },
     "NPM1": {
         "dye": "ROX",
@@ -29,6 +36,7 @@ ASSAY_CONFIG = {
         "bp_max": 1000.0,
         "wt_bp": 300.0,
         "mut_bp": 304.0,
+        "positive_ratio": 0.01,
     },
 }
 
@@ -37,14 +45,14 @@ ROX_LADDER = "GS500ROX"
 ASSAY_DISPLAY_ORDER = ["FLT3-ITD", "FLT3-D835", "NPM1"]
 NONSPECIFIC_PEAKS = {}
 ASSAY_REFERENCE_RANGES = {
-    "FLT3-ITD": [(320.0, 1000.0)],
-    "FLT3-D835": [(70.0, 150.0)],
-    "NPM1": [(290.0, 310.0)],
+    "FLT3-ITD": [(330.0, 330.0), (335.0, 1000.0)],
+    "FLT3-D835": [(80.0, 80.0), (129.0, 129.0)],
+    "NPM1": [(299.0, 301.0), (303.0, 305.0)],
 }
 ASSAY_REFERENCE_LABEL = {
-    "FLT3-ITD": "Villtype: ~330 bp, Mutert: >335 bp",
-    "FLT3-D835": "Villtype: ~80 bp, Mutert: ~129 bp",
-    "NPM1": "Villtype: ~300 bp, Mutert: ~304 bp",
+    "FLT3-ITD": "Villtype: 330 bp, Mutert: >335 bp",
+    "FLT3-D835": "Villtype: 80 bp, Mutert: 129 bp",
+    "NPM1": "Villtype: 299/300-301 bp, Mutert: 303-305 bp",
 }
 
 # Injection time preference (seconds)
@@ -56,5 +64,5 @@ PREFERRED_INJECTION_TIME = {
     "10x_diluted": 1,
     "25x_diluted": 1,
     "FLT3-ITD": 1,
-    "NPM1": 1,
+    "NPM1": 3,
 }

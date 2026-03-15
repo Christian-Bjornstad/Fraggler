@@ -80,6 +80,14 @@ def _calculate_auc(trace: np.ndarray, time_idx: np.ndarray) -> float:
         return 0.0
     return float(trace[time_idx].sum())
 
+def _assay_positive_ratio(assay: str) -> float:
+    return float(ASSAY_CONFIG.get(assay, {}).get("positive_ratio", 0.01))
+
+def _bp_in_ranges(bp: float, ranges: list[tuple[float, float]] | None) -> bool:
+    if not ranges:
+        return False
+    return any(start <= bp <= end for start, end in ranges)
+
 def _detect_peaks(fsa: FsaFile, assay: str, wt_bp: float, trace: np.ndarray, mut_bp: float | None = None, analysis_type: str | None = None) -> pd.DataFrame:
     """Detects WT and Mutant peaks and calculates their AUC."""
     sample_data = getattr(fsa, "sample_data_with_basepairs", None)
@@ -91,8 +99,9 @@ def _detect_peaks(fsa: FsaFile, assay: str, wt_bp: float, trace: np.ndarray, mut
     
     # Broad search window
     bp_min, bp_max = 50.0, 1000.0
-    auc_window = 5.0 
+    auc_window = 5.0
     peaks = []
+    assay_cfg = ASSAY_CONFIG.get(assay, {})
     
     from scipy.signal import find_peaks
     
@@ -107,7 +116,9 @@ def _detect_peaks(fsa: FsaFile, assay: str, wt_bp: float, trace: np.ndarray, mut
     if y_win.size < 3:
         return pd.DataFrame(columns=["basepairs", "peaks", "area", "keep", "label"])
         
-    p_idx, _ = find_peaks(y_win, height=200, distance=20)
+    peak_height_min = float(assay_cfg.get("peak_height_min", 200))
+    peak_distance = int(assay_cfg.get("peak_distance", 20))
+    p_idx, _ = find_peaks(y_win, height=peak_height_min, distance=peak_distance)
     
     for idx in p_idx:
         p_bp = bp_win[idx]
@@ -121,13 +132,16 @@ def _detect_peaks(fsa: FsaFile, assay: str, wt_bp: float, trace: np.ndarray, mut
         label = "unspecific"
         # Simple labeling logic
         # For ITD: be stricter with WT window (usually +-4bp)
-        wt_tol = 4.0 if assay == "FLT3-ITD" else 5.0
+        wt_tol = 4.0 if assay == "FLT3-ITD" else 2.0 if assay in {"FLT3-D835", "NPM1"} else 5.0
+        itd_min_bp = float(ASSAY_CONFIG.get("FLT3-ITD", {}).get("itd_min_bp", wt_bp + 4.9)) if wt_bp else None
+        wt_range = assay_cfg.get("wt_range")
+        mut_ranges = assay_cfg.get("mut_ranges")
         
-        if wt_bp and abs(p_bp - wt_bp) < wt_tol:
+        if _bp_in_ranges(p_bp, [wt_range] if wt_range else None) or (wt_bp and abs(p_bp - wt_bp) < wt_tol):
             label = "WT"
-        elif assay == "FLT3-ITD" and p_bp >= wt_bp + 4.9: # Stricter ITD start
+        elif assay == "FLT3-ITD" and itd_min_bp is not None and p_bp >= itd_min_bp:
             label = "ITD"
-        elif mut_bp and abs(p_bp - mut_bp) < (wt_tol + 2):
+        elif _bp_in_ranges(p_bp, mut_ranges) or (mut_bp and abs(p_bp - mut_bp) < (wt_tol + 2)):
             label = "MUT"
             
         peak_info = {
@@ -260,8 +274,13 @@ def _calculate_ratios(entries: list[dict]):
                 continue
                 
             wt_area = max_wt.area
-            # Sum all ITD/MUT areas
-            mut_area = mut_peaks.area.sum()
+            # D835/NPM1 behave better with the dominant mutant peak, while ITD often has several true mutant peaks.
+            if e["assay"] == "FLT3-ITD":
+                mut_area = mut_peaks.area.sum()
+            elif not mut_peaks.empty:
+                mut_area = float(mut_peaks.sort_values("area", ascending=False).iloc[0].area)
+            else:
+                mut_area = 0.0
             
             if wt_area > 0:
                 e["ratio"] = mut_area / wt_area
@@ -269,6 +288,100 @@ def _calculate_ratios(entries: list[dict]):
                 e["ratio"] = 0.0
         else:
             e["ratio"] = 0.0
+
+def _summarize_peak_areas(entry: dict) -> tuple[float, float]:
+    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+    if peaks.empty:
+        return 0.0, 0.0
+
+    wt_peak = peaks[peaks.label == "WT"]
+    mut_peaks = peaks[peaks.label.isin(["MUT", "ITD"])]
+
+    wt_area = 0.0
+    if not wt_peak.empty:
+        wt_area = float(wt_peak.sort_values("peaks", ascending=False).iloc[0].area)
+    if entry["assay"] == "FLT3-ITD":
+        mut_area = float(mut_peaks.area.sum()) if not mut_peaks.empty else 0.0
+    elif not mut_peaks.empty:
+        mut_area = float(mut_peaks.sort_values("area", ascending=False).iloc[0].area)
+    else:
+        mut_area = 0.0
+    return wt_area, mut_area
+
+def _summarize_detected_peaks(entry: dict) -> dict:
+    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+    wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
+    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("basepairs") if not peaks.empty else pd.DataFrame()
+
+    wt_bp = float(wt_rows.iloc[0].basepairs) if not wt_rows.empty else np.nan
+    wt_area = float(wt_rows.iloc[0].area) if not wt_rows.empty else 0.0
+    mut_bps = [round(float(v), 2) for v in mut_rows.basepairs.tolist()] if not mut_rows.empty else []
+    mut_areas = [round(float(v), 2) for v in mut_rows.area.tolist()] if not mut_rows.empty else []
+
+    return {
+        "wt_bp": wt_bp,
+        "wt_area": wt_area,
+        "mut_bps": mut_bps,
+        "mut_areas": mut_areas,
+        "mut_area_total": float(sum(mut_areas)),
+    }
+
+def _interpret_entry(entry: dict) -> str:
+    assay = entry["assay"]
+    ratio = float(entry.get("ratio", 0.0))
+    peak_summary = _summarize_detected_peaks(entry)
+    positive_ratio = _assay_positive_ratio(assay)
+
+    if assay == "FLT3-ITD":
+        if ratio >= positive_ratio:
+            return "Positiv FLT3-ITD"
+        if peak_summary["mut_bps"]:
+            return "Negativ FLT3-ITD - lavniva dokumentert"
+        return "Ingen FLT3-ITD pavist"
+    if assay == "FLT3-D835":
+        if ratio >= positive_ratio:
+            return "Positiv FLT3-D835"
+        if peak_summary["mut_bps"]:
+            return "FLT3-D835 under positiv grense - dokumentert"
+        return "Ingen FLT3-D835 pavist"
+    if assay == "NPM1":
+        if ratio >= positive_ratio:
+            return "Positiv NPM1"
+        if peak_summary["mut_bps"]:
+            return "Mulig NPM1 - vurder manuelt"
+        return "Ingen NPM1-mutasjon pavist"
+    return "Ingen tolkning"
+
+def generate_flt3_peak_report(entries: list[dict], outdir: Path):
+    """Write a flat CSV that mirrors the worksheet-style assay summary."""
+    rows = []
+    for entry in entries:
+        peak_summary = _summarize_detected_peaks(entry)
+        rows.append({
+            "DIT": entry.get("dit") or "",
+            "File": entry["fsa"].file_name,
+            "Assay": entry["assay"],
+            "Group": entry.get("group") or "",
+            "Parallel": entry.get("parallel") or "",
+            "Treatment": entry.get("analysis_type") or "",
+            "InjectionTime": entry.get("injection_time"),
+            "WT_bp": round(float(peak_summary["wt_bp"]), 2) if not np.isnan(peak_summary["wt_bp"]) else "",
+            "WT_Area": round(peak_summary["wt_area"], 2),
+            "Mutant_bp": ", ".join(f"{bp:.2f}" for bp in peak_summary["mut_bps"]),
+            "Mutant_Area": ", ".join(f"{area:.2f}" for area in peak_summary["mut_areas"]),
+            "Mutant_Area_Total": round(peak_summary["mut_area_total"], 2),
+            "Ratio": round(float(entry.get("ratio", 0.0)), 4),
+            "Interpretation": _interpret_entry(entry),
+            "LadderQC": entry.get("ladder_qc_status", ""),
+            "LadderR2": round(float(entry.get("ladder_r2", np.nan)), 4) if not np.isnan(entry.get("ladder_r2", np.nan)) else "",
+        })
+
+    if rows:
+        df = pd.DataFrame(rows)
+        outdir.mkdir(parents=True, exist_ok=True)
+        csv_path = outdir / "Final_Detailed_Peak_Report.csv"
+        df.to_csv(csv_path, index=False)
+        print_green(f"FLT3 detailed peak report saved to {csv_path}")
 
 def generate_flt3_qc_report(entries: list[dict], outdir: Path):
     """Generates a CSV report summarizing FLT3 QC controls."""
@@ -282,6 +395,11 @@ def generate_flt3_qc_report(entries: list[dict], outdir: Path):
         peaks = e["peaks_by_channel"][e["primary_peak_channel"]]
         wt_peaks = peaks[peaks.label == "WT"]
         mut_peaks = peaks[peaks.label.isin(["MUT", "ITD"])]
+        wt_area, mut_area = _summarize_peak_areas(e)
+        ratio = float(e.get("ratio", 0.0))
+        assay_cfg = ASSAY_CONFIG.get(e["assay"], {})
+        min_wt_area = float(assay_cfg.get("control_wt_min_area", 0.0))
+        min_ratio = _assay_positive_ratio(e["assay"])
         
         status = "FAIL"
         details = ""
@@ -295,24 +413,33 @@ def generate_flt3_qc_report(entries: list[dict], outdir: Path):
                 details = f"Unexpected mutant peaks found: {mut_peaks.basepairs.tolist()}"
         elif group == "reactive_control":
             # ivs-0000: Expect WT peaks
-            if not wt_peaks.empty:
+            if not wt_peaks.empty and wt_area >= min_wt_area:
                 status = "PASS"
             else:
                 status = "FAIL"
-                details = "No WT peak detected"
+                if wt_peaks.empty:
+                    details = "No WT peak detected"
+                else:
+                    details = f"WT area below threshold ({wt_area:.0f} < {min_wt_area:.0f})"
         elif group == "positive_control":
             # ivs-p001: Expect mutant peaks
-            if not mut_peaks.empty:
+            if not mut_peaks.empty and (ratio >= min_ratio or wt_peaks.empty):
                 status = "PASS"
             else:
                 status = "FAIL"
-                details = "No mutant/ITD peak detected"
+                if mut_peaks.empty:
+                    details = "No mutant/ITD peak detected"
+                else:
+                    details = f"Mutant ratio below threshold ({ratio:.4f} < {min_ratio:.4f})"
                 
         qc_data.append({
             "File": e["fsa"].file_name,
             "ControlGroup": group,
             "Assay": e["assay"],
             "InjectionTime": e["injection_time"],
+            "WT_Area": round(wt_area, 2),
+            "Mutant_Area": round(mut_area, 2),
+            "Ratio": round(ratio, 4),
             "Status": status,
             "Details": details
         })
@@ -398,6 +525,7 @@ def run_pipeline(
             "n_ladder_steps": metrics["n_ladder_steps"],
             "n_size_standard_peaks": metrics["n_size_standard_peaks"],
             "injection_time": c["injection_time"],
+            "protocol_injection_time": c.get("protocol_injection_time", c["injection_time"]),
         })
 
     if not entries:
@@ -408,6 +536,7 @@ def run_pipeline(
 
     # Generate QC Report
     generate_flt3_qc_report(entries, assay_dir)
+    generate_flt3_peak_report(entries, assay_dir)
 
     return finalize_pipeline_run(
         entries,

@@ -75,5 +75,29 @@ class TestClassification(unittest.TestCase):
         self.assertEqual(res["parallel"], "p1")
         self.assertEqual(res["injection_time"], 3)
 
+    def test_flt3_npm1_filename_dispatch(self):
+        APP_SETTINGS["active_analysis"] = "flt3"
+        self.assertEqual(detect_assay("26OUM00042_npm1_p2.fsa"), "NPM1")
+
+    def test_flt3_parallel_regex_avoids_false_matches(self):
+        APP_SETTINGS["active_analysis"] = "flt3"
+        from unittest.mock import patch
+        from core.analyses.flt3 import classification as flt3_classification
+
+        with patch.object(flt3_classification, "get_injection_metadata", return_value={"injection_time": 3, "injection_voltage": 15}):
+            res = classify_fsa(Path("26OUM00042_npm1_run2026.fsa"))
+        self.assertIsNotNone(res)
+        self.assertIsNone(res["parallel"])
+
+    def test_flt3_protocol_injection_uses_preferred_run_type(self):
+        APP_SETTINGS["active_analysis"] = "flt3"
+        from unittest.mock import patch
+        from core.analyses.flt3 import classification as flt3_classification
+
+        with patch.object(flt3_classification, "get_injection_metadata", return_value={"injection_time": 3, "injection_voltage": 15}):
+            res = classify_fsa(Path("25OUM11314_p1_ITD_1-10__310725_A02.fsa"))
+        self.assertEqual(res["injection_time"], 3)
+        self.assertEqual(res["protocol_injection_time"], 1)
+
 if __name__ == "__main__":
     unittest.main()

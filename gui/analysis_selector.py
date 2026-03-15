@@ -12,7 +12,7 @@ def make_analysis_selector() -> pn.widgets.Select:
         name="Select Analysis",
         options={
             "Klonalitet (Clonality)": "clonality",
-            "FLT3 (Skeleton)": "flt3"
+            "FLT3 / NPM1": "flt3"
         },
         value=active,
         sizing_mode="stretch_width",

@@ -1,13 +1,13 @@
-"""
-FLT3 Analysis — FSA Classification (Skeleton).
-"""
+"""FLT3 / NPM1 FSA classification."""
 from __future__ import annotations
+import re
 from pathlib import Path
-from core.analyses.flt3.config import ASSAY_CONFIG
 
 from Bio import SeqIO
 from fraggler.fraggler import print_warning
-from core.analyses.flt3.config import ASSAY_CONFIG
+from core.analyses.flt3.config import ASSAY_CONFIG, PREFERRED_INJECTION_TIME
+
+PARALLEL_RE = re.compile(r"(^|[_-])(p[12])([_-]|$)", re.IGNORECASE)
 
 def get_injection_metadata(fsa_path: Path) -> dict:
     """Extracts injection time from FSA metadata."""
@@ -25,11 +25,11 @@ def get_injection_metadata(fsa_path: Path) -> dict:
 def detect_assay(name: str) -> str:
     """Detects FLT3/NPM1 assay from filename."""
     lower = name.lower()
-    if "itd" in lower or "ratio" in lower:
+    if any(token in lower for token in ("itd", "ratio", "itdr")):
         return "FLT3-ITD"
-    if "d835" in lower or "tkd" in lower or "d8365" in lower:
+    if any(token in lower for token in ("d835", "tkd", "d8365", "cutting", "kutting")):
         return "FLT3-D835"
-    if "npm1" in lower:
+    if any(token in lower for token in ("npm1", "npm-1", "npm_1")):
         return "NPM1"
     return "UNKNOWN"
 
@@ -69,11 +69,14 @@ def classify_fsa(fsa_path: Path) -> dict | None:
     elif "tkd" in lower or "kutting" in lower:
         analysis_type = "TKD_digested"
 
+    protocol_injection_time = PREFERRED_INJECTION_TIME.get(analysis_type)
+    if protocol_injection_time is None:
+        protocol_injection_time = PREFERRED_INJECTION_TIME.get(assay, meta["injection_time"])
+
     parallel = None
-    if "p1" in lower:
-        parallel = "p1"
-    elif "p2" in lower:
-        parallel = "p2"
+    match = PARALLEL_RE.search(lower)
+    if match:
+        parallel = match.group(2).lower()
 
     return {
         "assay": assay,
@@ -90,4 +93,5 @@ def classify_fsa(fsa_path: Path) -> dict | None:
         "mut_bp": cfg.get("mut_bp"),
         "injection_time": meta["injection_time"],
         "injection_voltage": meta["injection_voltage"],
+        "protocol_injection_time": protocol_injection_time,
     }

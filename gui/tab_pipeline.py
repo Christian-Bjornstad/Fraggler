@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Pipeline Tab (Redesigned)
+Fraggler Diagnostics — Pipeline Tab
 """
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from config import APP_SETTINGS, save_settings
 
 def make_pipeline_tab() -> pn.Column:
     s = APP_SETTINGS["pipeline"]
+    active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
+    is_flt3 = active_analysis == "flt3"
 
     input_dir = pn.widgets.TextInput(
         name="Input Folder (.fsa files)",
@@ -40,7 +42,7 @@ def make_pipeline_tab() -> pn.Column:
     assay_filter = pn.widgets.TextInput(
         name="Custom Assay Filter (only when scope=custom)",
         value=s.get("assay_filter_substring", ""),
-        placeholder="e.g. TCRgA, FR3",
+        placeholder="e.g. ITD, D835, NPM1" if is_flt3 else "e.g. TCRgA, FR3",
         sizing_mode="stretch_width"
     )
 
@@ -53,6 +55,28 @@ def make_pipeline_tab() -> pn.Column:
     status_md = pn.pane.HTML(
         '<div style="color:#94a3b8; font-size:13px">Ready. Set the input folder and click Run.</div>',
         sizing_mode="stretch_width"
+    )
+    analysis_note = pn.pane.HTML(
+        """
+        <div style="padding:14px 16px; border-radius:12px; background:linear-gradient(135deg,#f8fafc 0%,#ecfeff 100%);
+                    border:1px solid #cbd5e1; color:#0f172a;">
+          <div style="font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.08em; color:#0f766e; margin-bottom:8px;">
+            FLT3 / NPM1 workflow
+          </div>
+          <div style="font-size:14px; line-height:1.5;">
+            Preferred injections from the current worksheet are <strong>1 s</strong> for FLT3-ITD and ratio runs,
+            and <strong>3 s</strong> for FLT3-D835, TKD-digested, undiluted, and NPM1 runs.
+            File names should still clearly contain <code>itd</code>, <code>d835</code>/<code>tkd</code>, or <code>npm1</code>.
+          </div>
+        </div>
+        """ if is_flt3 else
+        """
+        <div style="padding:14px 16px; border-radius:12px; background:#f8fafc; border:1px solid #e2e8f0; color:#334155; font-size:14px; line-height:1.5;">
+          The pipeline tab runs the active analysis on one folder at a time. Use <code>custom</code> scope if you want
+          to stage a narrower subset by assay name.
+        </div>
+        """,
+        sizing_mode="stretch_width",
     )
 
     def on_run_clicked(event):
@@ -114,8 +138,15 @@ def make_pipeline_tab() -> pn.Column:
     open_btn.on_click(on_open_output)
 
     return pn.Column(
-        section_header("Pipeline Run", "Run Fraggler assay analysis on a single folder of .fsa files"),
+        section_header(
+            "Pipeline Run",
+            "Run FLT3 / NPM1 fragment analysis on a single folder of .fsa files"
+            if is_flt3 else
+            "Run Fraggler assay analysis on a single folder of .fsa files"
+        ),
         VSpace(8),
+        analysis_note,
+        VSpace(10),
 
         pn.Row(run_btn, open_btn, spinner, styles={"gap": "12px", "align-items": "center"}),
         status_md,

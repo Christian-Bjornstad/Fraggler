@@ -367,55 +367,153 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
         )
     html_lines.append("</table>")
 
-def _render_flt3_results_table(dit_entries: list[dict], html_lines: list[str]):
-    """Renders a specialized summary table for FLT3/NPM1 results."""
-    html_lines.append("<h2>Analyseresultater – FLT3 / NPM1</h2>")
-    html_lines.append(
-        "<table><tr><th>Assay</th><th>Prøvetype</th><th>Parallell</th><th>Behandling</th>"
-        "<th>Resultat</th></tr>"
-    )
-    
-    for e in sorted(dit_entries, key=lambda x: (x["assay"], x["analysis_type"])):
-        assay = e["assay"]
-        g = e["group"]
-        atype = e["analysis_type"]
-        inj = e.get("injection_time", 0)
-        ratio = e.get("ratio", 0.0)
-        par = e.get("parallel") or "&mdash;"
-        
-        # Treatment description
-        treatment = "Standard"
-        if atype == "TKD_digested": treatment = "Digert (EcoRV)"
-        elif atype == "10x_diluted": treatment = "Fortynnet 1:10"
-        elif atype == "25x_diluted": treatment = "Fortynnet 1:25"
-        elif atype == "ratio_quant": treatment = "Ratio-sett"
-        elif atype == "undiluted": treatment = "Ufortynnet"
+def _format_flt3_treatment(entry: dict) -> str:
+    atype = entry["analysis_type"]
+    treatment = "Standard"
+    if atype == "TKD_digested":
+        treatment = "Digert (EcoRV)"
+    elif atype == "10x_diluted":
+        treatment = "Fortynnet 1:10"
+    elif atype == "25x_diluted":
+        treatment = "Fortynnet 1:25"
+    elif atype == "ratio_quant":
+        treatment = "Ratio-sett"
+    elif atype == "undiluted":
+        treatment = "Ufortynnet"
+    protocol_inj = entry.get("protocol_injection_time", entry.get("injection_time", 0))
+    return f"{treatment} - {protocol_inj}s protokoll"
 
-        # Extract peak areas
-        wt_area, mut_area = 0.0, 0.0
-        peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
-        if not peaks.empty:
-            wt_row = peaks[peaks.label == "WT"]
-            if not wt_row.empty: wt_area = wt_row.sort_values("peaks", ascending=False).iloc[0].area
-            
-            mut_row = peaks[peaks.label.isin(["MUT", "ITD"])]
-            if not mut_row.empty: mut_area = mut_row.area.sum()
+def _format_peak_list(mut_rows: pd.DataFrame, max_peaks: int = 3) -> str:
+    if mut_rows.empty:
+        return "Ingen mutasjoner detektert"
+    mut_rows = mut_rows.sort_values("basepairs")
+    parts = []
+    for idx, (_, row) in enumerate(mut_rows.iterrows(), start=1):
+        if idx > max_peaks:
+            remaining = len(mut_rows) - max_peaks
+            parts.append(f"+ {remaining} andre topper")
+            break
+        parts.append(f"{row.basepairs:.1f} bp ({row.area:,.0f})")
+    return "<br>".join(parts)
 
-        ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
-        
-        # Simple interpretation
-        label = "Villtype"
-        if assay == "FLT3-ITD" and mut_area > 0: label = "MUTERT (ITD)"
-        elif assay == "FLT3-D835" and ratio > 0.01: label = "MUTERT (D835)"
-        elif assay == "NPM1" and mut_area > 0: label = "MUTERT (NPM1)"
-        
-        html_lines.append(
-            f"<tr><td><strong>{escape(assay)}</strong></td>"
-            f"<td>{escape(g)}</td><td>{escape(par)}</td>"
-            f"<td>{escape(treatment)}<br><span class='small'>{inj}s inj.</span></td>"
-            f"<td><strong>{label}</strong></td></tr>"
+def _peak_text(row: pd.Series | None, area_key: str = "area") -> str:
+    if row is None:
+        return "&mdash;"
+    return f"{float(row.basepairs):.1f} bp <span class='small'>({float(row.get(area_key, 0.0)):,.0f})</span>"
+
+def _dominant_peak(rows: pd.DataFrame, area_key: str = "area") -> pd.Series | None:
+    if rows.empty:
+        return None
+    return rows.sort_values(area_key, ascending=False).iloc[0]
+
+def _find_peak_in_range(peaks: pd.DataFrame, bp_min: float, bp_max: float) -> pd.DataFrame:
+    if peaks.empty:
+        return pd.DataFrame()
+    return peaks[(peaks.basepairs >= bp_min) & (peaks.basepairs <= bp_max)].copy()
+
+def _itd_concordance_text(wt_row: pd.Series | None, mut_rows: pd.DataFrame) -> str:
+    if wt_row is None and mut_rows.empty:
+        return "Ingen tydelige ITD-signaler"
+    wt_blue = float(wt_row.get("area_DATA1", 0.0)) if wt_row is not None else 0.0
+    wt_green = float(wt_row.get("area_DATA2", 0.0)) if wt_row is not None else 0.0
+    mut_blue = float(mut_rows.get("area_DATA1", pd.Series(0.0)).sum()) if not mut_rows.empty else 0.0
+    mut_green = float(mut_rows.get("area_DATA2", pd.Series(0.0)).sum()) if not mut_rows.empty else 0.0
+
+    seen_blue = mut_blue > max(1000.0, wt_blue * 0.02)
+    seen_green = mut_green > max(1000.0, wt_green * 0.02)
+    if seen_blue and seen_green:
+        return "Mutant signal i begge kanaler"
+    if seen_blue:
+        return "Mutant signal mest tydelig i bla kanal"
+    if seen_green:
+        return "Mutant signal mest tydelig i gronn kanal"
+    return "Ingen sikker kanal-konkordans"
+
+def _d835_digest_status(peaks: pd.DataFrame, wt_row: pd.Series | None, mut_row: pd.Series | None) -> tuple[str, pd.Series | None]:
+    digest_rows = _find_peak_in_range(peaks, 145.0, 155.5)
+    digest_row = _dominant_peak(digest_rows)
+    digest_area = float(digest_row.area) if digest_row is not None else 0.0
+    wt_area = float(wt_row.area) if wt_row is not None else 0.0
+    mut_area = float(mut_row.area) if mut_row is not None else 0.0
+
+    if digest_row is None:
+        return "Ingen tydelig 150 bp digest-kontroll", None
+    if digest_area >= max(wt_area, mut_area) * 0.60:
+        return "Mulig ufullstendig kutting", digest_row
+    if mut_row is not None and mut_area > wt_area:
+        return "Mutert digest-mønster", digest_row
+    if wt_row is not None and wt_area >= mut_area:
+        return "WT digest-mønster", digest_row
+    return "Uavklart digest-mønster", digest_row
+
+def _build_flt3_summary_table(e: dict) -> str:
+    """Validation-oriented FLT3/NPM1 table below each figure."""
+    assay = e["assay"]
+    ratio = float(e.get("ratio", 0.0))
+    ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+    positive_ratio = float(ASSAY_CONFIG.get(assay, {}).get("positive_ratio", 0.01))
+    peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
+
+    wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
+    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values(["peaks", "basepairs"], ascending=[False, True]) if not peaks.empty else pd.DataFrame()
+    wt_main = _dominant_peak(wt_row)
+    mut_main = _dominant_peak(mut_rows)
+
+    if assay == "FLT3-ITD":
+        wt_g = wt_b = mut_g = mut_b = 0.0
+        if wt_main is not None:
+            r = wt_main
+            wt_g = r.get("area_DATA1", 0.0)
+            wt_b = r.get("area_DATA2", 0.0)
+        if not mut_rows.empty:
+            mut_g = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
+            mut_b = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
+        mut_prop = (mut_rows.area.sum() / (mut_rows.area.sum() + float(wt_main.area))) if (wt_main is not None and (mut_rows.area.sum() + float(wt_main.area)) > 0) else 0.0
+        label = "Positiv" if ratio >= positive_ratio else "Negativ"
+        if ratio < positive_ratio and not mut_rows.empty:
+            label = "Negativ, dokumentert"
+        concordance = _itd_concordance_text(wt_main, mut_rows)
+        return (
+            "<div style='margin-top:10px; margin-bottom:24px;'>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
+            "<tr><th>WT-topp</th><th>Muterte topper</th><th>Bla kanal</th><th>Gronn kanal</th><th>Ratioer</th><th>Validering</th></tr>"
+            f"<tr><td>{_peak_text(wt_main)}</td>"
+            f"<td>{_format_peak_list(mut_rows, max_peaks=6)}</td>"
+            f"<td>WT: {wt_g:,.0f}<br>Mut: {mut_g:,.0f}</td>"
+            f"<td>WT: {wt_b:,.0f}<br>Mut: {mut_b:,.0f}</td>"
+            f"<td>ITD-ratio: <strong>{ratio_str}</strong><br>"
+            f"<span class='small'>Mut/(Mut+WT): {mut_prop:.4f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
+            f"<td><strong>{label}</strong><br><span class='small'>{concordance}</span></td></tr></table></div>"
         )
-    html_lines.append("</table>")
+
+    if assay == "FLT3-D835":
+        digest_status, digest_row = _d835_digest_status(peaks, wt_main, mut_main)
+        label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Under positiv grense"
+        return (
+            "<div style='margin-top:10px; margin-bottom:24px;'>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
+            "<tr><th>WT-topp</th><th>Mutert topp</th><th>150 bp kontroll</th><th>TKD-ratio</th><th>Digest-status</th><th>Validering</th></tr>"
+            f"<tr><td>{_peak_text(wt_main)}</td>"
+            f"<td>{_peak_text(mut_main)}<br><span class='small'>{_format_peak_list(mut_rows, max_peaks=4)}</span></td>"
+            f"<td>{_peak_text(digest_row)}</td>"
+            f"<td><strong>Skjules i rapport</strong><br><span class='small'>Positiv grense > {positive_ratio:.2f}</span></td>"
+            f"<td>{digest_status}</td><td><strong>{label}</strong></td></tr></table></div>"
+        )
+
+    if assay == "NPM1":
+        label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Manuell vurdering"
+        return (
+            "<div style='margin-top:10px; margin-bottom:24px;'>"
+            f"<p class='small'><strong>Validering:</strong> {_format_flt3_treatment(e)}</p>"
+            "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
+            "<tr><th>Villtype</th><th>Mutert</th><th>Ratio</th><th>Validering</th></tr>"
+            f"<tr><td>{_peak_text(wt_main)}</td><td>{_format_peak_list(mut_rows, max_peaks=4)}</td>"
+            f"<td><strong>{ratio_str}</strong></td><td><strong>{label}</strong></td></tr></table></div>"
+        )
+
+    return ""
 
 def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: list[str]):
     """Renders a single assay block with plots for each file."""
@@ -436,10 +534,8 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
         except Exception as ex:
             html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
             
-        # Add detailed ratio tables directly below the plot for FLT3 targets
-        if assay_name == "FLT3-ITD":
-            html_lines.append(_build_itd_detailed_table(e))
-            html_lines.append(_build_d835_detailed_table(e))
+        if assay_name in {"FLT3-ITD", "FLT3-D835", "NPM1"}:
+            html_lines.append(_build_flt3_summary_table(e))
 
     # Add collapsible Comment Box for the overall assay
     html_lines.append(
@@ -456,107 +552,6 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
     )
 
     html_lines.append("</div>")
-
-def _build_itd_detailed_table(e: dict) -> str:
-    """Builds the detailed Excel-like table for ITD (separated Green/Blue)."""
-    peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
-    if peaks.empty: return ""
-    
-    wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
-    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])]
-    
-    # Extract channel 1 (Green) and channel 2 (Blue) if available
-    # Default to 0 if missing
-    wt_g, wt_b = 0.0, 0.0
-    mut_g, mut_b = 0.0, 0.0
-    
-    if not wt_row.empty:
-        r = wt_row.iloc[0]
-        wt_g = r.get("area_DATA1", 0.0)
-        wt_b = r.get("area_DATA2", 0.0)
-        
-    if not mut_rows.empty:
-        mut_g = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
-        mut_b = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
-        
-    ratio = e.get("ratio", 0.0)
-    ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
-    
-    # Check if ratio suggests a positive result (e.g. > 0.01)
-    # The summary already does this, but here it's clearly for the ratio
-    label = "Negativ"
-    if ratio > 0.01: label = "Positiv"
-    
-    t = []
-    t.append("<div style='margin-top: 10px; margin-bottom: 24px;'>")
-    t.append("<table style='width: 100%; border: 1px solid #e2e8f0;'>")
-    t.append(
-        "<tr><th colspan='2' style='text-align:center;'>Villtype (WT)</th>"
-        "<th colspan='2' style='text-align:center;'>Mutert (ITD)</th>"
-        "<th>Ratio</th><th>Tolkning</th></tr>"
-    )
-    t.append("<tr><th>Grønn (Area)</th><th>Blå (Area)</th><th>Grønn (Area)</th><th>Blå (Area)</th><th>ITD-ratio</th><th></th></tr>")
-    
-    t.append("<tr>")
-    t.append(f"<td>{wt_g:,.0f}</td><td>{wt_b:,.0f}</td>")
-    t.append(f"<td>{mut_g:,.0f}</td><td>{mut_b:,.0f}</td>")
-    t.append(f"<td><strong>{ratio_str}</strong></td><td><strong>{label}</strong></td>")
-    t.append("</tr>")
-    t.append("</table></div>")
-    return "".join(t)
-
-def _build_d835_detailed_table(e: dict) -> str:
-    """Builds the detailed Excel-like table for D835 (separate mutant peaks)."""
-    peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
-    if peaks.empty: return ""
-    
-    wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
-    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("peaks", ascending=False)
-    
-    wt_area = wt_row.iloc[0].area if not wt_row.empty else 0.0
-    
-    t = []
-    t.append("<div style='margin-top: 10px; margin-bottom: 24px;'>")
-    t.append("<table style='width: 100%; border: 1px solid #e2e8f0;'>")
-    
-    if mut_rows.empty:
-        t.append("<tr><th>WT (Sort Area)</th><th>Mutert</th><th>Ratio</th><th>Tolkning</th></tr>")
-        t.append(f"<tr><td>{wt_area:,.0f}</td><td>Ingen mutasjoner detektert</td><td>&mdash;</td><td><strong>Negativ</strong></td></tr>")
-    else:
-        # Build headers for up to N mutant peaks (usually 1 or 2)
-        n_muts = len(mut_rows)
-        headers = ["WT (Sort Area)"]
-        for i in range(1, n_muts + 1):
-            headers.append(f"Mutert Peak {i} (Area) [Størrelse]")
-            headers.append(f"Ratio {i}")
-        headers.append("Total Ratio")
-        headers.append("Tolkning")
-        
-        t.append("<tr>")
-        for h in headers: t.append(f"<th>{h}</th>")
-        t.append("</tr>")
-        
-        t.append("<tr>")
-        t.append(f"<td>{wt_area:,.0f}</td>")
-        
-        tot_mut = 0.0
-        for _, r in mut_rows.iterrows():
-            m_area = r.area
-            m_bp = r.basepairs
-            tot_mut += m_area
-            r_val = m_area / wt_area if wt_area > 0 else 0.0
-            t.append(f"<td>{m_area:,.0f} <span class='small'>[{m_bp:.1f} bp]</span></td>")
-            t.append(f"<td>{r_val:.4f}</td>")
-            
-        tot_ratio = tot_mut / wt_area if wt_area > 0 else 0.0
-        label = "Positiv" if tot_ratio > 0.01 else "Negativ"
-        
-        t.append(f"<td><strong>{tot_ratio:.4f}</strong></td>")
-        t.append(f"<td><strong>{label}</strong></td>")
-        t.append("</tr>")
-        
-    t.append("</table></div>")
-    return "".join(t)
 
 def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: list[str]):
     """Renders a combination block for TCRb replicates."""
@@ -665,9 +660,6 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
         html_lines: list[str] = []
         _create_html_header(dit, year, len(dit_entries), assay_outdir, html_lines)
         _render_file_summary_table(dit_entries, html_lines)
-
-        if get_active_analysis_name() == "flt3":
-            _render_flt3_results_table(dit_entries, html_lines)
 
         html_lines.append("<h2>Assay-spesifikke oversikter</h2>")
         ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER]
