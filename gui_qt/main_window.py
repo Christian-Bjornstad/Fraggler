@@ -7,6 +7,7 @@ from PyQt6.QtGui import QIcon
 
 from gui_qt.styles import VIBRANT_PRO_QSS
 from gui_qt.tabs.tab_batch import TabBatch
+from gui_qt.tabs.tab_ladder import TabLadder
 from gui_qt.tabs.tab_log import TabLog
 from gui_qt.tabs.tab_settings import TabSettings
 from config import APP_SETTINGS, save_settings
@@ -54,10 +55,11 @@ class AnalysisGroup(QWidget):
         self.sub_layout.setSpacing(0)
         
         self.btn_run = AnalysisSubButton("•  Run")
+        self.btn_ladder = AnalysisSubButton("•  Ladder")
         self.btn_log = AnalysisSubButton("•  Log")
         self.btn_settings = AnalysisSubButton("•  Settings")
-        
-        self.sub_buttons = [self.btn_run, self.btn_log, self.btn_settings]
+
+        self.sub_buttons = [self.btn_run, self.btn_ladder, self.btn_log, self.btn_settings]
         for i, btn in enumerate(self.sub_buttons):
             self.sub_layout.addWidget(btn)
             btn.clicked.connect(lambda _, b=btn, idx=i: self._handle_sub_click(b, idx))
@@ -130,6 +132,7 @@ class MainWindow(QMainWindow):
         
         # Tabs
         self.tab_run = TabBatch()
+        self.tab_ladder = TabLadder()
         self.tab_log = TabLog()
         self.tab_settings = TabSettings()
         
@@ -142,6 +145,7 @@ class MainWindow(QMainWindow):
         
         # Add to stack
         self.stacked_widget.addWidget(self.tab_run)
+        self.stacked_widget.addWidget(self.tab_ladder)
         self.stacked_widget.addWidget(self.tab_log)
         self.stacked_widget.addWidget(self.tab_settings)
         

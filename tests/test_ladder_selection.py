@@ -1,10 +1,12 @@
 import unittest
 from unittest.mock import patch
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import numpy as np
 import pandas as pd
 
-from core.analysis import _select_best_ladder_candidate
+from core.analysis import _select_best_ladder_candidate, compute_ladder_qc_metrics, load_ladder_adjustment
 
 
 class DummyModel:
@@ -55,6 +57,27 @@ class TestLadderSelection(unittest.TestCase):
             selected = _select_best_ladder_candidate(DummyFsa())
 
         self.assertIs(selected, second)
+
+    def test_compute_ladder_qc_metrics_returns_error_metrics(self):
+        fsa = DummyFsa()
+        metrics = compute_ladder_qc_metrics(fsa)
+        self.assertIn("r2", metrics)
+        self.assertIn("mean_abs_error_bp", metrics)
+        self.assertIn("max_abs_error_bp", metrics)
+        self.assertEqual(metrics["mean_abs_error_bp"], 0.0)
+        self.assertEqual(metrics["max_abs_error_bp"], 0.0)
+
+    def test_load_ladder_adjustment_reads_json_mapping(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp) / "example.fsa"
+            base.write_text("")
+            adj = base.with_suffix(".ladder_adj.json")
+            adj.write_text('{"0": 1, "2": 3}', encoding="utf-8")
+
+            dummy = type("Dummy", (), {"file": base})()
+            mapping = load_ladder_adjustment(dummy)
+
+        self.assertEqual(mapping, {0: 1, 2: 3})
 
 
 if __name__ == "__main__":

@@ -50,7 +50,7 @@ LADDER_CANDIDATE_COUNT = 5
 
 def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
     """Apply polynomial degree-3 fit with iterative outlier removal.
-    
+
     Used as a fallback when standard fitting fails, and also as a
     post-fit refinement when R² < MIN_R2_QUALITY.
     """
@@ -58,8 +58,7 @@ def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
         from sklearn.linear_model import LinearRegression
         X_vals = np.array(fsa.best_size_standard, dtype=float)
         Y_vals = np.array(fsa.ladder_steps, dtype=float)
-        
-        # Iterative outlier removal
+
         X_iter = X_vals.copy()
         Y_iter = Y_vals.copy()
         for _it in range(5):
@@ -73,28 +72,26 @@ def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
                 break
             X_iter = np.delete(X_iter, max_idx)
             Y_iter = np.delete(Y_iter, max_idx)
-        
-        # Final polynomial fit
+
         coeffs = np.polyfit(X_iter, Y_iter, 3)
         all_time = np.arange(len(fsa.sample_data))
         bp_all = np.polyval(coeffs, all_time)
-        
+
         df = (pd.DataFrame({"peaks": fsa.sample_data})
               .reset_index().rename(columns={"index": "time"}))
         df["basepairs"] = np.round(bp_all, 2)
         df = df.loc[df.basepairs >= 0]
-        
+
         fsa.sample_data_with_basepairs = df
         fsa.fitted_to_model = True
         fsa.best_size_standard = X_iter
         fsa.ladder_steps = Y_iter
-        
-        # Dummy linear model for QC compatibility
+
         dummy_model = LinearRegression()
         dummy_model.coef_ = np.array([coeffs[-2]])
         dummy_model.intercept_ = coeffs[-1]
         fsa.ladder_model = dummy_model
-        
+
         print_green(f"[{label}] Brukte polynomial refinement (degree-3, outlier removal) for {fsa_path.name}")
         return fsa
     except Exception as e:
@@ -132,10 +129,10 @@ def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float]:
         -float(metrics.get("r2", float("-inf"))),
     )
 
-
-def _select_best_ladder_candidate(fsa: FsaFile) -> FsaFile | None:
+def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.ndarray] | None = None) -> FsaFile | None:
     """Fit the top smooth candidates and keep the best actual ladder fit."""
-    ranked_combinations = _rank_size_standard_combinations(fsa)
+    if ranked_combinations is None:
+        ranked_combinations = _rank_size_standard_combinations(fsa)
     if not ranked_combinations:
         return None
 
@@ -188,6 +185,20 @@ def load_ladder_adjustment(fsa: FsaFile) -> dict[int, int] | None:
     return None
 
 
+def _try_apply_saved_ladder_adjustment(fsa: FsaFile, mapping: dict[int, int] | None, label: str) -> FsaFile | None:
+    """Applies a saved ladder adjustment if valid, otherwise warns and falls back to auto-fit."""
+    if not mapping:
+        return None
+    try:
+        print_green(f"[{label}] Applying manual ladder adjustment for {fsa.file_name}")
+        return apply_manual_ladder_mapping(fsa, mapping)
+    except Exception as exc:
+        print_warning(
+            f"[{label}] Ignoring invalid saved ladder adjustment for {fsa.file_name}: {exc}. Falling back to auto-fit."
+        )
+        return None
+
+
 def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     """Ladder-fit for LIZ (TCRg/IGK/KDE).
     
@@ -215,10 +226,9 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     )
     base_fsa = find_size_standard_peaks(base_fsa)
     
-    mapping = load_ladder_adjustment(base_fsa)
-    if mapping:
-        print_green(f"[LIZ] Applying manual ladder adjustment for {base_fsa.file_name}")
-        return apply_manual_ladder_mapping(base_fsa, mapping)
+    applied = _try_apply_saved_ladder_adjustment(base_fsa, load_ladder_adjustment(base_fsa), "LIZ")
+    if applied is not None:
+        return applied
 
     best_fallback_fsa = None
 
@@ -278,7 +288,6 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                 if not getattr(fsa, "fitted_to_model", False):
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
-                    # Quality gate: check R² and refine if needed
                     qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= MIN_R2_QUALITY:
                         return fsa
@@ -286,13 +295,12 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                         refined = _refine_polynomial(fsa, "LIZ", fsa_path)
                         if refined:
                             return refined
-                        return fsa  # Return original if refinement fails
+                        return fsa
             except ValueError:
                 pass
         except ValueError:
             continue
-            
-    # ------- Polynomial fallback when standard fit completely fails -------
+
     if best_fallback_fsa is not None:
         refined = _refine_polynomial(best_fallback_fsa, "LIZ", fsa_path)
         if refined:
@@ -328,10 +336,9 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     )
     base_fsa = find_size_standard_peaks(base_fsa)
     
-    mapping = load_ladder_adjustment(base_fsa)
-    if mapping:
-        print_green(f"[ROX] Applying manual ladder adjustment for {base_fsa.file_name}")
-        return apply_manual_ladder_mapping(base_fsa, mapping)
+    applied = _try_apply_saved_ladder_adjustment(base_fsa, load_ladder_adjustment(base_fsa), "ROX")
+    if applied is not None:
+        return applied
 
     best_fallback_fsa = None
 
@@ -379,7 +386,7 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
             best = getattr(fsa, "best_size_standard_combinations", None)
             if best is None or best.shape[0] == 0:
                 continue
-                
+
             selected_fit = _select_best_ladder_candidate(fsa)
             if selected_fit is not None:
                 fsa = selected_fit
@@ -393,7 +400,6 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                 if not getattr(fsa, "fitted_to_model", False):
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
-                    # Quality gate: check R² and refine if needed
                     qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= MIN_R2_QUALITY:
                         return fsa
@@ -401,13 +407,12 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                         refined = _refine_polynomial(fsa, "ROX", fsa_path)
                         if refined:
                             return refined
-                        return fsa  # Return original if refinement fails
+                        return fsa
             except ValueError:
                 pass
         except ValueError:
             continue
-            
-    # ------- Polynomial fallback when standard fit completely fails -------
+
     if best_fallback_fsa is not None:
         refined = _refine_polynomial(best_fallback_fsa, "ROX", fsa_path)
         if refined:
@@ -477,7 +482,7 @@ def estimate_running_baseline(
 # ==================================================================
 
 def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
-    """Beregner R² for ladder-fit using actual basepair mapping."""
+    """Beregner QC-metrikker for ladder-fit using actual basepair mapping."""
     ladder_size = np.array(fsa.ladder_steps, dtype=float)
     best_combination = np.array(fsa.best_size_standard, dtype=float)
     
@@ -498,12 +503,23 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
         predicted = fsa.ladder_model.predict(best_combination.reshape(-1, 1))
 
     if predicted is None or len(predicted) == 0:
-        return {"r2": float("nan"), "n_ladder_steps": 0, "n_size_standard_peaks": 0}
+        return {
+            "r2": float("nan"),
+            "mean_abs_error_bp": float("inf"),
+            "max_abs_error_bp": float("inf"),
+            "n_ladder_steps": 0,
+            "n_size_standard_peaks": 0,
+        }
 
     r2 = float(r2_score(ladder_size, predicted))
+    abs_errors = np.abs(ladder_size - predicted)
+    mean_abs_error = float(np.mean(abs_errors)) if abs_errors.size else float("inf")
+    max_abs_error = float(np.max(abs_errors)) if abs_errors.size else float("inf")
 
     return {
         "r2": r2,
+        "mean_abs_error_bp": mean_abs_error,
+        "max_abs_error_bp": max_abs_error,
         "n_ladder_steps": int(ladder_size.size),
         "n_size_standard_peaks": int(best_combination.size),
     }

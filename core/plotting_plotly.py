@@ -313,7 +313,12 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         if df0 is not None and not df0.empty:
             for _, row in df0.iterrows():
                 x, y = float(row.get("basepairs", np.nan)), float(row.get("peaks", np.nan))
-                if np.isfinite(x) and np.isfinite(y): initial_peaks.append({"x": x, "y": y, "active": True})
+                if np.isfinite(x) and np.isfinite(y):
+                    peak = {"x": x, "y": y, "active": True}
+                    area = float(row.get("area", np.nan))
+                    if np.isfinite(area):
+                        peak["area"] = area
+                    initial_peaks.append(peak)
 
     fig, ymax, peaks_trace_index = _create_plotly_figure(data)
     
@@ -342,6 +347,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
     
     # The Peaks trace is always the LAST trace added so far.
     final_peaks_trace_index = len(fig.data) - 1
+    primary_trace_index = data["channels_to_plot"].index(data["primary_ch"]) if data["primary_ch"] in data["channels_to_plot"] else 0
 
     div_id = f"peakplot_{data['sample_id'].replace('.','_')}_{uuid.uuid4().hex}"
     fig_json = json.dumps(fig.to_plotly_json())
@@ -352,7 +358,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
 <div id="{div_id}_table_container" class="peak-table-container" style="display:none;">
     <table id="{div_id}_table">
         <thead>
-            <tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th></tr>
+            <tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th><th>Area</th></tr>
         </thead>
         <tbody></tbody>
     </table>
@@ -365,15 +371,72 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var gd = document.getElementById(divId);
   if (!gd) return;
 
+  var areaWindowBp = 5.0;
   var peaksTraceIndex = {final_peaks_trace_index};
+  var primaryTraceIndex = {primary_trace_index};
 
   Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
+    var primaryTrace = g.data[primaryTraceIndex] || {{}};
+
+    function decodePlotlyArray(val) {{
+      if (Array.isArray(val)) return val;
+      if (ArrayBuffer.isView(val)) return Array.from(val);
+      if (!val || typeof val !== "object") return [];
+      if (typeof val.length === "number") {{
+        try {{ return Array.from(val); }} catch (e) {{}}
+      }}
+      if (typeof val.bdata === "string" && typeof val.dtype === "string") {{
+        var binary = atob(val.bdata);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        var buf = bytes.buffer;
+        switch (val.dtype) {{
+          case "f8": return Array.from(new Float64Array(buf));
+          case "f4": return Array.from(new Float32Array(buf));
+          case "i1": return Array.from(new Int8Array(buf));
+          case "u1": return Array.from(new Uint8Array(buf));
+          case "i2": return Array.from(new Int16Array(buf));
+          case "u2": return Array.from(new Uint16Array(buf));
+          case "i4": return Array.from(new Int32Array(buf));
+          case "u4": return Array.from(new Uint32Array(buf));
+          default: return [];
+        }}
+      }}
+      return [];
+    }}
+
+    var primaryX = decodePlotlyArray(primaryTrace.x);
+    var primaryY = decodePlotlyArray(primaryTrace.y);
+
+    function computePeakArea(xCenter) {{
+      var total = 0.0;
+      for (var i = 0; i < primaryX.length; i++) {{
+        var x = Number(primaryX[i]);
+        var y = Number(primaryY[i]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (Math.abs(x - xCenter) <= areaWindowBp) total += y;
+      }}
+      return total;
+    }}
+
+    function normalizePeak(p) {{
+      var x = Number(p && p.x);
+      var y = Number(p && p.y);
+      var area = Number(p && p.area);
+      return {{
+        x: x,
+        y: y,
+        area: Number.isFinite(area) ? area : computePeakArea(x),
+        active: !(p && p.active === false)
+      }};
+    }}
 
     var peaks = [];
     if (window.PeakManager) {{ peaks = window.PeakManager.getInitialPeaksForPlot(divId); }}
     if (!peaks || peaks.length === 0) {{ peaks = (initialPeaks && Array.isArray(initialPeaks)) ? initialPeaks.slice() : []; }}
+    peaks = peaks.map(normalizePeak).filter(function(p) {{ return Number.isFinite(p.x) && Number.isFinite(p.y); }});
 
     if (window.PeakManager) {{ window.PeakManager.registerPlot(divId, {{ getPeaks: function() {{ return peaks; }} }}); }}
 
@@ -412,7 +475,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         ann.push({{ x: p.x, y: p.y * 1.03, xref: "x", yref: "y", text: p.x.toFixed(1), showarrow: false, font: {{ size: 9, color: "#222" }}, xanchor: "left", yanchor: "bottom" }});
         
         // Add table row
-        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td></tr>";
+        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td><td>" + p.area.toFixed(0) + "</td></tr>";
       }}
 
       Plotly.relayout(g, {{ shapes: baseShapes, annotations: baseAnnots.concat(ann) }});
@@ -445,7 +508,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, active: true }});
+      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal), active: true }});
       rebuild(); // <--- FIXED: Call rebuild immediately!
     }});
   }});
@@ -698,7 +761,7 @@ def build_interactive_assay_batch_plot_html(
         html_parts.append(
             f"<div id='{div_id}_table_container' class='peak-table-container' style='display:none;'>"
             f"<table id='{div_id}_table'>"
-            "<thead><tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th></tr></thead>"
+            "<thead><tr><th>Peak Størrelse (bp)</th><th>Høyde (RFU)</th><th>Area</th></tr></thead>"
             "<tbody></tbody></table></div>"
         )
         html_parts.append(
@@ -724,12 +787,71 @@ def build_interactive_assay_batch_plot_html(
   var divId = "{div_id}";
   var gd = document.getElementById(divId);
   if (!gd) return;
+  var areaWindowBp = 5.0;
 
   Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
+    var primaryTrace = g.data[0] || {{}};
+
+    function decodePlotlyArray(val) {{
+      if (Array.isArray(val)) return val;
+      if (ArrayBuffer.isView(val)) return Array.from(val);
+      if (!val || typeof val !== "object") return [];
+      if (typeof val.length === "number") {{
+        try {{ return Array.from(val); }} catch (e) {{}}
+      }}
+      if (typeof val.bdata === "string" && typeof val.dtype === "string") {{
+        var binary = atob(val.bdata);
+        var bytes = new Uint8Array(binary.length);
+        for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        var buf = bytes.buffer;
+        switch (val.dtype) {{
+          case "f8": return Array.from(new Float64Array(buf));
+          case "f4": return Array.from(new Float32Array(buf));
+          case "i1": return Array.from(new Int8Array(buf));
+          case "u1": return Array.from(new Uint8Array(buf));
+          case "i2": return Array.from(new Int16Array(buf));
+          case "u2": return Array.from(new Uint16Array(buf));
+          case "i4": return Array.from(new Int32Array(buf));
+          case "u4": return Array.from(new Uint32Array(buf));
+          default: return [];
+        }}
+      }}
+      return [];
+    }}
+
+    var primaryX = decodePlotlyArray(primaryTrace.x);
+    var primaryY = decodePlotlyArray(primaryTrace.y);
+
+    function computePeakArea(xCenter) {{
+      var total = 0.0;
+      for (var i = 0; i < primaryX.length; i++) {{
+        var x = Number(primaryX[i]);
+        var y = Number(primaryY[i]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        if (Math.abs(x - xCenter) <= areaWindowBp) total += y;
+      }}
+      return total;
+    }}
+
+    function normalizePeak(p) {{
+      var x = Number(p && p.x);
+      var y = Number(p && p.y);
+      var area = Number(p && p.area);
+      return {{
+        x: x,
+        y: y,
+        area: Number.isFinite(area) ? area : computePeakArea(x),
+        active: !(p && p.active === false)
+      }};
+    }}
+
     var peaks = [];
     if (window.PeakManager) {{
         peaks = window.PeakManager.getInitialPeaksForPlot(divId);
     }}
+    peaks = (Array.isArray(peaks) ? peaks : []).map(normalizePeak).filter(function(p) {{
+      return Number.isFinite(p.x) && Number.isFinite(p.y);
+    }});
 
     if (window.PeakManager) {{
         window.PeakManager.registerPlot(divId, {{
@@ -753,7 +875,7 @@ def build_interactive_assay_batch_plot_html(
       }}, [1]); // peaks-trace er index 1
 
       var arr = peaks.map(function(p) {{
-        return {{ x: p.x, y: p.y, active: p.active }};
+        return {{ x: p.x, y: p.y, area: p.area, active: p.active }};
       }});
       var pre = document.getElementById(divId + "_peaks_json");
       if (pre) {{
@@ -768,7 +890,7 @@ def build_interactive_assay_batch_plot_html(
       for (var i = 0; i < sortedPeaks.length; i++) {{
         var p = sortedPeaks[i];
         if (!p.active) continue;
-        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td></tr>";
+        tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td><td>" + p.area.toFixed(0) + "</td></tr>";
       }}
       
       if (tbody) tbody.innerHTML = tableHtml;
@@ -817,7 +939,7 @@ def build_interactive_assay_batch_plot_html(
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, active: true }});
+      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal), active: true }});
       redrawPeaks();
     }});
   }});

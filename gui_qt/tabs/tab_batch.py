@@ -427,43 +427,20 @@ class TabBatch(QWidget):
         fsa_path = files[0]
         
         from gui_qt.dialogs.ladder_dialog import LadderAdjustmentDialog
-        from core.classification import classify_fsa
-        from fraggler.fraggler import FsaFile
-        from core.analysis import analyse_fsa_liz, analyse_fsa_rox
+        from gui_qt.ladder_utils import load_adjustable_fsa
         from PyQt6.QtWidgets import QMessageBox
 
         self.status_lbl.setText(f"Loading {fsa_path.name} for adjustment...")
-        
-        # Classification to get params
-        classified = classify_fsa(fsa_path)
-        if not classified:
-            QMessageBox.warning(self, "Error", "Could not classify file.")
-            return
-            
-        (assay, group, ladder, trace_channels, peak_channels, primary, bp_min, bp_max) = classified
-        sample_channel = trace_channels[0]
-        
-        # Initial fit attempt
-        if ladder == "LIZ":
-            fsa = analyse_fsa_liz(fsa_path, sample_channel)
-        else:
-            fsa = analyse_fsa_rox(fsa_path, sample_channel)
-            
-        if not fsa:
-            from core.assay_config import (
-                LIZ_LADDER, ROX_LADDER, 
-                MIN_DISTANCE_BETWEEN_PEAKS_LIZ, MIN_SIZE_STANDARD_HEIGHT_LIZ,
-                MIN_DISTANCE_BETWEEN_PEAKS_ROX, MIN_SIZE_STANDARD_HEIGHT_ROX
+
+        try:
+            fsa, _ = load_adjustable_fsa(
+                fsa_path,
+                preferred_analysis=APP_SETTINGS.get("active_analysis"),
             )
-            if ladder == "LIZ":
-                fsa = FsaFile(str(fsa_path), LIZ_LADDER, sample_channel, 
-                             MIN_DISTANCE_BETWEEN_PEAKS_LIZ, MIN_SIZE_STANDARD_HEIGHT_LIZ,
-                             size_standard_channel="DATA105")
-            else:
-                fsa = FsaFile(str(fsa_path), ROX_LADDER, sample_channel,
-                             MIN_DISTANCE_BETWEEN_PEAKS_ROX, MIN_SIZE_STANDARD_HEIGHT_ROX,
-                             size_standard_channel="DATA4")
-                             
+        except Exception as exc:
+            QMessageBox.warning(self, "Error", f"Could not load file for ladder adjustment:\n{exc}")
+            return
+
         dialog = LadderAdjustmentDialog(fsa, self)
         if dialog.exec():
             mapping = dialog.get_mapping()
