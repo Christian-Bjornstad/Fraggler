@@ -42,7 +42,7 @@ class TabAnalysisSettings(QWidget):
         title = QLabel(f"{self.analysis_label} Settings")
         title.setObjectName("PageTitle")
         subtitle = QLabel(
-            f"Configure saved folders and run defaults for {self.analysis_label.lower()}."
+            f"Choose the saved folders and defaults that should be used when you switch to {self.analysis_label.lower()}."
         )
         subtitle.setObjectName("PageSubtitle")
         header.addWidget(title)
@@ -94,11 +94,12 @@ class TabAnalysisSettings(QWidget):
 
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["all", "controls", "custom"])
+        self.mode_combo.currentTextChanged.connect(self._sync_scope_controls)
         layout.addRow("Scope:", self.mode_combo)
 
         self.assay_filter = QLineEdit()
-        self.assay_filter.setPlaceholderText("Optional assay filter for custom scope")
-        layout.addRow("Assay Filter:", self.assay_filter)
+        self.assay_filter.setPlaceholderText("Only used when Scope is set to custom")
+        layout.addRow("Custom Assay Filter:", self.assay_filter)
 
         self.chk_agg_pat = QCheckBox("Group scans by Patient ID")
         self.chk_agg_pat.toggled.connect(self._sync_patient_regex_enabled)
@@ -108,11 +109,11 @@ class TabAnalysisSettings(QWidget):
         self.patient_regex.setPlaceholderText(r"\d{2}OUM\d{5}")
         layout.addRow("Patient ID Regex:", self.patient_regex)
 
-        self.chk_agg_dit = QCheckBox("Aggregate DIT reports across jobs")
+        self.chk_agg_dit = QCheckBox("Combine DIT reports across jobs")
         layout.addRow("", self.chk_agg_dit)
 
         note = QLabel(
-            "These values are saved separately per analysis and will be used as the defaults in the Run tab."
+            "These values are saved separately for each analysis and are used automatically in Run and Ladder."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #64748b;")
@@ -167,6 +168,7 @@ class TabAnalysisSettings(QWidget):
         self.patient_regex.setText(batch_settings.get("patient_id_regex", r"\d{2}OUM\d{5}"))
         self.chk_agg_dit.setChecked(bool(batch_settings.get("aggregate_dit_reports", True)))
         self._sync_patient_regex_enabled()
+        self._sync_scope_controls()
 
         self.author.setText(general_settings.get("author", "OUS"))
         self.d_min_r2_ok.setValue(float(qc_settings.get("min_r2_ok", 0.995)))
@@ -210,3 +212,7 @@ class TabAnalysisSettings(QWidget):
 
     def _sync_patient_regex_enabled(self) -> None:
         self.patient_regex.setEnabled(self.chk_agg_pat.isChecked())
+
+    def _sync_scope_controls(self) -> None:
+        is_custom = self.mode_combo.currentText() == "custom"
+        self.assay_filter.setEnabled(is_custom)

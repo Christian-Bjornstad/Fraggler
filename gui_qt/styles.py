@@ -89,6 +89,9 @@ QMainWindow {
 #AnalysisSubButton:checked {
     color: #38bdf8;
     font-weight: 700;
+    background: #162235;
+    border-left: 3px solid #38bdf8;
+    padding-left: 37px;
 }
 
 /* Cards */
@@ -119,6 +122,10 @@ QMainWindow {
     color: #64748b;
     font-size: 14px;
     margin-bottom: 20px;
+}
+
+QLabel#MutedText {
+    color: #64748b;
 }
 
 /* Standard Buttons */

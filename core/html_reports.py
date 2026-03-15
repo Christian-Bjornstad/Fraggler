@@ -256,6 +256,137 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 </style>
 """
 
+
+def _build_plotly_reflow_script() -> str:
+    """Global Plotly reflow helpers for embedded/hidden report viewers."""
+    return """
+<script>
+window.ReportPlotManager = (function() {
+    var plots = {};
+    var initialStates = {};
+
+    function loadInitialStates() {
+        if (Object.keys(initialStates).length) return;
+        try {
+            var tag = document.getElementById('plot-state');
+            if (!tag) return;
+            var raw = JSON.parse(tag.textContent || '{}');
+            if (raw && typeof raw === 'object') initialStates = raw;
+        } catch (e) {
+            initialStates = {};
+        }
+    }
+
+    function cloneRange(range) {
+        if (!Array.isArray(range) || range.length !== 2) return null;
+        var a = Number(range[0]);
+        var b = Number(range[1]);
+        if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
+        return [a, b];
+    }
+
+    function resizeOne(gd) {
+        if (!gd || !window.Plotly) return;
+        if (typeof gd.isConnected === 'boolean' && !gd.isConnected) return;
+        var width = gd.clientWidth || (gd.parentElement && gd.parentElement.clientWidth) || 0;
+        if (width <= 0) return;
+        try { Plotly.Plots.resize(gd); } catch (e) {}
+        try { Plotly.relayout(gd, {autosize: true}); } catch (e) {}
+    }
+
+    function refreshAll() {
+        for (var id in plots) {
+            if (Object.prototype.hasOwnProperty.call(plots, id)) resizeOne(plots[id]);
+        }
+    }
+
+    function captureState(gd) {
+        if (!gd || !gd.layout) return null;
+        var xRange = cloneRange(gd.layout.xaxis && gd.layout.xaxis.range);
+        var yRange = cloneRange(gd.layout.yaxis && gd.layout.yaxis.range);
+        if (!xRange && !yRange) return null;
+        return {
+            xaxis_range: xRange,
+            yaxis_range: yRange
+        };
+    }
+
+    function scheduleRefresh() {
+        var delays = [0, 80, 250, 750];
+        for (var i = 0; i < delays.length; i++) {
+            setTimeout(refreshAll, delays[i]);
+        }
+        if (window.requestAnimationFrame) {
+            window.requestAnimationFrame(function() { refreshAll(); });
+        }
+    }
+
+    function attachObservers(gd) {
+        if (!gd || gd.__fragglerObserversAttached) return;
+        gd.__fragglerObserversAttached = true;
+
+        if (typeof ResizeObserver === 'function') {
+            try {
+                var ro = new ResizeObserver(function() { resizeOne(gd); });
+                ro.observe(gd);
+                if (gd.parentElement) ro.observe(gd.parentElement);
+                gd.__fragglerResizeObserver = ro;
+            } catch (e) {}
+        }
+
+        if (typeof IntersectionObserver === 'function') {
+            try {
+                var io = new IntersectionObserver(function(entries) {
+                    for (var i = 0; i < entries.length; i++) {
+                        if (entries[i].isIntersecting) {
+                            scheduleRefresh();
+                            break;
+                        }
+                    }
+                });
+                io.observe(gd);
+                gd.__fragglerIntersectionObserver = io;
+            } catch (e) {}
+        }
+    }
+
+    window.addEventListener('load', scheduleRefresh);
+    window.addEventListener('resize', scheduleRefresh);
+    window.addEventListener('pageshow', scheduleRefresh);
+    window.addEventListener('focus', scheduleRefresh);
+    document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'visible') scheduleRefresh();
+    });
+
+    loadInitialStates();
+
+    return {
+        register: function(gd) {
+            if (!gd || !gd.id) return;
+            plots[gd.id] = gd;
+            attachObservers(gd);
+            scheduleRefresh();
+        },
+        getInitialStateForPlot: function(id) {
+            loadInitialStates();
+            return initialStates[id] || null;
+        },
+        getAllStates: function() {
+            var all = {};
+            for (var id in plots) {
+                if (!Object.prototype.hasOwnProperty.call(plots, id)) continue;
+                var state = captureState(plots[id]);
+                if (state) all[id] = state;
+            }
+            return all;
+        },
+        refreshAll: scheduleRefresh,
+        resizeOne: resizeOne
+    };
+})();
+</script>
+"""
+
 def extract_dit_from_name(name: str) -> str | None:
     """Finner første forekomst av 2-sifret år + 'OUM' + 5 siffer."""
     m = DIT_PATTERN.search(name)
@@ -292,6 +423,7 @@ def _create_html_header(
     html_lines.append(f"<title>{escape(dit)}_{display_name}_Resultater</title>")
     html_lines.append(REPORT_STYLE)
     html_lines.append('<script id="peak-data" type="application/json">{}</script>')
+    html_lines.append('<script id="plot-state" type="application/json">{}</script>')
     html_lines.append("""
 <script>
 // Toggle comment boxes
@@ -329,11 +461,17 @@ window.PeakManager = {
         }
         
         var allPeaks = this.getAllPeaks();
+        var allPlotStates = (window.ReportPlotManager && window.ReportPlotManager.getAllStates)
+            ? window.ReportPlotManager.getAllStates()
+            : {};
         var currentHtml = document.documentElement.outerHTML;
         var peakDataStr = JSON.stringify(allPeaks);
+        var plotStateStr = JSON.stringify(allPlotStates);
         var pattern = /<script id="peak-data" type="application\/json">[\\s\\S]*?<\/script>/;
         var newTag = '<script id="peak-data" type="application/json">\\n' + peakDataStr + '\\n<\/script>';
-        var updatedHtml = currentHtml.replace(pattern, newTag);
+        var plotPattern = /<script id="plot-state" type="application\/json">[\\s\\S]*?<\/script>/;
+        var newPlotTag = '<script id="plot-state" type="application/json">\\n' + plotStateStr + '\\n<\/script>';
+        var updatedHtml = currentHtml.replace(pattern, newTag).replace(plotPattern, newPlotTag);
         var blob = new Blob(['<!DOCTYPE html>\\n' + updatedHtml], {type: 'text/html'});
         var url = URL.createObjectURL(blob);
         var a = document.createElement('a'); a.href = url; a.download = document.title + '.html'; a.click(); URL.revokeObjectURL(url);
@@ -343,6 +481,7 @@ function printReport() { window.print(); }
 </script>
 """)
     html_lines.append(_local_plotly_tag(dit_root, version="2.35.2"))
+    html_lines.append(_build_plotly_reflow_script())
     html_lines.extend(["</head>", "<body>"])
 
     gen_date = datetime.now().strftime("%Y-%m-%d %H:%M")

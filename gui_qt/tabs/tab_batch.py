@@ -26,7 +26,7 @@ class TabBatch(QWidget):
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
-        main_layout.setSpacing(16)
+        main_layout.setSpacing(18)
         
         # Header
         header = QVBoxLayout()
@@ -41,15 +41,18 @@ class TabBatch(QWidget):
         f_card = QWidget()
         f_card.setObjectName("Card")
         f_layout = QVBoxLayout(f_card)
+        f_layout.setSpacing(12)
         
-        l_ftitle = QLabel("FOLDERS")
+        l_ftitle = QLabel("SAMPLES")
         l_ftitle.setObjectName("CardTitle")
         
         row1 = QHBoxLayout()
+        row1.setSpacing(10)
         self.folder_list = QListWidget()
         self.folder_list.setMaximumHeight(100)
         self.folder_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.folder_list.setAcceptDrops(True)
+        self.folder_list.setAlternatingRowColors(True)
         
         # Inject Drag & Drop support
         def _dragEnterEvent(e):
@@ -71,7 +74,7 @@ class TabBatch(QWidget):
         self.folder_list.dropEvent = _dropEvent
         
         btn_layout = QVBoxLayout()
-        btn_add = QPushButton("Add Folders...")
+        btn_add = QPushButton("Add Samples...")
         btn_add.clicked.connect(self._add_folders)
         btn_remove = QPushButton("Remove Selected")
         btn_remove.clicked.connect(self._remove_folders)
@@ -79,16 +82,19 @@ class TabBatch(QWidget):
         btn_layout.addWidget(btn_remove)
         btn_layout.addStretch()
         
-        row1.addWidget(QLabel("Input Folders:"))
+        self.input_label = QLabel("Samples:")
+        row1.addWidget(self.input_label)
         row1.addWidget(self.folder_list, stretch=1)
         row1.addLayout(btn_layout)
         
         row2 = QHBoxLayout()
+        row2.setSpacing(10)
         self.output_base = QLineEdit("")
-        self.output_base.setPlaceholderText("/path/to/output (leave empty = same as input)")
+        self.output_base.setClearButtonEnabled(True)
         btn_browse_out = QPushButton("Browse...")
         btn_browse_out.clicked.connect(lambda: self._ask_dir(self.output_base))
-        row2.addWidget(QLabel("Output Folder:"))
+        self.output_label = QLabel("Save To:")
+        row2.addWidget(self.output_label)
         row2.addWidget(self.output_base, stretch=1)
         row2.addWidget(btn_browse_out)
         
@@ -98,7 +104,8 @@ class TabBatch(QWidget):
         
         # 2. Actions & Progress
         a_layout = QHBoxLayout()
-        self.btn_scan = QPushButton("Scan Jobs")
+        a_layout.setSpacing(10)
+        self.btn_scan = QPushButton("Find Jobs")
         self.btn_run = QPushButton("Run Batch")
         self.btn_run.setObjectName("PrimaryButton")
         self.btn_run.setEnabled(False)
@@ -109,7 +116,7 @@ class TabBatch(QWidget):
         self.progress = QProgressBar()
         self.progress.setValue(0)
         
-        self.status_lbl = QLabel("Ready — add folders and click Scan Jobs.")
+        self.status_lbl = QLabel("Ready — review the loaded folders and click Find Jobs.")
         self.status_lbl.setStyleSheet("color: #64748b; font-weight: 500;")
         
         a_layout.addWidget(self.btn_scan)
@@ -182,7 +189,7 @@ class TabBatch(QWidget):
         pretty_name = ANALYSIS_LABELS.get(analysis_id, analysis_id.capitalize())
         self.title_lbl.setText(f"Run {pretty_name}")
         self.subtitle_lbl.setText(
-            f"Select folders for {pretty_name.lower()}, then scan and run with the saved defaults for this analysis."
+            f"Saved defaults for {pretty_name.lower()} load automatically. Change them only if needed, then find and run jobs."
         )
 
     def load_from_settings(self, replace_inputs: bool = False):
@@ -190,7 +197,11 @@ class TabBatch(QWidget):
         profile = self._profile_for()
         batch_settings = profile.get("batch", {})
 
-        self.output_base.setText(batch_settings.get("output_base", ""))
+        saved_output = batch_settings.get("output_base", "")
+        self.output_base.setText(saved_output)
+        self.output_base.setPlaceholderText(
+            saved_output or "/path/to/output (leave empty to use the saved output or the first sample folder)"
+        )
 
         default_dir = batch_settings.get("base_input_dir", "")
         if replace_inputs:
@@ -283,7 +294,7 @@ class TabBatch(QWidget):
         self.btn_scan.setEnabled(False)
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0) # Indeterminate spinner
-        self.status_lbl.setText("Scanning for jobs...")
+        self.status_lbl.setText("Finding jobs...")
         self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
         
         # Build Worker for the scan
@@ -338,10 +349,7 @@ class TabBatch(QWidget):
             
         jobs_to_run = [self._detected_jobs[i] for i in selected_rows]
         
-        out_path_str = self.output_base.text().strip()
-        # Fallback to the first input folder if output is empty
-        if not out_path_str and self.folder_list.count() > 0:
-            out_path_str = self.folder_list.item(0).text().strip()
+        out_path_str = self._resolve_output_path_str()
             
         out_path_obj = Path(out_path_str).expanduser() if out_path_str else None
         
@@ -406,9 +414,7 @@ class TabBatch(QWidget):
         self.btn_run.setEnabled(True)
         
     def on_open_output(self):
-        p_str = self.output_base.text().strip()
-        if not p_str and self.folder_list.count() > 0:
-            p_str = self.folder_list.item(0).text().strip()
+        p_str = self._resolve_output_path_str()
             
         p = Path(p_str).expanduser() if p_str else None
         if p and p.exists():
@@ -418,6 +424,19 @@ class TabBatch(QWidget):
                 subprocess.Popen(["explorer", str(p)])
             else:
                 subprocess.Popen(["xdg-open", str(p)])
+
+    def _resolve_output_path_str(self) -> str:
+        explicit_output = self.output_base.text().strip()
+        if explicit_output:
+            return explicit_output
+
+        saved_output = self._profile_for().get("batch", {}).get("output_base", "").strip()
+        if saved_output:
+            return saved_output
+
+        if self.folder_list.count() > 0:
+            return self.folder_list.item(0).text().strip()
+        return ""
 
     def on_context_menu(self, pos):
         from PyQt6.QtWidgets import QMenu

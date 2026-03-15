@@ -379,8 +379,26 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var assayName = {json.dumps(data["assay_name"])};
   var expectedWtBp = {json.dumps(data.get("wt_bp"))};
   var expectedMutBp = {json.dumps(data.get("mut_bp"))};
+  var initialPlotState = (window.ReportPlotManager && window.ReportPlotManager.getInitialStateForPlot)
+    ? window.ReportPlotManager.getInitialStateForPlot(divId)
+    : null;
+
+  if (initialPlotState && typeof initialPlotState === "object") {{
+    fig.layout = fig.layout || {{}};
+    fig.layout.xaxis = fig.layout.xaxis || {{}};
+    fig.layout.yaxis = fig.layout.yaxis || {{}};
+    if (Array.isArray(initialPlotState.xaxis_range) && initialPlotState.xaxis_range.length === 2) {{
+      fig.layout.xaxis.range = initialPlotState.xaxis_range;
+      fig.layout.xaxis.autorange = false;
+    }}
+    if (Array.isArray(initialPlotState.yaxis_range) && initialPlotState.yaxis_range.length === 2) {{
+      fig.layout.yaxis.range = initialPlotState.yaxis_range;
+      fig.layout.yaxis.autorange = false;
+    }}
+  }}
 
   Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
+    if (window.ReportPlotManager) {{ window.ReportPlotManager.register(g); }}
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
     var primaryTrace = g.data[primaryTraceIndex] || {{}};
@@ -819,8 +837,26 @@ def build_interactive_assay_batch_plot_html(
   var assayName = {json.dumps(e.get("assay"))};
   var expectedWtBp = {json.dumps(e.get("wt_bp"))};
   var expectedMutBp = {json.dumps(e.get("mut_bp"))};
+  var initialPlotState = (window.ReportPlotManager && window.ReportPlotManager.getInitialStateForPlot)
+    ? window.ReportPlotManager.getInitialStateForPlot(divId)
+    : null;
+
+  if (initialPlotState && typeof initialPlotState === "object") {{
+    fig.layout = fig.layout || {{}};
+    fig.layout.xaxis = fig.layout.xaxis || {{}};
+    fig.layout.yaxis = fig.layout.yaxis || {{}};
+    if (Array.isArray(initialPlotState.xaxis_range) && initialPlotState.xaxis_range.length === 2) {{
+      fig.layout.xaxis.range = initialPlotState.xaxis_range;
+      fig.layout.xaxis.autorange = false;
+    }}
+    if (Array.isArray(initialPlotState.yaxis_range) && initialPlotState.yaxis_range.length === 2) {{
+      fig.layout.yaxis.range = initialPlotState.yaxis_range;
+      fig.layout.yaxis.autorange = false;
+    }}
+  }}
 
   Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
+    if (window.ReportPlotManager) {{ window.ReportPlotManager.register(g); }}
     var primaryTrace = g.data[0] || {{}};
 
     function decodePlotlyArray(val) {{
