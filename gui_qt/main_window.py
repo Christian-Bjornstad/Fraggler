@@ -9,8 +9,8 @@ from gui_qt.styles import VIBRANT_PRO_QSS
 from gui_qt.tabs.tab_batch import TabBatch
 from gui_qt.tabs.tab_ladder import TabLadder
 from gui_qt.tabs.tab_log import TabLog
-from gui_qt.tabs.tab_settings import TabSettings
-from config import APP_SETTINGS, save_settings
+from gui_qt.tabs.tab_settings import TabAnalysisSettings
+from config import APP_SETTINGS, get_analysis_settings, save_settings
 
 class SidebarButton(QPushButton):
     def __init__(self, text, icon_name=None, parent=None):
@@ -134,10 +134,12 @@ class MainWindow(QMainWindow):
         self.tab_run = TabBatch()
         self.tab_ladder = TabLadder()
         self.tab_log = TabLog()
-        self.tab_settings = TabSettings()
-        
-        # Connect settings saved to reload in batch tab
-        self.tab_settings.settings_saved.connect(self.tab_run.load_from_settings)
+        self.tab_settings_clonality = TabAnalysisSettings("clonality")
+        self.tab_settings_flt3 = TabAnalysisSettings("flt3")
+
+        # Connect settings saved to reload run defaults
+        self.tab_settings_clonality.settings_saved.connect(self._on_settings_saved)
+        self.tab_settings_flt3.settings_saved.connect(self._on_settings_saved)
         
         # Connect global core logging to this tab
         from gui_qt.log_handler import qt_log_handler
@@ -147,7 +149,8 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self.tab_run)
         self.stacked_widget.addWidget(self.tab_ladder)
         self.stacked_widget.addWidget(self.tab_log)
-        self.stacked_widget.addWidget(self.tab_settings)
+        self.stacked_widget.addWidget(self.tab_settings_clonality)
+        self.stacked_widget.addWidget(self.tab_settings_flt3)
         
         # Content Container (for padding)
         content_container = QWidget()
@@ -162,6 +165,8 @@ class MainWindow(QMainWindow):
         # Initialize
         active_ana = APP_SETTINGS.get("active_analysis", "clonality")
         start_group = self.group_clonality if active_ana == "clonality" else self.group_flt3
+        self.tab_run.set_analysis(active_ana)
+        self.tab_ladder.set_analysis(active_ana)
         self.on_group_clicked(start_group)
         start_group.btn_run.setChecked(True)
         self.stacked_widget.setCurrentIndex(0)
@@ -171,9 +176,14 @@ class MainWindow(QMainWindow):
         new_ana = group.internal_id
         if APP_SETTINGS.get("active_analysis") != new_ana:
             APP_SETTINGS["active_analysis"] = new_ana
+            profile = get_analysis_settings(new_ana)
+            APP_SETTINGS.setdefault("batch", {}).update(profile.get("batch", {}))
+            APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
             save_settings(APP_SETTINGS)
             print(f"[UI] Analysis switched to: {new_ana}")
             # Refresh tabs if needed
+            self.tab_run.set_analysis(new_ana)
+            self.tab_ladder.set_analysis(new_ana)
             self.tab_run._detected_jobs = []
             self.tab_run._rebuild_table()
 
@@ -191,6 +201,17 @@ class MainWindow(QMainWindow):
         if APP_SETTINGS.get("active_analysis") != analysis_id:
             # This shouldn't happen with our set_expanded logic but good to have
             APP_SETTINGS["active_analysis"] = analysis_id
+            profile = get_analysis_settings(analysis_id)
+            APP_SETTINGS.setdefault("batch", {}).update(profile.get("batch", {}))
+            APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
             save_settings(APP_SETTINGS)
             
-        self.stacked_widget.setCurrentIndex(tab_idx)
+        page_idx = tab_idx
+        if tab_idx == 3:
+            page_idx = 3 if analysis_id == "clonality" else 4
+        self.stacked_widget.setCurrentIndex(page_idx)
+
+    def _on_settings_saved(self, analysis_id):
+        if APP_SETTINGS.get("active_analysis") == analysis_id:
+            self.tab_run.set_analysis(analysis_id)
+            self.tab_ladder.set_analysis(analysis_id)

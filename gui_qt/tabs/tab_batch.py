@@ -8,7 +8,13 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QThreadPool
 from gui_qt.worker import Worker
-from config import APP_SETTINGS
+from config import APP_SETTINGS, get_analysis_settings
+
+
+ANALYSIS_LABELS = {
+    "clonality": "Klonalitet",
+    "flt3": "FLT3 Analysis",
+}
 
 class TabBatch(QWidget):
     def __init__(self, parent=None):
@@ -16,6 +22,7 @@ class TabBatch(QWidget):
         self.threadpool = QThreadPool.globalInstance()
         self._detected_jobs = []
         self._job_states = {}
+        self._current_analysis_id = APP_SETTINGS.get("active_analysis", "clonality")
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -23,14 +30,12 @@ class TabBatch(QWidget):
         
         # Header
         header = QVBoxLayout()
-        title = QLabel("Run Fraggler")
-        title.setObjectName("PageTitle")
-        sub = QLabel("Select folders containing patient or QC data, then scan and run.")
-        sub.setObjectName("PageSubtitle")
-        header.addWidget(title)
-        header.addWidget(sub)
-        
-        s_batch = APP_SETTINGS.get("batch", {})
+        self.title_lbl = QLabel("Run Fraggler")
+        self.title_lbl.setObjectName("PageTitle")
+        self.subtitle_lbl = QLabel("")
+        self.subtitle_lbl.setObjectName("PageSubtitle")
+        header.addWidget(self.title_lbl)
+        header.addWidget(self.subtitle_lbl)
         
         # 1. Folders Card
         f_card = QWidget()
@@ -65,11 +70,6 @@ class TabBatch(QWidget):
         self.folder_list.dragMoveEvent = _dragEnterEvent
         self.folder_list.dropEvent = _dropEvent
         
-        # Seed with default if set
-        default_dir = s_batch.get("base_input_dir", "")
-        if default_dir:
-            self.folder_list.addItem(default_dir)
-            
         btn_layout = QVBoxLayout()
         btn_add = QPushButton("Add Folders...")
         btn_add.clicked.connect(self._add_folders)
@@ -84,7 +84,7 @@ class TabBatch(QWidget):
         row1.addLayout(btn_layout)
         
         row2 = QHBoxLayout()
-        self.output_base = QLineEdit(s_batch.get("output_base", ""))
+        self.output_base = QLineEdit("")
         self.output_base.setPlaceholderText("/path/to/output (leave empty = same as input)")
         btn_browse_out = QPushButton("Browse...")
         btn_browse_out.clicked.connect(lambda: self._ask_dir(self.output_base))
@@ -165,18 +165,36 @@ class TabBatch(QWidget):
         main_layout.addWidget(self.progress)
         main_layout.addWidget(self.status_lbl)
         main_layout.addWidget(t_card, stretch=1)
+
+        self.set_analysis(self._current_analysis_id, force_replace_inputs=True)
         
-    def load_from_settings(self):
-        """Reload default folders and output base from APP_SETTINGS."""
-        from config import APP_SETTINGS
-        s_batch = APP_SETTINGS.get("batch", {})
-        
-        # Output base
-        self.output_base.setText(s_batch.get("output_base", ""))
-        
-        # Base input dir - only add if list is empty or we specifically want to sync
-        # For now, let's just update the list if it's currently empty
-        default_dir = s_batch.get("base_input_dir", "")
+    def _profile_for(self, analysis_id: str | None = None) -> dict:
+        return get_analysis_settings(analysis_id or self._current_analysis_id)
+
+    def set_analysis(self, analysis_id: str, force_replace_inputs: bool = False) -> None:
+        previous_profile = self._profile_for(self._current_analysis_id)
+        previous_default = previous_profile.get("batch", {}).get("base_input_dir", "")
+        current_items = [self.folder_list.item(i).text() for i in range(self.folder_list.count())]
+        should_replace_inputs = force_replace_inputs or not current_items or current_items == [previous_default]
+
+        self._current_analysis_id = analysis_id
+        self.load_from_settings(replace_inputs=should_replace_inputs)
+        pretty_name = ANALYSIS_LABELS.get(analysis_id, analysis_id.capitalize())
+        self.title_lbl.setText(f"Run {pretty_name}")
+        self.subtitle_lbl.setText(
+            f"Select folders for {pretty_name.lower()}, then scan and run with the saved defaults for this analysis."
+        )
+
+    def load_from_settings(self, replace_inputs: bool = False):
+        """Reload analysis-specific defaults from APP_SETTINGS."""
+        profile = self._profile_for()
+        batch_settings = profile.get("batch", {})
+
+        self.output_base.setText(batch_settings.get("output_base", ""))
+
+        default_dir = batch_settings.get("base_input_dir", "")
+        if replace_inputs:
+            self.folder_list.clear()
         if default_dir and self.folder_list.count() == 0:
             self.folder_list.addItem(default_dir)
             
@@ -269,10 +287,9 @@ class TabBatch(QWidget):
         self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
         
         # Build Worker for the scan
-        from config import APP_SETTINGS
-        s_batch = APP_SETTINGS.get("batch", {})
-        agg_pat = True # User requested mandatory patient ID aggregation
-        regex = s_batch.get("patient_id_regex", r"\d{2}OUM\d{5}")
+        batch_settings = self._profile_for().get("batch", {})
+        agg_pat = bool(batch_settings.get("aggregate_by_patient", True))
+        regex = batch_settings.get("patient_id_regex", r"\d{2}OUM\d{5}")
         
         worker = Worker(
             generate_jobs,
@@ -345,11 +362,12 @@ class TabBatch(QWidget):
         self.status_lbl.setText(f"Running {len(jobs_to_run)} jobs...")
         self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
         
-        # Read pipeline_scope and assay_filter from settings
-        from config import APP_SETTINGS
-        s_pipe = APP_SETTINGS.get("pipeline", {})
+        profile = self._profile_for()
+        s_pipe = profile.get("pipeline", {})
+        s_batch = profile.get("batch", {})
         p_scope = s_pipe.get("mode", "all")
         a_filter = s_pipe.get("assay_filter_substring", "")
+        aggregate_dit_reports = bool(s_batch.get("aggregate_dit_reports", True))
         
         worker = Worker(
             run_batch_jobs,
@@ -360,6 +378,7 @@ class TabBatch(QWidget):
             excel_name_tmpl="Fraggler_QC_Trends.xlsx",
             pipeline_scope=p_scope,
             assay_filter=a_filter,
+            aggregate_dit_reports=aggregate_dit_reports,
             continue_on_error=True,
             update_callback=None, # Passed explicitly as kwarg below
         )

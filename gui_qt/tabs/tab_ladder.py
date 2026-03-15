@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt
 
-from config import APP_SETTINGS
+from config import APP_SETTINGS, get_analysis_settings
 from core.analysis import save_ladder_adjustment
 from core.html_reports import extract_dit_from_name
 from gui_qt.dialogs.ladder_dialog import LadderAdjustmentDialog
@@ -43,6 +43,7 @@ class TabLadder(QWidget):
         self._current_file: Path | None = None
         self._current_meta: dict | None = None
         self._report_matches: list[Path] = []
+        self._current_analysis_id = APP_SETTINGS.get("active_analysis", "clonality")
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -218,18 +219,35 @@ class TabLadder(QWidget):
         return card
 
     def _load_defaults(self) -> None:
-        default_source = Path("data/euroclonality")
-        if default_source.exists():
-            self.source_dir.setText(str(default_source))
-            self._scan_files()
+        profile = get_analysis_settings(self._current_analysis_id)
+        input_dir = profile.get("batch", {}).get("base_input_dir", "")
+        output_dir = profile.get("batch", {}).get("output_base", "")
 
-        example = default_source / "00011_87685fba_24OUM10035_SL__060824_A01_C990GXRS.fsa"
-        if example.exists():
-            self._select_file(example)
+        if input_dir:
+            self.source_dir.setText(input_dir)
+        elif self._current_analysis_id == "clonality":
+            default_source = Path("data/euroclonality")
+            if default_source.exists():
+                self.source_dir.setText(str(default_source))
 
-        report_root = Path("final")
-        if report_root.exists():
-            self.report_root.setText(str(report_root))
+        if output_dir:
+            self.report_root.setText(output_dir)
+        elif Path("final").exists():
+            self.report_root.setText("final")
+
+    def set_analysis(self, analysis_id: str) -> None:
+        previous_profile = get_analysis_settings(self._current_analysis_id)
+        next_profile = get_analysis_settings(analysis_id)
+
+        previous_input = previous_profile.get("batch", {}).get("base_input_dir", "")
+        previous_output = previous_profile.get("batch", {}).get("output_base", "")
+
+        if not self.source_dir.text().strip() or self.source_dir.text().strip() == previous_input:
+            self.source_dir.setText(next_profile.get("batch", {}).get("base_input_dir", ""))
+        if not self.report_root.text().strip() or self.report_root.text().strip() == previous_output:
+            self.report_root.setText(next_profile.get("batch", {}).get("output_base", ""))
+
+        self._current_analysis_id = analysis_id
 
     def _choose_source_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(

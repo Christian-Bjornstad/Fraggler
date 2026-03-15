@@ -4,7 +4,7 @@ from pathlib import Path
 
 import yaml
 
-from config import load_settings, save_settings
+from config import get_analysis_settings, load_settings, save_settings
 
 
 class TestConfig(unittest.TestCase):
@@ -39,6 +39,54 @@ class TestConfig(unittest.TestCase):
             save_settings(settings, cfg_path)
             payload = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["default_output"], "/saved/out")
+
+    def test_load_settings_migrates_legacy_batch_and_pipeline_into_analysis_profiles(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "settings.yaml"
+            cfg_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "batch": {
+                            "base_input_dir": "/legacy/in",
+                            "output_base": "/legacy/out",
+                            "aggregate_by_patient": False,
+                            "patient_id_regex": "ABC",
+                            "aggregate_dit_reports": False,
+                        },
+                        "pipeline": {
+                            "mode": "custom",
+                            "assay_filter_substring": "FLT3",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(cfg_path, env={})
+
+        for analysis_id in ("clonality", "flt3"):
+            profile = settings["analyses"][analysis_id]
+            self.assertEqual(profile["batch"]["base_input_dir"], "/legacy/in")
+            self.assertEqual(profile["batch"]["output_base"], "/legacy/out")
+            self.assertFalse(profile["batch"]["aggregate_by_patient"])
+            self.assertEqual(profile["batch"]["patient_id_regex"], "ABC")
+            self.assertFalse(profile["batch"]["aggregate_dit_reports"])
+            self.assertEqual(profile["pipeline"]["mode"], "custom")
+            self.assertEqual(profile["pipeline"]["assay_filter_substring"], "FLT3")
+
+    def test_get_analysis_settings_returns_analysis_specific_profile(self):
+        settings = load_settings(Path("/does/not/exist.yaml"), env={})
+        settings["analyses"]["flt3"]["batch"]["base_input_dir"] = "/flt3/in"
+        settings["analyses"]["clonality"]["batch"]["base_input_dir"] = "/clonality/in"
+
+        self.assertEqual(
+            get_analysis_settings("flt3", settings)["batch"]["base_input_dir"],
+            "/flt3/in",
+        )
+        self.assertEqual(
+            get_analysis_settings("clonality", settings)["batch"]["base_input_dir"],
+            "/clonality/in",
+        )
 
 
 if __name__ == "__main__":

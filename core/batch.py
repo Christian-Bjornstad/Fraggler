@@ -228,19 +228,17 @@ def run_batch_jobs(
     excel_name_tmpl: str,
     pipeline_scope: str,
     assay_filter: str,
+    aggregate_dit_reports: bool,
     continue_on_error: bool,
     update_callback: Any = None
 ) -> None:
     """
     Run all generated jobs.
-    Reads QC parameters and aggregate flags directly from APP_SETTINGS.
+    Reads QC parameters from APP_SETTINGS and uses explicit per-analysis batch flags.
     """
     from config import APP_SETTINGS
     from core.qc.qc_rules import QCRules
     s_qc = APP_SETTINGS.get("qc", {})
-    s_batch = APP_SETTINGS.get("batch", {})
-    
-    aggregate_dit_reports = s_batch.get("aggregate_dit_reports", True)
     qc_rules = QCRules(
         min_r2_ok=s_qc.get("min_r2_ok", 0.999),
         min_r2_warn=s_qc.get("min_r2_warn", 0.995),

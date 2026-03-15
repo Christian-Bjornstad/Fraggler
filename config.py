@@ -66,6 +66,34 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "patient_id_regex": r"\d{2}OUM\d{5}",
         "aggregate_dit_reports": True,
     },
+    "analyses": {
+        "clonality": {
+            "batch": {
+                "base_input_dir": str(Path.home()),
+                "output_base": str(Path.home()),
+                "aggregate_by_patient": True,
+                "patient_id_regex": r"\d{2}OUM\d{5}",
+                "aggregate_dit_reports": True,
+            },
+            "pipeline": {
+                "mode": "all",
+                "assay_filter_substring": "",
+            },
+        },
+        "flt3": {
+            "batch": {
+                "base_input_dir": str(Path.home()),
+                "output_base": str(Path.home()),
+                "aggregate_by_patient": True,
+                "patient_id_regex": r"\d{2}OUM\d{5}",
+                "aggregate_dit_reports": True,
+            },
+            "pipeline": {
+                "mode": "all",
+                "assay_filter_substring": "",
+            },
+        },
+    },
 }
 
 
@@ -136,6 +164,7 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     general = settings.setdefault("general", {})
     batch = settings.setdefault("batch", {})
     pipeline = settings.setdefault("pipeline", {})
+    analyses = settings.setdefault("analyses", {})
 
     legacy_default_output = settings.get("default_output", "")
     if legacy_default_output and not general.get("default_output"):
@@ -147,6 +176,39 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             batch["output_base"] = default_output
         if not pipeline.get("output_base") or pipeline.get("output_base") == DEFAULT_SETTINGS["pipeline"]["output_base"]:
             pipeline["output_base"] = default_output
+
+    for analysis_id, analysis_defaults in DEFAULT_SETTINGS.get("analyses", {}).items():
+        profile = analyses.setdefault(analysis_id, {})
+        profile_batch = profile.setdefault("batch", {})
+        profile_pipeline = profile.setdefault("pipeline", {})
+
+        default_batch = analysis_defaults.get("batch", {})
+        default_pipeline = analysis_defaults.get("pipeline", {})
+
+        if not profile_batch.get("base_input_dir") or profile_batch.get("base_input_dir") == default_batch.get("base_input_dir"):
+            profile_batch["base_input_dir"] = batch.get("base_input_dir", default_batch.get("base_input_dir", str(Path.home())))
+        if not profile_batch.get("output_base") or profile_batch.get("output_base") == default_batch.get("output_base"):
+            profile_batch["output_base"] = batch.get("output_base", default_batch.get("output_base", str(Path.home())))
+        if (
+            "aggregate_by_patient" not in profile_batch
+            or profile_batch.get("aggregate_by_patient") == default_batch.get("aggregate_by_patient")
+        ):
+            profile_batch["aggregate_by_patient"] = batch.get("aggregate_by_patient", default_batch.get("aggregate_by_patient", True))
+        if (
+            not profile_batch.get("patient_id_regex")
+            or profile_batch.get("patient_id_regex") == default_batch.get("patient_id_regex")
+        ):
+            profile_batch["patient_id_regex"] = batch.get("patient_id_regex", default_batch.get("patient_id_regex", r"\d{2}OUM\d{5}"))
+        if (
+            "aggregate_dit_reports" not in profile_batch
+            or profile_batch.get("aggregate_dit_reports") == default_batch.get("aggregate_dit_reports")
+        ):
+            profile_batch["aggregate_dit_reports"] = batch.get("aggregate_dit_reports", default_batch.get("aggregate_dit_reports", True))
+
+        if not profile_pipeline.get("mode") or profile_pipeline.get("mode") == default_pipeline.get("mode"):
+            profile_pipeline["mode"] = pipeline.get("mode", default_pipeline.get("mode", "all"))
+        if not profile_pipeline.get("assay_filter_substring"):
+            profile_pipeline["assay_filter_substring"] = pipeline.get("assay_filter_substring", default_pipeline.get("assay_filter_substring", ""))
 
     return settings
 
@@ -183,6 +245,40 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
         general["default_output"] = ""
 
     settings["default_output"] = general.get("default_output", "")
+
+    analyses = settings.setdefault("analyses", {})
+    for analysis_id, defaults in DEFAULT_SETTINGS.get("analyses", {}).items():
+        profile = analyses.setdefault(analysis_id, {})
+        profile_batch = profile.setdefault("batch", {})
+        profile_pipeline = profile.setdefault("pipeline", {})
+
+        if not isinstance(profile_batch.get("base_input_dir"), str):
+            profile_batch["base_input_dir"] = defaults["batch"]["base_input_dir"]
+        if not isinstance(profile_batch.get("output_base"), str):
+            profile_batch["output_base"] = defaults["batch"]["output_base"]
+        if not isinstance(profile_batch.get("patient_id_regex"), str):
+            profile_batch["patient_id_regex"] = defaults["batch"]["patient_id_regex"]
+        if not isinstance(profile_batch.get("aggregate_by_patient"), bool):
+            profile_batch["aggregate_by_patient"] = defaults["batch"]["aggregate_by_patient"]
+        if not isinstance(profile_batch.get("aggregate_dit_reports"), bool):
+            profile_batch["aggregate_dit_reports"] = defaults["batch"]["aggregate_dit_reports"]
+
+        if profile_pipeline.get("mode") not in {"all", "controls", "custom"}:
+            profile_pipeline["mode"] = defaults["pipeline"]["mode"]
+        if not isinstance(profile_pipeline.get("assay_filter_substring"), str):
+            profile_pipeline["assay_filter_substring"] = defaults["pipeline"]["assay_filter_substring"]
+
+
+def get_analysis_settings(analysis_id: str | None = None, settings: Dict[str, Any] | None = None) -> Dict[str, Any]:
+    """Return the merged per-analysis settings profile."""
+    settings = settings or APP_SETTINGS
+    analysis_id = analysis_id or settings.get("active_analysis", "clonality")
+    analysis_defaults = DEFAULT_SETTINGS.get("analyses", {}).get(
+        analysis_id,
+        DEFAULT_SETTINGS["analyses"]["clonality"],
+    )
+    stored = settings.setdefault("analyses", {}).get(analysis_id, {})
+    return _deep_update(analysis_defaults, stored)
 
 def load_settings(
     settings_path: Path | None = None,
