@@ -110,8 +110,6 @@ class TabBatch(QWidget):
         self.btn_run.setObjectName("PrimaryButton")
         self.btn_run.setEnabled(False)
         self.btn_open = QPushButton("Open Output")
-        self.btn_adjust_ladder = QPushButton("Adjust Ladder")
-        self.btn_adjust_ladder.setEnabled(False)
         
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -122,7 +120,6 @@ class TabBatch(QWidget):
         a_layout.addWidget(self.btn_scan)
         a_layout.addWidget(self.btn_run)
         a_layout.addWidget(self.btn_open)
-        a_layout.addWidget(self.btn_adjust_ladder)
         a_layout.addStretch()
         
         # 3. Jobs Table
@@ -155,11 +152,6 @@ class TabBatch(QWidget):
         self.btn_scan.clicked.connect(self.on_scan)
         self.btn_run.clicked.connect(self.on_run)
         self.btn_open.clicked.connect(self.on_open_output)
-        self.btn_adjust_ladder.clicked.connect(self._on_adjust_ladder)
-        self.table.itemSelectionChanged.connect(self._update_action_buttons)
-        
-        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.table.customContextMenuRequested.connect(self.on_context_menu)
         
         t_layout.addWidget(t_title)
         t_layout.addLayout(t_btns)
@@ -271,12 +263,6 @@ class TabBatch(QWidget):
             self.table.setItem(row_idx, 2, item_src)
             self.table.setItem(row_idx, 3, item_files)
             self.table.setItem(row_idx, 4, item_state)
-        self._update_action_buttons()
-
-    def _update_action_buttons(self):
-        selected_count = len(self.table.selectionModel().selectedRows()) if self.table.selectionModel() else 0
-        self.btn_adjust_ladder.setEnabled(selected_count == 1)
-            
     def on_scan(self):
         from core.batch import generate_jobs
         
@@ -437,58 +423,3 @@ class TabBatch(QWidget):
         if self.folder_list.count() > 0:
             return self.folder_list.item(0).text().strip()
         return ""
-
-    def on_context_menu(self, pos):
-        from PyQt6.QtWidgets import QMenu
-        from PyQt6.QtGui import QAction
-        menu = QMenu()
-        adj_action = menu.addAction("Adjust Ladder...")
-        adj_action.setEnabled(len(self.table.selectionModel().selectedRows()) == 1)
-        
-        action = menu.exec(self.table.viewport().mapToGlobal(pos))
-        if action == adj_action:
-            self._on_adjust_ladder()
-
-    def _on_adjust_ladder(self):
-        selected_rows = [index.row() for index in self.table.selectionModel().selectedRows()]
-        if not selected_rows:
-            return
-            
-        job = self._detected_jobs[selected_rows[0]]
-        files = job.get("files", [])
-        if not files:
-            from PyQt6.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "No Files", "This job has no files to adjust.")
-            return
-            
-        # Adjust first file in the job's list
-        fsa_path = files[0]
-        
-        from gui_qt.dialogs.ladder_dialog import LadderAdjustmentDialog
-        from gui_qt.ladder_utils import load_adjustable_fsa
-        from PyQt6.QtWidgets import QMessageBox
-
-        self.status_lbl.setText(f"Loading {fsa_path.name} for adjustment...")
-
-        try:
-            fsa, _ = load_adjustable_fsa(
-                fsa_path,
-                preferred_analysis=APP_SETTINGS.get("active_analysis"),
-            )
-        except Exception as exc:
-            QMessageBox.warning(self, "Error", f"Could not load file for ladder adjustment:\n{exc}")
-            return
-
-        dialog = LadderAdjustmentDialog(fsa, self)
-        if dialog.exec():
-            mapping = dialog.get_mapping()
-            from core.analysis import apply_manual_ladder_mapping, save_ladder_adjustment
-            apply_manual_ladder_mapping(fsa, mapping)
-            
-            # SAVE TO DISK for persistence
-            save_ladder_adjustment(fsa, mapping)
-            
-            # Message to user
-            QMessageBox.information(self, "Success", f"Ladder for {fsa.file_name} adjusted manually and saved. \n"
-                                                      "To apply the correction to the reports, RE-RUN the job.")
-            self.status_lbl.setText(f"Manual adjustment for {fsa.file_name} saved.")

@@ -91,6 +91,39 @@ th {
 tr:nth-child(even) td { background: #fafbfc; }
 tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 0.15s ease; }
 
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 4px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 800;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.status-badge.ok {
+    background: #dcfce7;
+    color: #166534;
+}
+.status-badge.warning {
+    background: #fef3c7;
+    color: #92400e;
+}
+.status-badge.manual {
+    background: #dbeafe;
+    color: #1d4ed8;
+}
+.status-badge.failed {
+    background: #fee2e2;
+    color: #b91c1c;
+}
+.status-badge.unknown {
+    background: #e2e8f0;
+    color: #475569;
+}
+
 /* ── Cards ── */
 .assay-block {
     padding: 18px 22px;
@@ -510,7 +543,7 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
             "<table><tr><th>Filnavn</th><th>Assay</th><th>Behandling</th><th>WT</th><th>Mutert</th><th>Ratio</th><th>Ladder QC</th><th>R²</th></tr>"
         )
         for e in sorted(dit_entries, key=lambda x: (x["assay"], x.get("well_id") or "", x["fsa"].file_name)):
-            status = e.get("ladder_qc_status", "unknown")
+            status_badge = _render_ladder_status_badge(e)
             r2 = e.get("ladder_r2", None)
             r2_str = f"{r2:.4f}" if r2 is not None and not np.isnan(r2) else "&mdash;"
             peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
@@ -524,20 +557,51 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
                 f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
                 f"<td>{escape(_format_flt3_treatment(e))}</td>"
                 f"<td>{wt_text}</td><td>{mut_text}</td><td>{ratio_str}</td>"
-                f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+                f"<td>{status_badge}</td><td>{r2_str}</td></tr>"
             )
     else:
         html_lines.append("<table><tr><th>Filnavn</th><th>Assay</th><th>Ladder</th><th>bp-område</th><th>Ladder QC</th><th>R²</th></tr>")
         for e in sorted(dit_entries, key=lambda x: (x["assay"], x["fsa"].file_name)):
-            status = e.get("ladder_qc_status", "unknown")
+            status_badge = _render_ladder_status_badge(e)
             r2 = e.get("ladder_r2", None)
             r2_str = f"{r2:.4f}" if r2 is not None and not np.isnan(r2) else "&mdash;"
             html_lines.append(
                 f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
                 f"<td>{escape(e['ladder'])}</td><td>{int(e['bp_min'])}–{int(e['bp_max'])} bp</td>"
-                f"<td>{escape(status)}</td><td>{r2_str}</td></tr>"
+                f"<td>{status_badge}</td><td>{r2_str}</td></tr>"
             )
     html_lines.append("</table>")
+
+
+def _ladder_status_payload(entry: dict) -> tuple[str, str, str]:
+    status = str(entry.get("ladder_qc_status", "unknown"))
+    if status == "manual_adjustment":
+        label = "Manual"
+        css = "manual"
+        note = str(entry.get("ladder_fit_note") or "Manual ladder correction was used.")
+    elif status == "review_required":
+        label = "Warning"
+        css = "warning"
+        note = str(entry.get("ladder_fit_note") or "Usable ladder fit, but missing expected ladder steps require review.")
+    elif status == "ladder_qc_failed":
+        label = "Failed"
+        css = "failed"
+        note = str(entry.get("ladder_fit_note") or "Ladder QC failed.")
+    elif status == "ok":
+        label = "OK"
+        css = "ok"
+        note = str(entry.get("ladder_fit_note") or "All expected ladder steps were fitted.")
+    else:
+        label = "Unknown"
+        css = "unknown"
+        note = str(entry.get("ladder_fit_note") or "Ladder status unknown.")
+    return label, css, note
+
+
+def _render_ladder_status_badge(entry: dict) -> str:
+    label, css, note = _ladder_status_payload(entry)
+    title_attr = escape(note, quote=True)
+    return f"<span class='status-badge {css}' title='{title_attr}'>{escape(label)}</span>"
 
 def _format_flt3_treatment(entry: dict) -> str:
     atype = entry["analysis_type"]

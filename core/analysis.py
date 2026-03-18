@@ -46,6 +46,115 @@ PEAK_MIN_HEIGHT = 800.0
 YMAX_PADDING_FACTOR = 1.15
 MIN_R2_QUALITY = 0.998  # Post-fit quality gate
 LADDER_CANDIDATE_COUNT = 5
+HIGH_END_RESCUE_R2 = 0.9999
+LOW_INTENSITY_RATIO_FLOOR = 0.55
+MEDIAN_INTENSITY_TARGET_RATIO = 0.80
+EARLY_PEAK_INTENSITY_WEIGHT = 1.2
+GLOBAL_PEAK_INTENSITY_WEIGHT = 0.45
+SEVERE_WEAK_PEAK_PENALTY = 0.30
+DESCENDING_RECOVERY_R2_FLOOR = 0.9985
+DESCENDING_RECOVERY_MAX_ABS_ERROR = 3.0
+DESCENDING_RECOVERY_MEAN_ABS_ERROR = 1.6
+DESCENDING_RECOVERY_MIN_INTENSITY = 350.0
+PARTIAL_RESCUE_MISSING_STEP_PENALTY = 0.50
+ROX_DYEBLOB_HEIGHT_MULTIPLIER = 2.0
+ROX_DYEBLOB_EARLY_INDEX = 2000
+ROX_DYEBLOB_TIGHT_GAP = 40
+ROX_DYEBLOB_CLUSTER_GAP = 70
+
+
+def _project_root_for(path: Path) -> Path | None:
+    parts = path.resolve().parts
+    try:
+        desktop_idx = parts.index("Desktop")
+    except ValueError:
+        return None
+    if desktop_idx + 1 >= len(parts):
+        return None
+    return Path(*parts[: desktop_idx + 2])
+
+
+def _sibling_fsa_paths(fsa_path: Path) -> list[Path]:
+    root = _project_root_for(fsa_path)
+    if root is None:
+        return []
+
+    desktop_root = root.parent
+    try:
+        rel = fsa_path.resolve().relative_to(root.resolve())
+    except Exception:
+        return []
+
+    siblings: list[Path] = []
+    for candidate_root in desktop_root.iterdir():
+        if candidate_root == root or not candidate_root.is_dir():
+            continue
+        name = candidate_root.name.lower()
+        if name.startswith(".") or "backup" in name:
+            continue
+        candidate = candidate_root / rel
+        if candidate.exists():
+            siblings.append(candidate)
+    return siblings
+
+
+def _get_expected_ladder_steps(fsa: FsaFile) -> np.ndarray:
+    expected = getattr(fsa, "expected_ladder_steps", None)
+    if expected is None:
+        return np.asarray(fsa.ladder_steps, dtype=float)
+    return np.asarray(expected, dtype=float)
+
+
+def _missing_expected_ladder_steps(fsa: FsaFile) -> list[float]:
+    expected = _get_expected_ladder_steps(fsa)
+    current = np.asarray(getattr(fsa, "ladder_steps", expected), dtype=float)
+    missing = [float(bp) for bp in expected if not np.any(np.isclose(current, bp, atol=1e-6))]
+    return missing
+
+
+def _set_ladder_fit_metadata(fsa: FsaFile, strategy: str, note: str | None = None) -> FsaFile:
+    fsa.ladder_fit_strategy = strategy
+    fsa.ladder_missing_expected_steps = _missing_expected_ladder_steps(fsa)
+    fsa.ladder_review_required = bool(fsa.ladder_missing_expected_steps)
+    fsa.ladder_expected_step_count = int(len(_get_expected_ladder_steps(fsa)))
+    fsa.ladder_fitted_step_count = int(len(getattr(fsa, "ladder_steps", [])))
+    if note is None:
+        if fsa.ladder_missing_expected_steps:
+            missing_txt = ", ".join(f"{bp:.0f}" for bp in fsa.ladder_missing_expected_steps)
+            note = f"Missing expected ladder steps: {missing_txt} bp"
+        else:
+            note = "All expected ladder steps were fitted."
+    fsa.ladder_fit_note = note
+    return fsa
+
+
+def _finalize_auto_fit_metadata(fsa: FsaFile) -> FsaFile:
+    existing = getattr(fsa, "ladder_fit_strategy", None)
+    if existing:
+        if not hasattr(fsa, "ladder_missing_expected_steps"):
+            fsa.ladder_missing_expected_steps = _missing_expected_ladder_steps(fsa)
+        fsa.ladder_review_required = bool(getattr(fsa, "ladder_missing_expected_steps", []))
+        fsa.ladder_expected_step_count = int(len(_get_expected_ladder_steps(fsa)))
+        fsa.ladder_fitted_step_count = int(len(getattr(fsa, "ladder_steps", [])))
+        if not getattr(fsa, "ladder_fit_note", None):
+            _set_ladder_fit_metadata(fsa, existing)
+        return fsa
+    strategy = "auto_full" if not _missing_expected_ladder_steps(fsa) else "auto_partial"
+    return _set_ladder_fit_metadata(fsa, strategy)
+
+
+def _map_step_indices(source_steps: np.ndarray, target_steps: np.ndarray) -> dict[int, int]:
+    mapping: dict[int, int] = {}
+    used: set[int] = set()
+    for source_idx, source_bp in enumerate(np.asarray(source_steps, dtype=float)):
+        matches = np.where(np.isclose(target_steps, source_bp, atol=1e-6))[0]
+        for target_idx in matches:
+            if int(target_idx) in used:
+                continue
+            mapping[int(source_idx)] = int(target_idx)
+            used.add(int(target_idx))
+            break
+    return mapping
 
 
 def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
@@ -56,6 +165,8 @@ def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
     """
     try:
         from sklearn.linear_model import LinearRegression
+        if not hasattr(fsa, "expected_ladder_steps") or getattr(fsa, "expected_ladder_steps", None) is None:
+            fsa.expected_ladder_steps = np.asarray(fsa.ladder_steps, dtype=float).copy()
         X_vals = np.array(fsa.best_size_standard, dtype=float)
         Y_vals = np.array(fsa.ladder_steps, dtype=float)
 
@@ -91,6 +202,8 @@ def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
         dummy_model.coef_ = np.array([coeffs[-2]])
         dummy_model.intercept_ = coeffs[-1]
         fsa.ladder_model = dummy_model
+        strategy = "polynomial_refine_partial" if _missing_expected_ladder_steps(fsa) else "polynomial_refine_full"
+        fsa = _set_ladder_fit_metadata(fsa, strategy)
 
         print_green(f"[{label}] Brukte polynomial refinement (degree-3, outlier removal) for {fsa_path.name}")
         return fsa
@@ -121,13 +234,93 @@ def _rank_size_standard_combinations(fsa: FsaFile) -> list[np.ndarray]:
     ]
 
 
-def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float]:
+def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
     metrics = compute_ladder_qc_metrics(fsa)
+    intensity_penalty = _candidate_intensity_penalty(fsa)
     return (
-        float(metrics.get("mean_abs_error_bp", float("inf"))),
+        float(metrics.get("mean_abs_error_bp", float("inf"))) + float(intensity_penalty),
         float(metrics.get("max_abs_error_bp", float("inf"))),
         -float(metrics.get("r2", float("-inf"))),
+        float(intensity_penalty),
     )
+
+
+def _rescue_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
+    metrics = compute_ladder_qc_metrics(fsa)
+    missing_count = len(_missing_expected_ladder_steps(fsa))
+    intensity_penalty = _candidate_intensity_penalty(fsa)
+    return (
+        float(metrics.get("mean_abs_error_bp", float("inf")))
+        + (missing_count * PARTIAL_RESCUE_MISSING_STEP_PENALTY)
+        + float(intensity_penalty),
+        float(metrics.get("max_abs_error_bp", float("inf"))),
+        -float(metrics.get("r2", float("-inf"))),
+        float(intensity_penalty),
+    )
+
+
+def _candidate_intensity_penalty(fsa: FsaFile) -> float:
+    best = getattr(fsa, "best_size_standard", None)
+    if best is None:
+        return float("inf")
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0:
+        return 0.0
+
+    peak_idx = np.rint(np.asarray(best, dtype=float)).astype(int)
+    valid = (peak_idx >= 0) & (peak_idx < trace.size)
+    if not np.any(valid):
+        return float("inf")
+
+    intensities = trace[peak_idx[valid]]
+    if intensities.size == 0:
+        return float("inf")
+
+    median_intensity = float(np.median(intensities))
+    if median_intensity <= 0:
+        return 0.0
+
+    target_floor = median_intensity * MEDIAN_INTENSITY_TARGET_RATIO
+    global_deficit = np.clip((target_floor - intensities) / median_intensity, a_min=0.0, a_max=None)
+
+    early_count = max(1, int(np.ceil(len(intensities) * 0.25)))
+    early_intensities = intensities[:early_count]
+    early_deficit = np.clip((target_floor - early_intensities) / median_intensity, a_min=0.0, a_max=None)
+
+    severe_weak_count = int(np.sum(intensities < (median_intensity * LOW_INTENSITY_RATIO_FLOOR)))
+
+    return (
+        float(np.sum(global_deficit)) * GLOBAL_PEAK_INTENSITY_WEIGHT
+        + float(np.sum(early_deficit)) * EARLY_PEAK_INTENSITY_WEIGHT
+        + (severe_weak_count * SEVERE_WEAK_PEAK_PENALTY)
+    )
+
+
+def _clean_rox_size_standard_peaks(all_found: np.ndarray, rox_data: np.ndarray) -> np.ndarray:
+    if all_found is None or len(all_found) == 0:
+        return np.array([], dtype=int)
+
+    heights = np.array([rox_data[p] for p in all_found], dtype=float)
+    median_h = float(np.median(heights)) if heights.size else 0.0
+    cleaned: list[int] = []
+    for idx, peak in enumerate(np.asarray(all_found, dtype=int)):
+        height = float(rox_data[peak])
+        if height > 31000 or peak < 1000:
+            continue
+
+        if median_h > 0 and height > (median_h * ROX_DYEBLOB_HEIGHT_MULTIPLIER):
+            prev_gap = float("inf") if idx == 0 else peak - int(all_found[idx - 1])
+            next_gap = float("inf") if idx == len(all_found) - 1 else int(all_found[idx + 1]) - peak
+            crowded = min(prev_gap, next_gap) < ROX_DYEBLOB_TIGHT_GAP or (
+                prev_gap < ROX_DYEBLOB_CLUSTER_GAP and next_gap < ROX_DYEBLOB_CLUSTER_GAP
+            )
+            if peak < ROX_DYEBLOB_EARLY_INDEX or crowded:
+                continue
+
+        cleaned.append(int(peak))
+
+    return np.asarray(cleaned, dtype=int)
 
 def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.ndarray] | None = None) -> FsaFile | None:
     """Fit the top smooth candidates and keep the best actual ladder fit."""
@@ -157,41 +350,303 @@ def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.nda
     return best_fit
 
 
+def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    full_steps = _get_expected_ladder_steps(fsa)
+    if full_steps.size < 12:
+        return None
+
+    best_fit = None
+    best_score = None
+    max_skip = min(6, max(0, int(full_steps.size) - 8))
+    if max_skip < 1:
+        return None
+
+    for skip_low in range(1, max_skip + 1):
+        trial = copy.deepcopy(fsa)
+        trial.expected_ladder_steps = full_steps.copy()
+        trial.ladder_steps = np.asarray(full_steps[skip_low:], dtype=float)
+        trial.n_ladder_peaks = trial.ladder_steps.size
+        trial.max_peaks_allow_in_size_standard = trial.n_ladder_peaks + 15
+
+        ss_peaks = getattr(trial, "size_standard_peaks", None)
+        if ss_peaks is None or len(ss_peaks) < trial.n_ladder_peaks:
+            continue
+
+        try:
+            trial = return_maxium_allowed_distance_between_size_standard_peaks(trial, multiplier=2)
+            for _ in range(LADDER_MAX_ITERATIONS):
+                trial = generate_combinations(trial)
+                best = getattr(trial, "best_size_standard_combinations", None)
+                if best is not None and best.shape[0] > 0:
+                    break
+                trial.maxium_allowed_distance_between_size_standard_peaks += 10
+
+            best = getattr(trial, "best_size_standard_combinations", None)
+            if best is None or best.shape[0] == 0:
+                continue
+
+            selected_fit = _select_best_ladder_candidate(trial)
+            if selected_fit is not None:
+                trial = selected_fit
+            else:
+                trial = calculate_best_combination_of_size_standard_peaks(trial)
+                trial = fit_size_standard_to_ladder(trial)
+
+            if not getattr(trial, "fitted_to_model", False):
+                continue
+
+            score = _rescue_fit_score(trial)
+            if best_score is None or score < best_score:
+                best_fit = trial
+                best_score = score
+        except Exception:
+            continue
+
+    if best_fit is not None:
+        kept = len(getattr(best_fit, "ladder_steps", []))
+        total = len(getattr(best_fit, "expected_ladder_steps", getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", []))))
+        best_fit = _set_ladder_fit_metadata(
+            best_fit,
+            "high_end_rescue",
+            f"High-end rescue used the stable top {kept}/{total} ladder steps because the lower ROX region was unreliable.",
+        )
+    return best_fit
+
+
+def _try_descending_low_end_completion(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    expected = _get_expected_ladder_steps(fsa)
+    current_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    current_times = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+    candidate_times = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    ladder_model = getattr(fsa, "ladder_model", None)
+
+    if (
+        expected.size == 0
+        or current_steps.size == 0
+        or current_times.size != current_steps.size
+        or candidate_times.size == 0
+        or ladder_model is None
+    ):
+        return None
+
+    full_times = np.full(expected.size, np.nan, dtype=float)
+    step_map = _map_step_indices(current_steps, expected)
+    for current_idx, full_idx in step_map.items():
+        full_times[full_idx] = current_times[current_idx]
+
+    missing_indices = [idx for idx, value in enumerate(full_times) if np.isnan(value)]
+    if not missing_indices:
+        return None
+
+    xs = np.arange(trace.size, dtype=float)
+    predicted_bp = np.asarray(ladder_model.predict(xs.reshape(-1, 1)), dtype=float)
+    anchor_intensities = trace[np.rint(current_times).astype(int)]
+    median_anchor_intensity = float(np.median(anchor_intensities)) if anchor_intensities.size else 0.0
+    used_times = {round(float(t), 6) for t in current_times}
+    added_steps: list[float] = []
+
+    for step_idx in reversed(missing_indices):
+        higher_indices = [idx for idx in range(step_idx + 1, expected.size) if not np.isnan(full_times[idx])]
+        if not higher_indices:
+            continue
+
+        next_higher_idx = higher_indices[0]
+        next_higher_time = float(full_times[next_higher_idx])
+        target_bp = float(expected[step_idx])
+        target_time = int(np.argmin(np.abs(predicted_bp - target_bp)))
+        gap_to_next = max(18.0, abs(next_higher_time - target_time))
+        search_radius = min(120.0, max(30.0, gap_to_next * 0.8))
+        lo = max(0.0, target_time - search_radius)
+        hi = min(next_higher_time - 1.0, target_time + search_radius)
+        if hi <= lo:
+            continue
+
+        candidates_in_window: list[tuple[float, float]] = []
+        for candidate_time in candidate_times:
+            candidate_time = float(candidate_time)
+            if round(candidate_time, 6) in used_times:
+                continue
+            if not (lo <= candidate_time <= hi):
+                continue
+            intensity = float(trace[int(round(candidate_time))])
+            candidates_in_window.append((candidate_time, intensity))
+
+        if not candidates_in_window:
+            continue
+
+        def candidate_score(item: tuple[float, float]) -> tuple[float, float, float]:
+            candidate_time, intensity = item
+            distance_penalty = abs(candidate_time - target_time)
+            if median_anchor_intensity > 0:
+                relative_intensity = intensity / median_anchor_intensity
+            else:
+                relative_intensity = 1.0
+            weak_penalty = max(0.0, 0.22 - relative_intensity)
+            return (
+                distance_penalty,
+                weak_penalty,
+                -intensity,
+            )
+
+        chosen_time, chosen_intensity = min(candidates_in_window, key=candidate_score)
+        if chosen_intensity < DESCENDING_RECOVERY_MIN_INTENSITY:
+            continue
+
+        full_times[step_idx] = chosen_time
+        used_times.add(round(chosen_time, 6))
+        added_steps.append(target_bp)
+
+    if not added_steps:
+        return None
+
+    assigned_mask = ~np.isnan(full_times)
+    assigned_times = full_times[assigned_mask]
+    assigned_steps = expected[assigned_mask]
+    if assigned_times.size < current_times.size or np.any(np.diff(assigned_times) <= 0):
+        return None
+
+    trial = copy.deepcopy(fsa)
+    trial.expected_ladder_steps = expected.copy()
+    trial.ladder_steps = np.asarray(assigned_steps, dtype=float)
+    trial.best_size_standard = np.asarray(assigned_times, dtype=float)
+    trial.n_ladder_peaks = trial.ladder_steps.size
+
+    try:
+        trial = fit_size_standard_to_ladder(trial)
+        if not getattr(trial, "fitted_to_model", False):
+            return None
+        qc = compute_ladder_qc_metrics(trial)
+    except Exception:
+        return None
+
+    if (
+        qc["r2"] < DESCENDING_RECOVERY_R2_FLOOR
+        or qc["max_abs_error_bp"] > DESCENDING_RECOVERY_MAX_ABS_ERROR
+        or qc["mean_abs_error_bp"] > DESCENDING_RECOVERY_MEAN_ABS_ERROR
+    ):
+        return None
+
+    missing_after = [
+        float(bp) for bp in expected if not np.any(np.isclose(trial.ladder_steps, bp, atol=1e-6))
+    ]
+    added_text = ", ".join(f"{bp:.0f}" for bp in added_steps)
+    if missing_after:
+        note = (
+            f"High-end rescue recovered lower ladder steps {added_text} bp using a descending search. "
+            f"Remaining missing steps: {', '.join(f'{bp:.0f}' for bp in missing_after)} bp."
+        )
+    else:
+        note = (
+            f"High-end rescue recovered all lower ladder steps using a descending search "
+            f"({added_text} bp)."
+        )
+
+    return _set_ladder_fit_metadata(trial, "high_end_rescue", note)
+
+
 # ==================================================================
 # ==================== ANALYSEFUNKSJONER ===========================
 # ==================================================================
 
-def save_ladder_adjustment(fsa: FsaFile, mapping: dict[int, int]) -> None:
-    """Saves a manual mapping to a .json file alongside the .fsa file."""
+def _normalize_ladder_adjustment_payload(adjustment: dict | None) -> dict | None:
+    """Normalizes legacy and enriched ladder adjustment payloads."""
+    if not adjustment:
+        return None
+
+    if "mapping" in adjustment or "mapping_times" in adjustment or "manual_candidates" in adjustment:
+        mapping_raw = adjustment.get("mapping", {})
+        mapping_times_raw = adjustment.get("mapping_times", {})
+        manual_candidates_raw = adjustment.get("manual_candidates", [])
+        return {
+            "mapping": {int(k): int(v) for k, v in mapping_raw.items()},
+            "mapping_times": {int(k): float(v) for k, v in mapping_times_raw.items()},
+            "manual_candidates": [float(v) for v in manual_candidates_raw],
+        }
+
+    return {
+        "mapping": {int(k): int(v) for k, v in adjustment.items()},
+        "mapping_times": {},
+        "manual_candidates": [],
+    }
+
+
+def save_ladder_adjustment(
+    fsa: FsaFile,
+    adjustment: dict[int, int] | dict,
+    *,
+    manual_candidates: list[float] | None = None,
+    mapping_times: dict[int, float] | None = None,
+) -> None:
+    """Saves a manual mapping payload to a .json file alongside the .fsa file."""
     adj_path = fsa.file.with_suffix(".ladder_adj.json")
     try:
+        if manual_candidates is not None or mapping_times is not None:
+            payload = {
+                "mapping": {int(k): int(v) for k, v in adjustment.items()},
+                "mapping_times": {int(k): float(v) for k, v in (mapping_times or {}).items()},
+                "manual_candidates": [float(v) for v in (manual_candidates or [])],
+            }
+        else:
+            payload = _normalize_ladder_adjustment_payload(adjustment) or {
+                "mapping": {},
+                "mapping_times": {},
+                "manual_candidates": [],
+            }
         with open(adj_path, "w") as f:
-            json.dump(mapping, f)
+            json.dump(payload, f)
+        mirrored = 0
+        for sibling in _sibling_fsa_paths(fsa.file):
+            sibling_adj = sibling.with_suffix(".ladder_adj.json")
+            try:
+                with open(sibling_adj, "w") as f:
+                    json.dump(payload, f)
+                mirrored += 1
+            except Exception:
+                continue
         print_green(f"Saved ladder adjustment to {adj_path.name}")
+        if mirrored:
+            print_green(f"Mirrored ladder adjustment to {mirrored} sibling project copie(s)")
     except Exception as e:
         print_warning(f"Could not save ladder adjustment: {e}")
 
 
-def load_ladder_adjustment(fsa: FsaFile) -> dict[int, int] | None:
-    """Loads a manual mapping from a .json file if it exists."""
+def load_ladder_adjustment(fsa: FsaFile) -> dict | None:
+    """Loads a manual mapping payload from a .json file if it exists."""
     adj_path = fsa.file.with_suffix(".ladder_adj.json")
     if adj_path.exists():
         try:
             with open(adj_path, "r") as f:
-                mapping = json.load(f)
-                return {int(k): int(v) for k, v in mapping.items()}
+                payload = json.load(f)
+                return _normalize_ladder_adjustment_payload(payload)
         except Exception as e:
             print_warning(f"Could not load ladder adjustment {adj_path.name}: {e}")
+
+    for sibling in _sibling_fsa_paths(fsa.file):
+        sibling_adj = sibling.with_suffix(".ladder_adj.json")
+        if not sibling_adj.exists():
+            continue
+        try:
+            with open(sibling_adj, "r") as f:
+                payload = json.load(f)
+            print_green(f"Using sibling ladder adjustment from {sibling_adj}")
+            return _normalize_ladder_adjustment_payload(payload)
+        except Exception as e:
+            print_warning(f"Could not load sibling ladder adjustment {sibling_adj.name}: {e}")
     return None
 
 
-def _try_apply_saved_ladder_adjustment(fsa: FsaFile, mapping: dict[int, int] | None, label: str) -> FsaFile | None:
+def _try_apply_saved_ladder_adjustment(fsa: FsaFile, adjustment: dict | None, label: str) -> FsaFile | None:
     """Applies a saved ladder adjustment if valid, otherwise warns and falls back to auto-fit."""
-    if not mapping:
+    if not adjustment:
         return None
     try:
         print_green(f"[{label}] Applying manual ladder adjustment for {fsa.file_name}")
-        return apply_manual_ladder_mapping(fsa, mapping)
+        return _set_ladder_fit_metadata(
+            apply_manual_ladder_mapping(fsa, adjustment),
+            "manual_adjustment",
+            "Manual ladder adjustment applied from saved sidecar.",
+        )
     except Exception as exc:
         print_warning(
             f"[{label}] Ignoring invalid saved ladder adjustment for {fsa.file_name}: {exc}. Falling back to auto-fit."
@@ -199,18 +654,33 @@ def _try_apply_saved_ladder_adjustment(fsa: FsaFile, mapping: dict[int, int] | N
         return None
 
 
-def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
+def analyse_fsa_liz(
+    fsa_path: Path,
+    sample_channel: str,
+    *,
+    ladder_name: str | None = None,
+    min_distance_between_peaks: float | None = None,
+    min_size_standard_height: float | None = None,
+) -> FsaFile | None:
     """Ladder-fit for LIZ (TCRg/IGK/KDE).
     
     Uses multi-config search, dye-blob filtering, polynomial sizing,
     and iterative outlier removal for robust ladder fitting.
     """
+    ladder_name = ladder_name or LIZ_LADDER
+    base_min_distance = float(
+        MIN_DISTANCE_BETWEEN_PEAKS_LIZ if min_distance_between_peaks is None else min_distance_between_peaks
+    )
+    base_min_height = float(
+        MIN_SIZE_STANDARD_HEIGHT_LIZ if min_size_standard_height is None else min_size_standard_height
+    )
+
     print_green(
-        f"=== Analysing {fsa_path} (LIZ, sample {sample_channel}, Python API) ==="
+        f"=== Analysing {fsa_path} ({ladder_name}, sample {sample_channel}, Python API) ==="
     )
 
     configs = [
-        {"min_h": MIN_SIZE_STANDARD_HEIGHT_LIZ, "min_d": MIN_DISTANCE_BETWEEN_PEAKS_LIZ},
+        {"min_h": base_min_height, "min_d": base_min_distance},
         {"min_h": 200, "min_d": 20},
         {"min_h": 100, "min_d": 15},
         {"min_h": 50, "min_d": 10},
@@ -218,7 +688,7 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
 
     base_fsa = FsaFile(
         file=str(fsa_path),
-        ladder=LIZ_LADDER,
+        ladder=ladder_name,
         sample_channel=sample_channel,
         min_distance_between_peaks=configs[0]["min_d"],
         min_size_standard_height=configs[0]["min_h"],
@@ -235,7 +705,7 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     for cfg in configs:
         fsa = FsaFile(
             file=str(fsa_path),
-            ladder=LIZ_LADDER,
+            ladder=ladder_name,
             sample_channel=sample_channel,
             min_distance_between_peaks=cfg["min_d"],
             min_size_standard_height=cfg["min_h"],
@@ -289,13 +759,23 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     qc = compute_ladder_qc_metrics(fsa)
+                    if qc["r2"] < HIGH_END_RESCUE_R2:
+                        rescued = _try_high_end_ladder_rescue(fsa, "LIZ", fsa_path)
+                        if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
+                            kept = len(getattr(rescued, "ladder_steps", []))
+                            total = len(getattr(rescued, "expected_ladder_steps", getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", []))))
+                            print_green(
+                                f"[LIZ] High-end ladder rescue selected for {fsa_path.name} using the top {kept}/{total} ladder steps."
+                            )
+                            fsa = rescued
+                            qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= MIN_R2_QUALITY:
-                        return fsa
+                        return _finalize_auto_fit_metadata(fsa)
                     else:
                         refined = _refine_polynomial(fsa, "LIZ", fsa_path)
                         if refined:
                             return refined
-                        return fsa
+                        return _finalize_auto_fit_metadata(fsa)
             except ValueError:
                 pass
         except ValueError:
@@ -309,18 +789,33 @@ def analyse_fsa_liz(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     print_warning(f"[LIZ] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
     return None
 
-def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
+def analyse_fsa_rox(
+    fsa_path: Path,
+    sample_channel: str,
+    *,
+    ladder_name: str | None = None,
+    min_distance_between_peaks: float | None = None,
+    min_size_standard_height: float | None = None,
+) -> FsaFile | None:
     """Ladder-fit for ROX (FR1–3, TCRbA/B/C, SL, DHJH_D/E).
     
     Uses multi-config search, dye-blob filtering, polynomial sizing,
     and iterative outlier removal for robust ladder fitting.
     """
+    ladder_name = ladder_name or ROX_LADDER
+    base_min_distance = float(
+        MIN_DISTANCE_BETWEEN_PEAKS_ROX if min_distance_between_peaks is None else min_distance_between_peaks
+    )
+    base_min_height = float(
+        MIN_SIZE_STANDARD_HEIGHT_ROX if min_size_standard_height is None else min_size_standard_height
+    )
+
     print_green(
-        f"=== Analysing {fsa_path} (ROX, sample {sample_channel}, Python API) ==="
+        f"=== Analysing {fsa_path} ({ladder_name}, sample {sample_channel}, Python API) ==="
     )
 
     configs = [
-        {"min_h": MIN_SIZE_STANDARD_HEIGHT_ROX, "min_d": MIN_DISTANCE_BETWEEN_PEAKS_ROX},
+        {"min_h": base_min_height, "min_d": base_min_distance},
         {"min_h": 100, "min_d": 15},
         {"min_h": 50, "min_d": 10},
         {"min_h": 20, "min_d": 8},
@@ -328,7 +823,7 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
 
     base_fsa = FsaFile(
         file=str(fsa_path),
-        ladder=ROX_LADDER,
+        ladder=ladder_name,
         sample_channel=sample_channel,
         min_distance_between_peaks=configs[0]["min_d"],
         min_size_standard_height=configs[0]["min_h"],
@@ -345,7 +840,7 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
     for cfg in configs:
         fsa = FsaFile(
             file=str(fsa_path),
-            ladder=ROX_LADDER,
+            ladder=ladder_name,
             sample_channel=sample_channel,
             min_distance_between_peaks=cfg["min_d"],
             min_size_standard_height=cfg["min_h"],
@@ -356,17 +851,7 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
 
         all_found = getattr(fsa, "size_standard_peaks", None)
         if all_found is not None:
-            # Calculate median height for dye-blob detection
-            heights = np.array([rox_data[p] for p in all_found])
-            median_h = np.median(heights)
-            cleaned = []
-            for p in all_found:
-                h = rox_data[p]
-                # Filter: saturated (>31000), early noise (<1000 idx),
-                # or dye blobs (>3x median height)
-                if h > 31000 or p < 1000 or h > 2.0 * median_h:
-                    continue
-                cleaned.append(p)
+            cleaned = _clean_rox_size_standard_peaks(np.asarray(all_found), rox_data)
             if len(cleaned) >= 3:
                 fsa.size_standard_peaks = np.array(cleaned)
 
@@ -401,13 +886,44 @@ def analyse_fsa_rox(fsa_path: Path, sample_channel: str) -> FsaFile | None:
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     qc = compute_ladder_qc_metrics(fsa)
+                    if qc["r2"] < HIGH_END_RESCUE_R2:
+                        rescued = _try_high_end_ladder_rescue(fsa, "ROX", fsa_path)
+                        if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
+                            kept = len(getattr(rescued, "ladder_steps", []))
+                            total = len(getattr(rescued, "expected_ladder_steps", getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", []))))
+                            print_green(
+                                f"[ROX] High-end ladder rescue selected for {fsa_path.name} using the top {kept}/{total} ladder steps."
+                            )
+                            fsa = rescued
+                            qc = compute_ladder_qc_metrics(fsa)
+                            completed = _try_descending_low_end_completion(fsa, "ROX", fsa_path)
+                            if completed is not None:
+                                rescued_score = _rescue_fit_score(fsa)
+                                completed_score = _rescue_fit_score(completed)
+                                rescued_steps = len(getattr(fsa, "ladder_steps", []))
+                                completed_steps = len(getattr(completed, "ladder_steps", []))
+                                if completed_steps > rescued_steps or (
+                                    completed_steps == rescued_steps and completed_score < rescued_score
+                                ):
+                                    added_steps = [
+                                        float(bp)
+                                        for bp in np.asarray(getattr(completed, "ladder_steps", []), dtype=float)
+                                        if not np.any(np.isclose(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float), bp, atol=1e-6))
+                                    ]
+                                    if added_steps:
+                                        print_green(
+                                            f"[ROX] Descending low-end recovery accepted for {fsa_path.name}: "
+                                            f"{', '.join(f'{bp:.0f}' for bp in added_steps)} bp"
+                                        )
+                                    fsa = completed
+                                    qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= MIN_R2_QUALITY:
-                        return fsa
+                        return _finalize_auto_fit_metadata(fsa)
                     else:
                         refined = _refine_polynomial(fsa, "ROX", fsa_path)
                         if refined:
                             return refined
-                        return fsa
+                        return _finalize_auto_fit_metadata(fsa)
             except ValueError:
                 pass
         except ValueError:
@@ -537,35 +1053,77 @@ def get_ladder_candidates(fsa: FsaFile) -> pd.DataFrame:
     ss_peaks = getattr(fsa, "size_standard_peaks", None)
     if ss_peaks is None:
         return pd.DataFrame(columns=["index", "time", "intensity"])
-    
-    trace = fsa.size_standard
+
+    peak_times = np.asarray(ss_peaks, dtype=float)
+    trace = np.asarray(fsa.size_standard, dtype=float)
+    peak_indices = np.rint(peak_times).astype(int)
+    valid_mask = (peak_indices >= 0) & (peak_indices < len(trace))
+    peak_times = peak_times[valid_mask]
+    peak_indices = peak_indices[valid_mask]
+
+    manual_candidates = set(
+        float(v) for v in getattr(fsa, "manual_ladder_candidates", []) or []
+    )
+    sources = [
+        "manual" if any(abs(float(time_value) - manual) <= 1e-6 for manual in manual_candidates) else "auto"
+        for time_value in peak_times
+    ]
+
     return pd.DataFrame({
-        "index": np.arange(len(ss_peaks)),
-        "time": ss_peaks,
-        "intensity": trace[ss_peaks]
+        "index": np.arange(len(peak_times)),
+        "time": peak_times,
+        "intensity": trace[peak_indices],
+        "source": sources,
     })
 
 
-def apply_manual_ladder_mapping(fsa: FsaFile, mapping: dict[int, int]) -> FsaFile:
+def apply_manual_ladder_mapping(fsa: FsaFile, adjustment: dict[int, int] | dict) -> FsaFile:
     """
     Applies a manual mapping of ladder steps to candidate peak indices.
     
     mapping: {ladder_step_index: candidate_peak_index}
     """
-    ladder_steps = fsa.ladder_steps
+    payload = _normalize_ladder_adjustment_payload(adjustment)
+    if payload is None:
+        raise ValueError("No ladder adjustment payload provided.")
+
+    mapping = payload["mapping"]
+    mapping_times = payload["mapping_times"]
+    manual_candidates = payload["manual_candidates"]
+    ladder_steps = _get_expected_ladder_steps(fsa)
+    current_ladder_steps = np.asarray(getattr(fsa, "ladder_steps", ladder_steps), dtype=float)
     ss_peaks = fsa.size_standard_peaks
-    
+
     if ss_peaks is None:
         raise ValueError("No size standard peaks found in FsaFile.")
+
+    if manual_candidates:
+        merged = list(np.asarray(ss_peaks, dtype=float))
+        for time_value in manual_candidates:
+            if not any(abs(float(existing) - float(time_value)) <= 1e-6 for existing in merged):
+                merged.append(float(time_value))
+        merged.sort()
+        fsa.size_standard_peaks = np.asarray(merged, dtype=float)
+        ss_peaks = fsa.size_standard_peaks
+    fsa.manual_ladder_candidates = [float(v) for v in manual_candidates]
     
+    selected_peaks = np.full(len(ladder_steps), np.nan, dtype=float)
     current = getattr(fsa, "best_size_standard", None)
-    if current is not None and len(current) == len(ladder_steps):
-        selected_peaks = np.asarray(current, dtype=float).copy()
-    else:
-        selected_peaks = np.full(len(ladder_steps), np.nan, dtype=float)
-    
+    if current is not None and len(current) == len(current_ladder_steps):
+        current = np.asarray(current, dtype=float)
+        step_map = _map_step_indices(current_ladder_steps, ladder_steps)
+        for current_idx, full_idx in step_map.items():
+            selected_peaks[full_idx] = current[current_idx]
+
+    for step_idx, peak_time in mapping_times.items():
+        if step_idx < 0 or step_idx >= len(ladder_steps):
+            continue
+        selected_peaks[step_idx] = float(peak_time)
+
     for step_idx, peak_idx in mapping.items():
         if step_idx < 0 or step_idx >= len(ladder_steps):
+            continue
+        if step_idx in mapping_times:
             continue
         if peak_idx < 0 or peak_idx >= len(ss_peaks):
             continue
@@ -578,6 +1136,8 @@ def apply_manual_ladder_mapping(fsa: FsaFile, mapping: dict[int, int]) -> FsaFil
     if np.any(np.diff(selected_peaks) <= 0):
         raise ValueError("Selected ladder peaks must be strictly increasing in time.")
 
+    fsa.expected_ladder_steps = ladder_steps.copy()
+    fsa.ladder_steps = ladder_steps.copy()
     fsa.best_size_standard = selected_peaks
 
     # Re-run fitting

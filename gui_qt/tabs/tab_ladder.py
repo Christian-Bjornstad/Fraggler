@@ -58,7 +58,7 @@ class TabLadder(QWidget):
         header.addWidget(sub)
         main_layout.addLayout(header)
 
-        main_layout.addWidget(self._build_source_card())
+        main_layout.addWidget(self._build_source_card(), stretch=2)
         main_layout.addWidget(self._build_details_card())
         main_layout.addWidget(self._build_report_card(), stretch=1)
 
@@ -102,6 +102,7 @@ class TabLadder(QWidget):
         layout.addLayout(row2)
 
         self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(280)
         self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.file_list.itemSelectionChanged.connect(self._on_file_selected)
         self.file_list.itemDoubleClicked.connect(lambda _: self._open_ladder_editor())
@@ -125,13 +126,12 @@ class TabLadder(QWidget):
 
         fields = [
             ("file", "File"),
-            ("analysis", "Analysis"),
             ("assay", "Assay"),
-            ("group", "Group"),
             ("ladder", "Ladder"),
-            ("sample_channel", "Sample Channel"),
-            ("trace_channels", "Trace Channels"),
-            ("bp_range", "bp Range"),
+            ("fit_strategy", "Fit Strategy"),
+            ("fit_counts", "Expected / Fitted"),
+            ("review_state", "Review State"),
+            ("missing_steps", "Missing Steps"),
             ("adjustment", "Saved Adjustment"),
         ]
 
@@ -368,13 +368,12 @@ class TabLadder(QWidget):
         self.detail_labels["file"].setText(str(self._current_file))
         if not meta:
             for key in [
-                "analysis",
                 "assay",
-                "group",
                 "ladder",
-                "sample_channel",
-                "trace_channels",
-                "bp_range",
+                "fit_strategy",
+                "fit_counts",
+                "review_state",
+                "missing_steps",
                 "adjustment",
             ]:
                 self.detail_labels[key].setText("Could not classify")
@@ -382,15 +381,48 @@ class TabLadder(QWidget):
             return
 
         adj_status = "Saved" if self._current_file.with_suffix(".ladder_adj.json").exists() else "None"
-        self.detail_labels["analysis"].setText(meta["analysis"])
         self.detail_labels["assay"].setText(meta["assay"])
-        self.detail_labels["group"].setText(meta["group"])
         self.detail_labels["ladder"].setText(meta["ladder"])
-        self.detail_labels["sample_channel"].setText(meta.get("sample_channel") or "—")
-        self.detail_labels["trace_channels"].setText(", ".join(meta.get("trace_channels", [])) or "—")
-        self.detail_labels["bp_range"].setText(f"{meta['bp_min']:.1f} - {meta['bp_max']:.1f}")
         self.detail_labels["adjustment"].setText(adj_status)
-        self._set_status(f"Loaded metadata for {self._current_file.name}.")
+        self.detail_labels["fit_strategy"].setText("Loading...")
+        self.detail_labels["fit_counts"].setText("—")
+        self.detail_labels["review_state"].setText("—")
+        self.detail_labels["missing_steps"].setText("—")
+
+        try:
+            fsa, _ = load_adjustable_fsa(
+                self._current_file,
+                preferred_analysis=APP_SETTINGS.get("active_analysis"),
+            )
+            fit_strategy = str(getattr(fsa, "ladder_fit_strategy", "auto_full")).replace("_", " ")
+            expected_steps = list(
+                map(float, getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", [])))
+            )
+            fitted_steps = list(map(float, getattr(fsa, "ladder_steps", [])))
+            missing_steps = list(map(float, getattr(fsa, "ladder_missing_expected_steps", [])))
+            fit_note = str(getattr(fsa, "ladder_fit_note", ""))
+            review_required = bool(getattr(fsa, "ladder_review_required", bool(missing_steps)))
+
+            if getattr(fsa, "ladder_fit_strategy", "") == "manual_adjustment":
+                review_state = "Manual correction active"
+            elif review_required:
+                review_state = "Usable but incomplete"
+            else:
+                review_state = "Full fit"
+
+            self.detail_labels["fit_strategy"].setText(fit_strategy)
+            self.detail_labels["fit_counts"].setText(f"{len(expected_steps)} / {len(fitted_steps)}")
+            self.detail_labels["review_state"].setText(review_state)
+            self.detail_labels["missing_steps"].setText(
+                ", ".join(f"{bp:.0f}" for bp in missing_steps) if missing_steps else "None"
+            )
+            self._set_status(fit_note or f"Loaded metadata for {self._current_file.name}.")
+        except Exception as exc:
+            self.detail_labels["fit_strategy"].setText("Could not load")
+            self.detail_labels["fit_counts"].setText("—")
+            self.detail_labels["review_state"].setText("Unknown")
+            self.detail_labels["missing_steps"].setText("—")
+            self._set_status(f"Loaded metadata, but not ladder state: {exc}", error=True)
 
     def _clear_details(self) -> None:
         for label in self.detail_labels.values():
@@ -412,8 +444,8 @@ class TabLadder(QWidget):
 
         dialog = LadderAdjustmentDialog(fsa, self)
         if dialog.exec():
-            mapping = dialog.get_mapping()
-            save_ladder_adjustment(fsa, mapping)
+            adjustment = dialog.get_adjustment_payload()
+            save_ladder_adjustment(fsa, adjustment)
             self._refresh_current_metadata()
             self._set_status(
                 f"Saved ladder adjustment for {self._current_file.name}. Re-run the analysis to use the new fit."

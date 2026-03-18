@@ -322,6 +322,7 @@ class FsaFile:
         self.normalize = normalize
 
         self.ladder_steps = LADDERS[ladder]["sizes"]
+        self.expected_ladder_steps = np.array(self.ladder_steps, dtype=float).copy()
         self.n_ladder_peaks = self.ladder_steps.size
 
         self.min_size_standard_height = min_size_standard_height
