@@ -29,7 +29,7 @@ call fraggler-win-venv\Scripts\activate.bat
 
 REM Install dependencies
 pip install -r requirements.txt
-pip install pyinstaller
+pip install -r packaging\build-requirements.txt
 
 REM Clean previous builds
 if exist build rmdir /s /q build

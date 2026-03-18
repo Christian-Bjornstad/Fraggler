@@ -26,6 +26,11 @@ class TestStartup(unittest.TestCase):
         self.assertTrue(hasattr(module, "run_pipeline"))
         self.assertLess(elapsed, 5.0)
 
+    def test_build_contract_bundles_legacy_panel_entrypoint(self):
+        import build_qt
+
+        self.assertIn(("app.py", "."), build_qt.COMMON_DATAS)
+
 
 if __name__ == "__main__":
     unittest.main()

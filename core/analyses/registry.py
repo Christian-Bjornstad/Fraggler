@@ -21,8 +21,13 @@ def get_analysis_module(submodule: str) -> Any:
     module_path = f"core.analyses.{name}.{submodule}"
     try:
         return importlib.import_module(module_path)
-    except ImportError:
-        # Fallback to clonality if not found
+    except ModuleNotFoundError as exc:
+        # Fall back only when the missing module is the requested analysis package/module,
+        # not when an inner dependency import failed from inside that module.
+        missing_name = exc.name or ""
+        analysis_package = f"core.analyses.{name}"
+        if missing_name not in {analysis_package, module_path}:
+            raise
         fallback_path = f"core.analyses.clonality.{submodule}"
         return importlib.import_module(fallback_path)
 

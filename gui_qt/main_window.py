@@ -5,6 +5,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon
 
+from app_meta import APP_VERSION
 from gui_qt.styles import VIBRANT_PRO_QSS
 from gui_qt.tabs.tab_batch import TabBatch
 from gui_qt.tabs.tab_ladder import TabLadder
@@ -88,7 +89,7 @@ class AnalysisGroup(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Fraggler Diagnostics v1.1.1")
+        self.setWindowTitle(f"Fraggler Diagnostics v{APP_VERSION}")
         self.setStyleSheet(VIBRANT_PRO_QSS)
         
         # Central widget

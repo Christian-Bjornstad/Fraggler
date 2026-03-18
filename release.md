@@ -43,8 +43,10 @@
   - `python3 -m unittest discover -s tests -q`
 - Verified the updated macOS packaging flow and artifact layout.
 - Confirmed the new macOS release zip is produced under `dist/releases/`.
+- Build-tool pinning now lives in `packaging/build-requirements.txt` so local and Docker packaging use the same PyInstaller version.
 
 ## Notes
 - Linux runtime validation on the actual Fedora 35 machine is still the final real-world check for the offline bundle.
 - macOS builds remain unsigned unless separately signed/notarized before release.
 - PyInstaller still warns about `libomp.dylib` from `sklearn` during macOS packaging; it did not block the build, but it is worth keeping in mind for hardened-runtime/signing work later.
+- Automated cross-platform release validation is still not in-repo; packaged artifact startup is still a manual verification step.

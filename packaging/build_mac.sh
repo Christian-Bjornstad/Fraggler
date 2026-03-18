@@ -23,7 +23,7 @@ else
     exit 1
 fi
 
-pip install pyinstaller 2>/dev/null || true
+python -m pip install -r requirements.txt -r packaging/build-requirements.txt
 
 rm -rf build dist
 

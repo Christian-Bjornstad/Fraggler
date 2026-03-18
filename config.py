@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import yaml
 import copy
+import logging
 import os
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
@@ -17,6 +19,10 @@ from typing import Any, Dict, Mapping
 # ============================================================
 
 SETTINGS_PATH = Path.home() / ".fraggler_gui.yaml"
+_LOG = logging.getLogger(__name__)
+
+LAST_SETTINGS_LOAD_ERROR: str | None = None
+LAST_SETTINGS_SAVE_ERROR: str | None = None
 
 # ============================================================
 # DEFAULTS
@@ -244,6 +250,9 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
     if not isinstance(general.get("default_output", ""), str):
         general["default_output"] = ""
 
+    if settings.get("active_analysis") not in DEFAULT_SETTINGS["analyses"]:
+        settings["active_analysis"] = DEFAULT_SETTINGS["active_analysis"]
+
     settings["default_output"] = general.get("default_output", "")
 
     analyses = settings.setdefault("analyses", {})
@@ -280,14 +289,23 @@ def get_analysis_settings(analysis_id: str | None = None, settings: Dict[str, An
     stored = settings.setdefault("analyses", {}).get(analysis_id, {})
     return _deep_update(analysis_defaults, stored)
 
+
+def _report_settings_issue(kind: str, settings_path: Path, exc: Exception) -> str:
+    message = f"{kind} settings at {settings_path}: {exc}"
+    warnings.warn(message, RuntimeWarning, stacklevel=2)
+    _LOG.warning(message)
+    return message
+
 def load_settings(
     settings_path: Path | None = None,
     env: Mapping[str, str] | None = None,
 ) -> Dict[str, Any]:
     """Load settings from YAML, merged over defaults, then env vars."""
+    global LAST_SETTINGS_LOAD_ERROR
     settings = copy.deepcopy(DEFAULT_SETTINGS)
     settings_path = settings_path or SETTINGS_PATH
     env = env or os.environ
+    LAST_SETTINGS_LOAD_ERROR = None
     
     # 1) Load from YAML if exists
     if settings_path.exists():
@@ -295,8 +313,8 @@ def load_settings(
             with open(settings_path, "r", encoding="utf-8") as f:
                 user = yaml.safe_load(f) or {}
             settings = _deep_update(settings, user)
-        except Exception:
-            pass
+        except Exception as exc:
+            LAST_SETTINGS_LOAD_ERROR = _report_settings_issue("Failed to load", settings_path, exc)
 
     _apply_env_overrides(settings, env)
     settings = _migrate_legacy_settings(settings)
@@ -306,15 +324,18 @@ def load_settings(
 
 def save_settings(settings: Dict[str, Any], settings_path: Path | None = None) -> None:
     """Persist settings to YAML."""
+    global LAST_SETTINGS_SAVE_ERROR
     settings_path = settings_path or SETTINGS_PATH
+    LAST_SETTINGS_SAVE_ERROR = None
     try:
         payload = copy.deepcopy(settings)
         payload = _migrate_legacy_settings(payload)
         payload["default_output"] = payload.get("general", {}).get("default_output", "")
+        settings_path.parent.mkdir(parents=True, exist_ok=True)
         with open(settings_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(payload, f, sort_keys=False, allow_unicode=True)
-    except Exception:
-        pass
+    except Exception as exc:
+        LAST_SETTINGS_SAVE_ERROR = _report_settings_issue("Failed to save", settings_path, exc)
 
 
 # Singleton — imported by other modules

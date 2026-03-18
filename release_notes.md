@@ -1,5 +1,7 @@
 # Fraggler Diagnostics v1.1.1 Release Notes
 
+Historical notes for the earlier `v1.1.1` release. Current desktop packaging and release guidance live in `README.md`, `packaging/README.md`, and `release.md`.
+
 ## New in v1.1.1
 - **Fixed Basepair Shift**: Improved ladder fitting robustness by increasing the peak consideration limit and tightening contaminant filtering. This resolves observed shifts in samples with high primer/dye blobs (e.g., SL assay).
 

@@ -170,6 +170,7 @@ def run_pipeline_job(
 
     ok_chunks = 0
     failed_chunks = 0
+    collected_entries = []
     for offset in range(0, len(files), CHUNK_SIZE):
         chunk = files[offset: offset + CHUNK_SIZE]
         log(f"[INFO] Chunk {offset // CHUNK_SIZE + 1} ({len(chunk)} files)")
@@ -177,12 +178,15 @@ def run_pipeline_job(
         try:
             tmp_input = stage_files(chunk)
             from core.pipeline import run_pipeline
-            run_pipeline(
+            chunk_entries = run_pipeline(
                 fsa_dir=tmp_input,
                 base_outdir=base_outdir,
                 assay_folder_name=out_folder_name,
                 mode=effective_mode,
+                return_entries=True,
+                make_dit_reports=False,
             )
+            collected_entries.extend(chunk_entries or [])
             ok_chunks += 1
         except Exception as e:
             failed_chunks += 1
@@ -194,6 +198,12 @@ def run_pipeline_job(
         raise RuntimeError(
             f"Pipeline completed with errors: {ok_chunks} ok, {failed_chunks} failed."
         )
+    if collected_entries and effective_mode != "controls":
+        from core.assay_config import OUTDIR_NAME
+        from core.html_reports import build_dit_html_reports
+
+        assay_outdir = base_outdir / (out_folder_name or OUTDIR_NAME)
+        build_dit_html_reports(collected_entries, assay_outdir)
     return None
 
 
@@ -221,8 +231,36 @@ def run_pipeline_job_collect(
 
     try:
         if files:
-            tmp_input = stage_files(files)
-            effective_in = tmp_input
+            if len(files) > SAFE_MAX_FILES_PER_PATIENT:
+                raise ValueError(
+                    f"File count ({len(files)}) exceeds SAFE_MAX={SAFE_MAX_FILES_PER_PATIENT}."
+                )
+
+            selected_files = files
+            if scope == "custom" and needle.strip():
+                selected_files = [p for p in files if needle.lower() in p.name.lower()]
+                if not selected_files:
+                    return []
+
+            all_entries = []
+            from core.pipeline import run_pipeline
+            for offset in range(0, len(selected_files), CHUNK_SIZE):
+                chunk = selected_files[offset: offset + CHUNK_SIZE]
+                tmp_input = stage_files(chunk)
+                try:
+                    entries = run_pipeline(
+                        fsa_dir=tmp_input,
+                        base_outdir=base_outdir,
+                        assay_folder_name=out_folder_name,
+                        mode=effective_mode,
+                        return_entries=True,
+                        make_dit_reports=False,
+                    )
+                    all_entries.extend(entries or [])
+                finally:
+                    cleanup_temp(tmp_input)
+                    tmp_input = None
+            return all_entries
 
         if scope == "custom" and needle.strip():
             filtered = build_filtered_input(effective_in, needle)

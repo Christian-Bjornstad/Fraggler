@@ -248,10 +248,13 @@ class TabBatch(QWidget):
             files = str(len(j.get("files", []))) if j.get("files") else "auto"
             item_files = QTableWidgetItem(files)
             
-            item_state = QTableWidgetItem(state.upper())
+            display_state = state.upper()
+            if ":" in display_state:
+                display_state = display_state.split(":", 1)[0]
+            item_state = QTableWidgetItem(display_state)
             if state == "success" or state == "done":
                 item_state.setForeground(Qt.GlobalColor.darkGreen)
-            elif state == "error":
+            elif state == "error" or state.startswith("error"):
                 item_state.setForeground(Qt.GlobalColor.red)
             elif state == "running":
                 item_state.setForeground(Qt.GlobalColor.blue)
@@ -323,6 +326,14 @@ class TabBatch(QWidget):
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.btn_scan.setEnabled(True)
+        self.btn_run.setEnabled(bool(self._detected_jobs))
+
+    def _on_run_error(self, err_tuple):
+        self.status_lbl.setText(f"Run error: {err_tuple[1]}")
+        self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+        self.progress.setRange(0, max(len(self._detected_jobs), 1))
+        self.btn_scan.setEnabled(True)
+        self.btn_run.setEnabled(True)
         
     def on_run(self):
         from core.batch import run_batch_jobs
@@ -381,7 +392,7 @@ class TabBatch(QWidget):
         
         worker.signals.result.connect(self._on_run_finished)
         worker.signals.progress_ext.connect(self._update_progress_from_thread)
-        worker.signals.error.connect(self._on_scan_error)
+        worker.signals.error.connect(self._on_run_error)
         
         self.threadpool.start(worker)
         
@@ -389,13 +400,28 @@ class TabBatch(QWidget):
         self._job_states[name] = state
         self._rebuild_table()
         self.progress.setValue(idx)
-        self.status_lbl.setText(f"Running: {name} ({idx}/{total})")
+        if state.startswith("error"):
+            self.status_lbl.setText(f"Run error in {name} ({idx}/{total})")
+            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+        elif state == "success":
+            self.status_lbl.setText(f"Completed: {name} ({idx}/{total})")
+            self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
+        elif state == "done":
+            pass
+        else:
+            self.status_lbl.setText(f"Running: {name} ({idx}/{total})")
+            self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
         
     def _on_run_finished(self, result):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
-        self.status_lbl.setText("Batch complete.")
-        self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
+        failed_jobs = (result or {}).get("failed_jobs", [])
+        if failed_jobs:
+            self.status_lbl.setText(f"Batch finished with {len(failed_jobs)} failed job(s).")
+            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+        else:
+            self.status_lbl.setText("Batch complete.")
+            self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
         self.btn_scan.setEnabled(True)
         self.btn_run.setEnabled(True)
         

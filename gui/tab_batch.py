@@ -141,17 +141,59 @@ def make_batch_tab() -> pn.Column:
     select_all_btn.on_click(_select_all)
     select_none_btn.on_click(_select_none)
 
+    _all_jobs: list[dict] = []
     _detected_jobs: list[dict] = []
     _job_states: dict[str, str] = {}
+
+    def _selected_job_mode() -> str:
+        return job_type.value
+
+    def _status_badge_html(state: str) -> str:
+        normalized = state.lower()
+        if normalized.startswith("error"):
+            label = "ERROR"
+            cls = "be"
+        elif normalized in ("done", "success"):
+            label = normalized.upper()
+            cls = "bd"
+        elif normalized == "running":
+            label = "RUNNING"
+            cls = "br"
+        else:
+            label = normalized.upper()
+            cls = "bp"
+        return f'<span class="badge {cls}">{label}</span>'
+
+    def _visible_jobs(all_jobs: list[dict]) -> list[dict]:
+        mode = _selected_job_mode()
+        if mode == "pipeline":
+            return [job for job in all_jobs if job.get("type") == "pipeline"]
+        if mode == "qc":
+            return [job for job in all_jobs if job.get("type") == "qc"]
+        return []
+
+    def _refresh_jobs_for_mode(status_text: str | None = None, color: str | None = None) -> None:
+        nonlocal _detected_jobs
+        _detected_jobs = _visible_jobs(_all_jobs)
+        _rebuild_table()
+        _update_stats()
+        has_jobs = bool(_detected_jobs)
+        run_btn.disabled = (not has_jobs) or (_selected_job_mode() == "dit")
+        if has_jobs:
+            progress.max = len(_detected_jobs)
+            progress.value = min(progress.value, progress.max)
+        else:
+            progress.value = 0
+            progress.max = 100
+        if status_text is not None:
+            status_md.object = f'<div style="color:{color or "#5a6a8a"};font-size:13px">{status_text}</div>'
 
     # ── Helpers ──────────────────────────────────────────────────────
     def _rebuild_table():
         rows = []
         for j in _detected_jobs:
             state = _job_states.get(j["name"], "pending")
-            cls_map = {"done": "bd", "error": "be", "running": "br", "pending": "bp", "success": "bd"}
-            cls = cls_map.get(state, "bp")
-            badge_html = f'<span class="badge {cls}">{state.upper()}</span>'
+            badge_html = _status_badge_html(state)
             rows.append({
                 "Patient ID": j["name"],
                 "Source": str(j["path"]) if j.get("path") else "[Aggregated from multiple]",
@@ -162,9 +204,10 @@ def make_batch_tab() -> pn.Column:
 
     def _update_stats():
         total = len(_detected_jobs)
-        done  = sum(1 for s in _job_states.values() if s in ("done", "success"))
-        errs  = sum(1 for s in _job_states.values() if s == "error")
-        pend  = total - done - errs - sum(1 for s in _job_states.values() if s == "running")
+        done = sum(1 for j in _detected_jobs if _job_states.get(j["name"]) in ("done", "success"))
+        errs = sum(1 for j in _detected_jobs if _job_states.get(j["name"], "").startswith("error"))
+        running = sum(1 for j in _detected_jobs if _job_states.get(j["name"]) == "running")
+        pend = total - done - errs - running
 
         def _sc_html(val, label, color):
             return (f'<div class="stat-card"><div class="v" style="color:{color}">{val}</div>'
@@ -177,13 +220,35 @@ def make_batch_tab() -> pn.Column:
 
     # ── Watcher: patient regex toggle ────────────────────────────────
     aggregate_by_patient.param.watch(lambda ev: setattr(patient_id_regex, 'disabled', not ev.new), "value")
-    job_type.param.watch(lambda ev: setattr(aggregate_dit_reports, 'disabled', ev.new != "pipeline"), "value")
+
+    def _handle_job_type_change(event):
+        aggregate_dit_reports.disabled = (event.new != "pipeline")
+        if event.new == "dit":
+            _refresh_jobs_for_mode(
+                "DIT-only batch mode is disabled in the legacy Panel UI. Use Pipeline mode here or the Qt app for report-only workflows.",
+                "#f59e0b",
+            )
+        elif _all_jobs:
+            visible = len(_visible_jobs(_all_jobs))
+            label = "pipeline" if event.new == "pipeline" else "QC"
+            if visible:
+                _refresh_jobs_for_mode(
+                    f"Showing {visible} {label} job{'s' if visible != 1 else ''} from the last scan.",
+                    "#22c55e",
+                )
+            else:
+                _refresh_jobs_for_mode(
+                    f"No {label} jobs available in the last scan.",
+                    "#f59e0b",
+                )
+
+    job_type.param.watch(_handle_job_type_change, "value")
     aggregate_dit_reports.disabled = (job_type.value != "pipeline")
 
     # ── Scan ─────────────────────────────────────────────────────────
     def on_scan(event):
         from pathlib import Path
-        nonlocal _detected_jobs, _job_states
+        nonlocal _all_jobs, _detected_jobs, _job_states
         spinner.value = True
         run_btn.disabled = True
         status_md.object = '<div style="color:#f59e0b;font-size:13px">Scanning for jobs...</div>'
@@ -199,17 +264,28 @@ def make_batch_tab() -> pn.Column:
             return
 
         try:
-            _detected_jobs = generate_jobs(
-                mode="yaml" if use_yaml else "subfolders",
-                base_dir_or_yaml=path_obj,
-                yaml_mode=use_yaml,
+            _all_jobs = generate_jobs(
+                input_paths=[path_obj],
                 aggregate_patients=aggregate_by_patient.value,
                 patient_regex=patient_id_regex.value if aggregate_by_patient.value else "",
             )
-            _job_states = {j["name"]: "pending" for j in _detected_jobs}
+            _job_states = {j["name"]: "pending" for j in _all_jobs}
+            _detected_jobs = _visible_jobs(_all_jobs)
 
-            if not _detected_jobs:
+            if job_type.value == "dit":
+                status_md.object = (
+                    '<div style="color:#f59e0b;font-size:13px">'
+                    'DIT-only batch mode is disabled in the legacy Panel UI. Use Pipeline mode here or the Qt app.'
+                    '</div>'
+                )
+            elif not _all_jobs:
                 status_md.object = '<div style="color:#f59e0b;font-size:13px">No jobs found — check that subfolders contain .fsa files.</div>'
+            elif not _detected_jobs:
+                selected_label = "pipeline" if job_type.value == "pipeline" else "QC"
+                status_md.object = (
+                    f'<div style="color:#f59e0b;font-size:13px">'
+                    f'No {selected_label} jobs found in the scanned folders.</div>'
+                )
             else:
                 n = len(_detected_jobs)
                 status_md.object = f'<div style="color:#22c55e;font-size:13px">Found <strong>{n}</strong> job{"s" if n!=1 else ""} — ready to run.</div>'
@@ -229,6 +305,13 @@ def make_batch_tab() -> pn.Column:
     # ── Run ──────────────────────────────────────────────────────────
     def on_run(event):
         if not _detected_jobs:
+            return
+        if job_type.value == "dit":
+            status_md.object = (
+                '<div style="color:#f59e0b;font-size:13px">'
+                'DIT-only batch mode is disabled in the legacy Panel UI. Use Pipeline mode here or the Qt app.'
+                '</div>'
+            )
             return
         
         # Get selected jobs
@@ -281,28 +364,37 @@ def make_batch_tab() -> pn.Column:
         scan_btn.disabled = True
         status_md.object = f'<div style="color:#f59e0b;font-size:13px">Running {total_to_run} selected jobs — see Log tab for details.</div>'
 
-        from core.qc.qc_rules import QCRules
-        rules = QCRules(
-            min_r2_ok=min_r2_ok.value,
-            min_r2_warn=min_r2_warn.value,
-            max_mse_ok=max_mse_ok.value,
-            max_mse_warn=max_mse_warn.value,
-            nk_ymax_floor=nk_ymax.value,
-        )
+        APP_SETTINGS.setdefault("qc", {})
+        APP_SETTINGS["qc"]["min_r2_ok"] = min_r2_ok.value
+        APP_SETTINGS["qc"]["min_r2_warn"] = min_r2_warn.value
+        APP_SETTINGS["qc"]["max_mse_ok"] = max_mse_ok.value
+        APP_SETTINGS["qc"]["max_mse_warn"] = max_mse_warn.value
+        APP_SETTINGS["qc"]["nk_ymax_floor"] = nk_ymax.value
+        save_settings(APP_SETTINGS)
 
         def _update_progress(idx, total, name, state):
-            _job_states[name] = state
+            if name != "Done":
+                _job_states[name] = state
             _rebuild_table()
             _update_stats()
             progress.value = idx
-            if idx >= total:
-                n_done = sum(1 for s in _job_states.values() if s in ("done", "success"))
-                # Filter n_done to only those in the current run if needed, but the UI keeps track of all
+            if state == "done":
                 progress.active = False
                 spinner.value = False
                 run_btn.disabled = False
                 scan_btn.disabled = False
-                status_md.object = f'<div style="color:#22c55e;font-size:13px">Batch complete: {total} jobs processed.</div>'
+                failed = sum(1 for j in actual_jobs_to_run if _job_states.get(j["name"], "").startswith("error"))
+                if failed:
+                    status_md.object = (
+                        f'<div style="color:#ef4444;font-size:13px">Batch finished with {failed} failed '
+                        f'job{"s" if failed != 1 else ""} out of {total}.</div>'
+                    )
+                else:
+                    status_md.object = f'<div style="color:#22c55e;font-size:13px">Batch complete: {total} jobs processed.</div>'
+            elif state.startswith("error"):
+                status_md.object = f'<div style="color:#ef4444;font-size:13px">[{idx}/{total}] Error in <strong>{name}</strong>: {state.split(":", 1)[1].strip() if ":" in state else state}</div>'
+            elif state == "success":
+                status_md.object = f'<div style="color:#22c55e;font-size:13px">[{idx}/{total}] Completed: <strong>{name}</strong></div>'
             else:
                 status_md.object = f'<div style="color:#f59e0b;font-size:13px">[{idx}/{total}] Running: <strong>{name}</strong></div>'
 
@@ -313,14 +405,12 @@ def make_batch_tab() -> pn.Column:
             try:
                 run_batch_jobs(
                     jobs=actual_jobs_to_run,
-                    job_type=job_type.value,
                     output_base=out_path,
                     out_folder_tmpl=out_folder_tmpl.value,
                     outfile_html_tmpl=outfile_html_tmpl.value,
                     excel_name_tmpl=excel_name_tmpl.value,
                     pipeline_scope=mode_select.value,
                     assay_filter=assay_filter.value,
-                    qc_rules=rules,
                     continue_on_error=continue_on_error.value,
                     aggregate_dit_reports=aggregate_dit_reports.value,
                     update_callback=update_ui,

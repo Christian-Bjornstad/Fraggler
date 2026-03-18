@@ -243,28 +243,57 @@ class TestLadderSelection(unittest.TestCase):
         self.assertEqual(payload["mapping_times"], {0: 10.0})
         self.assertEqual(payload["manual_candidates"], [12.0])
 
-    def test_ladder_utils_resolve_clonality_rox400hd_even_if_active_analysis_is_flt3(self):
-        path = Path("./data/Euroclonality/kjøring 3/24OUM10061_SL__060824_C01_C990GXRS.fsa")
-        if not path.exists():
-            self.skipTest(f"Real-data fixture not available: {path}")
+    def test_ladder_utils_prefer_clonality_runtime_even_if_active_analysis_is_flt3(self):
+        path = Path("/tmp/sample.fsa")
+        clonality_classification = (
+            "IGH",
+            "sample",
+            "ROX",
+            ["DATA1"],
+            ["DATA1"],
+            "DATA1",
+            50.0,
+            500.0,
+        )
+        flt3_classification = {
+            "assay": "FLT3-D835",
+            "group": "sample",
+            "ladder": "ROX",
+            "trace_channels": ["DATA2"],
+            "peak_channels": ["DATA2"],
+            "primary_peak_channel": "DATA2",
+            "bp_min": 50.0,
+            "bp_max": 250.0,
+        }
+        sentinel_fsa = object()
 
         original_analysis = APP_SETTINGS.get("active_analysis")
         APP_SETTINGS["active_analysis"] = "flt3"
         try:
-            meta = detect_fsa_for_ladder(path, preferred_analysis="clonality")
-            self.assertIsNotNone(meta)
-            self.assertEqual(meta["analysis"], "clonality")
-            self.assertEqual(meta["ladder"], "ROX400HD")
+            with patch("gui_qt.ladder_utils.classify_clonality_fsa", return_value=clonality_classification), \
+                 patch("gui_qt.ladder_utils.classify_flt3_fsa", return_value=flt3_classification), \
+                 patch("gui_qt.ladder_utils.analyse_fsa_rox", return_value=sentinel_fsa) as mock_analyse:
+                meta = detect_fsa_for_ladder(path, preferred_analysis="clonality")
+                fsa, refreshed_meta = load_adjustable_fsa(path, preferred_analysis="clonality")
 
-            fsa, refreshed_meta = load_adjustable_fsa(path, preferred_analysis="clonality")
-            self.assertEqual(refreshed_meta["ladder"], "ROX400HD")
-            self.assertEqual(getattr(fsa, "ladder", None), "ROX400HD")
-            self.assertEqual(len(getattr(fsa, "expected_ladder_steps", [])), 21)
         finally:
             if original_analysis is None:
                 APP_SETTINGS.pop("active_analysis", None)
             else:
                 APP_SETTINGS["active_analysis"] = original_analysis
+
+        self.assertEqual(meta["analysis"], "clonality")
+        self.assertEqual(meta["ladder"], "ROX400HD")
+        self.assertIs(fsa, sentinel_fsa)
+        self.assertEqual(refreshed_meta["analysis"], "clonality")
+        self.assertEqual(refreshed_meta["ladder"], "ROX400HD")
+        mock_analyse.assert_called_once_with(
+            path,
+            "DATA1",
+            ladder_name="ROX400HD",
+            min_distance_between_peaks=15.0,
+            min_size_standard_height=200.0,
+        )
 
     def test_save_ladder_adjustment_mirrors_to_sibling_project_copy(self):
         with TemporaryDirectory() as tmp:

@@ -1,11 +1,12 @@
 FROM tobix/pywine:3.10
 
-# Wine pip needs to install PyInstaller
-RUN wine python -m pip install --no-cache-dir pyinstaller
+# Wine pip needs build dependencies before running PyInstaller
 RUN apt-get update && apt-get install -y --no-install-recommends zip && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 COPY requirements.txt .
+COPY packaging/build-requirements.txt packaging/build-requirements.txt
+RUN wine python -m pip install --no-cache-dir -r packaging/build-requirements.txt
 RUN wine python -m pip install --no-cache-dir -r requirements.txt
 
 # Copy source

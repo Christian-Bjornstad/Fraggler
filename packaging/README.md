@@ -37,13 +37,13 @@ Artifacts:
 
 ### Build macOS
 ```bash
-cd /Users/christian/Desktop/OUS
+cd /path/to/OUS
 ./packaging/build_mac.sh
 ```
 
 ### Build Linux Offline Bundle
 ```bash
-cd /Users/christian/Desktop/OUS
+cd /path/to/OUS
 ./packaging/build_linux.sh
 ```
 
@@ -54,9 +54,14 @@ packaging\build_windows.bat
 
 ### Build Windows via Docker
 ```bash
-cd /Users/christian/Desktop/OUS
+cd /path/to/OUS
 ./packaging/build_windows.sh
 ```
+
+Build-tool reproducibility:
+- `packaging/build-requirements.txt` pins the packaging toolchain separately from runtime dependencies.
+- The wrapper scripts and Docker build images install both `requirements.txt` and `packaging/build-requirements.txt`.
+- Full CI/release automation is still out of scope; artifact launch validation remains a manual release check.
 
 ## Linux Offline Deployment
 

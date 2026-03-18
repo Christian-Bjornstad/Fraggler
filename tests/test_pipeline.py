@@ -2,7 +2,6 @@ import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
-from math import isnan
 
 from core.pipeline import _scan_files
 from core.analyses.flt3.config import PREFERRED_INJECTION_TIME
@@ -47,6 +46,82 @@ class TestPipeline(unittest.TestCase):
             self.assertEqual(result[0]["ok"], True)
             self.assertEqual(result[0]["fsa_dir"], Path("/tmp/input"))
 
+    def test_registry_only_falls_back_when_target_module_is_missing(self):
+        from core.analyses.registry import get_analysis_module
+
+        with patch("core.analyses.registry.get_active_analysis_name", return_value="flt3"), \
+             patch("core.analyses.registry.importlib.import_module") as mock_import:
+            mock_import.side_effect = ModuleNotFoundError("inner dependency missing")
+            mock_import.side_effect.name = "numpy"
+            with self.assertRaises(ModuleNotFoundError):
+                get_analysis_module("pipeline")
+
+    def test_registry_falls_back_when_analysis_module_is_missing(self):
+        from core.analyses.registry import get_analysis_module
+
+        with patch("core.analyses.registry.get_active_analysis_name", return_value="missing"), \
+             patch("core.analyses.registry.importlib.import_module") as mock_import:
+            fallback_mod = object()
+
+            def _side_effect(name):
+                if name == "core.analyses.missing.pipeline":
+                    err = ModuleNotFoundError(name)
+                    err.name = name
+                    raise err
+                if name == "core.analyses.clonality.pipeline":
+                    return fallback_mod
+                raise AssertionError(f"Unexpected import: {name}")
+
+            mock_import.side_effect = _side_effect
+            self.assertIs(get_analysis_module("pipeline"), fallback_mod)
+
+    def test_registry_falls_back_when_analysis_package_is_missing(self):
+        from core.analyses.registry import get_analysis_module
+
+        with patch("core.analyses.registry.get_active_analysis_name", return_value="missing"), \
+             patch("core.analyses.registry.importlib.import_module") as mock_import:
+            fallback_mod = object()
+
+            def _side_effect(name):
+                if name == "core.analyses.missing.pipeline":
+                    err = ModuleNotFoundError("No module named 'core.analyses.missing'")
+                    err.name = "core.analyses.missing"
+                    raise err
+                if name == "core.analyses.clonality.pipeline":
+                    return fallback_mod
+                raise AssertionError(f"Unexpected import: {name}")
+
+            mock_import.side_effect = _side_effect
+            self.assertIs(get_analysis_module("pipeline"), fallback_mod)
+
+    def test_run_pipeline_job_collect_chunks_explicit_files(self):
+        from core.runner import CHUNK_SIZE, run_pipeline_job_collect
+
+        files = [Path(f"/tmp/sample_{i}.fsa") for i in range(CHUNK_SIZE + 2)]
+        staged_dirs = []
+
+        def _fake_stage(chunk):
+            tmp = Path(f"/tmp/staged_{len(staged_dirs)}")
+            staged_dirs.append((tmp, list(chunk)))
+            return tmp
+
+        with patch("core.runner.stage_files", side_effect=_fake_stage), \
+             patch("core.runner.cleanup_temp"), \
+             patch("core.pipeline.run_pipeline", side_effect=lambda **kwargs: [{"fsa_dir": kwargs["fsa_dir"]}]):
+            entries = run_pipeline_job_collect(
+                fsa_dir=None,
+                base_outdir=Path("/tmp/out"),
+                out_folder_name="ASSAY_REPORTS",
+                scope="all",
+                needle="",
+                files=files,
+            )
+
+        self.assertEqual(len(staged_dirs), 2)
+        self.assertEqual(len(staged_dirs[0][1]), CHUNK_SIZE)
+        self.assertEqual(len(staged_dirs[1][1]), 2)
+        self.assertEqual([e["fsa_dir"] for e in entries], [chunk_dir for chunk_dir, _ in staged_dirs])
+
     def test_clonality_report_generation_respects_controls_mode(self):
         from core.analyses.clonality import pipeline as clonality_pipeline
 
@@ -79,52 +154,113 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(ASSAY_CONFIG["FLT3-ITD"]["positive_ratio"], 0.02)
         self.assertEqual(ASSAY_CONFIG["FLT3-D835"]["positive_ratio"], 0.05)
 
-    def test_flt3_d835_real_samples_are_called_positive(self):
-        from config import APP_SETTINGS
-        from core.pipeline import run_pipeline
+    def test_flt3_pipeline_run_orchestrates_selection_reports_and_finalize(self):
+        from core.analyses.flt3 import pipeline as flt3_pipeline
 
-        data_dir = Path("/Users/christian/Desktop/OUS/data/flt3/data/rerun_all")
-        if not data_dir.exists():
-            self.skipTest("FLT3 real-data folder is not available")
+        fsa_dir = Path("/tmp/flt3-input")
+        outdir = Path("/tmp/flt3-output")
+        selected_entries = [
+            {"fsa": type("DummyFsa", (), {"file_name": "sample_d835.fsa"})(), "assay": "FLT3-D835", "selection_key": "d835"},
+            {"fsa": type("DummyFsa", (), {"file_name": "sample_itd.fsa"})(), "assay": "FLT3-ITD", "selection_key": "itd"},
+        ]
+        files = [Path("/tmp/a.fsa"), Path("/tmp/b.fsa"), Path("/tmp/c.fsa")]
+        classified_meta = [
+            {"selection_key": "d835", "assay": "FLT3-D835"},
+            {"selection_key": "d835", "assay": "FLT3-D835"},
+            {"selection_key": "itd", "assay": "FLT3-ITD"},
+        ]
 
-        previous = APP_SETTINGS.get("active_analysis", "clonality")
-        APP_SETTINGS["active_analysis"] = "flt3"
-        try:
-            entries = run_pipeline(data_dir, return_entries=True, make_dit_reports=False)
-        finally:
-            APP_SETTINGS["active_analysis"] = previous
+        with patch.object(flt3_pipeline, "normalize_pipeline_paths", return_value=(fsa_dir, outdir)), \
+             patch.object(flt3_pipeline, "_scan_files", return_value=files), \
+             patch.object(flt3_pipeline, "classify_fsa", side_effect=classified_meta), \
+             patch.object(flt3_pipeline, "_select_best_entry", side_effect=selected_entries) as mock_select, \
+             patch.object(flt3_pipeline, "_calculate_ratios") as mock_ratios, \
+             patch.object(flt3_pipeline, "generate_flt3_qc_report") as mock_qc, \
+             patch.object(flt3_pipeline, "generate_flt3_peak_report") as mock_peak, \
+             patch.object(flt3_pipeline, "generate_flt3_bp_validation_report") as mock_bp, \
+             patch.object(flt3_pipeline, "finalize_pipeline_run", return_value=["finalized"]) as mock_finalize:
+            result = flt3_pipeline.run_pipeline(
+                fsa_dir,
+                base_outdir=Path("/tmp/base"),
+                assay_folder_name="REPORTS",
+                return_entries=True,
+                make_dit_reports=False,
+                mode="all",
+            )
 
-        by_name = {e["fsa"].file_name: e for e in entries or []}
-        for filename in [
-            "25OUM11316_p1_D8365_kutting__310725_C05_H9C0ZIZJ.fsa",
-            "25OUM11316_p2_D8365_kutting__310725_C06_H9C0ZIZJ.fsa",
-        ]:
-            self.assertIn(filename, by_name)
-            ratio = float(by_name[filename].get("ratio", 0.0))
-            self.assertGreater(ratio, 0.1, filename)
+        self.assertEqual(result, ["finalized"])
+        self.assertEqual(mock_select.call_count, 2)
+        mock_ratios.assert_called_once_with(selected_entries)
+        mock_qc.assert_called_once_with(selected_entries, outdir)
+        mock_peak.assert_called_once_with(selected_entries, outdir)
+        mock_bp.assert_called_once_with(selected_entries, outdir)
+        mock_finalize.assert_called_once_with(
+            selected_entries,
+            outdir,
+            return_entries=True,
+            make_dit_reports=False,
+            mode="all",
+        )
 
-    def test_flt3_html_validation_strings_are_rendered(self):
-        from config import APP_SETTINGS
-        from core.pipeline import run_pipeline
+    def test_flt3_summary_tables_render_validation_strings_without_real_data(self):
+        from core.html_reports import _build_flt3_summary_table
+        import pandas as pd
 
-        data_dir = Path("/Users/christian/Desktop/OUS/data/flt3/data/rerun_all")
-        if not data_dir.exists():
-            self.skipTest("FLT3 real-data folder is not available")
+        d835_peaks = pd.DataFrame(
+            [
+                {"basepairs": 80.0, "peaks": 1000.0, "area": 8000.0, "label": "WT"},
+                {"basepairs": 129.0, "peaks": 400.0, "area": 2400.0, "label": "MUT"},
+                {"basepairs": 150.0, "peaks": 140.0, "area": 1100.0, "label": "unspecific"},
+            ]
+        )
+        itd_peaks = pd.DataFrame(
+            [
+                {
+                    "basepairs": 329.8,
+                    "peaks": 1200.0,
+                    "area": 5000.0,
+                    "label": "WT",
+                    "area_DATA1": 3200.0,
+                    "area_DATA2": 1800.0,
+                },
+                {
+                    "basepairs": 360.2,
+                    "peaks": 650.0,
+                    "area": 2100.0,
+                    "label": "ITD",
+                    "area_DATA1": 1600.0,
+                    "area_DATA2": 500.0,
+                },
+            ]
+        )
 
-        outdir = Path("/Users/christian/Desktop/OUS/tmp/test_flt3_validation_html")
-        previous = APP_SETTINGS.get("active_analysis", "clonality")
-        APP_SETTINGS["active_analysis"] = "flt3"
-        try:
-            run_pipeline(data_dir, base_outdir=outdir, assay_folder_name="REPORTS", return_entries=True, make_dit_reports=True)
-        finally:
-            APP_SETTINGS["active_analysis"] = previous
+        d835_html = _build_flt3_summary_table(
+            {
+                "assay": "FLT3-D835",
+                "ratio": 0.30,
+                "ratio_numerator_area": 2400.0,
+                "ratio_denominator_area": 8000.0,
+                "primary_peak_channel": "DATA3",
+                "peaks_by_channel": {"DATA3": d835_peaks},
+            }
+        )
+        itd_html = _build_flt3_summary_table(
+            {
+                "assay": "FLT3-ITD",
+                "ratio": 0.32,
+                "ratio_numerator_area": 2100.0,
+                "ratio_denominator_area": 5000.0,
+                "primary_peak_channel": "DATA1",
+                "peaks_by_channel": {"DATA1": itd_peaks},
+            }
+        )
 
-        html_path = outdir / "REPORTS" / "25OUM11316_Flt3_Resultater.html"
-        self.assertTrue(html_path.exists())
-        html = html_path.read_text(encoding="utf-8")
-        self.assertIn("Validering:", html)
-        self.assertIn("150 bp kontroll", html)
-        self.assertIn("Mut/(Mut+WT)", html)
+        self.assertIn("Validering", d835_html)
+        self.assertIn("150 bp kontroll", d835_html)
+        self.assertIn("TKD-ratio", d835_html)
+        self.assertIn("Validering", itd_html)
+        self.assertIn("Mut/(Mut+WT)", itd_html)
+        self.assertIn("WT-topp", itd_html)
 
 if __name__ == "__main__":
     unittest.main()

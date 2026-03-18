@@ -5,6 +5,8 @@ import sys
 import os
 from pathlib import Path
 
+from app_meta import APP_VERSION
+
 # Force X11 (xcb) on Linux to avoid Wayland symbol mismatches (e.g., wl_proxy_marshal_flags)
 if sys.platform == "linux":
     os.environ["QT_QPA_PLATFORM"] = "xcb"
@@ -80,6 +82,7 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Fraggler")
     app.setOrganizationName("OUS")
+    app.setApplicationVersion(APP_VERSION)
     
     icon_path = Path(__file__).parent / "assets" / "app_icon.png"
     if icon_path.exists():

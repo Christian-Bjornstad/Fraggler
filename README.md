@@ -30,11 +30,12 @@ If you wish to compile the standalone executables yourself, clone this repositor
 - Python 3.10+
 - macOS (For native `.app` builds)
 - Docker Desktop (For cross-compiling the Windows and Linux binaries from your Mac)
+- Build dependencies are pinned in `packaging/build-requirements.txt`
 
 #### 1. macOS Build
 Runs PyInstaller directly against your local Python environment to generate a `.app` bundle.
 ```bash
-python build_qt.py
+./packaging/build_mac.sh
 ```
 *Wait for completion. You will find `Fraggler.app` located in the `/dist` directory.*
 

@@ -9,6 +9,8 @@ from pathlib import Path
 
 import PyInstaller.__main__
 
+from app_meta import APP_VERSION
+
 # Monkey-patch dis._get_const_info to swallow known Python 3.10 bytecode IndexErrors
 _orig_get_const_info = getattr(dis, '_get_const_info', None)
 if _orig_get_const_info:
@@ -41,6 +43,7 @@ COMMON_HIDDEN_IMPORTS = [
 
 COMMON_DATAS = [
     ("assets", "assets"),
+    ("app.py", "."),
 ]
 
 LINUX_BINARY_CANDIDATES = [
@@ -142,7 +145,7 @@ def _post_build_mac() -> None:
 
 
 def _linux_readme_text() -> str:
-    return """Fraggler Diagnostics — Fedora 35 Offline Bundle
+    return f"""Fraggler Diagnostics {APP_VERSION} — Fedora 35 Offline Bundle
 
 Target:
 - Fedora 35 (or other x86_64 Linux with glibc 2.31+)

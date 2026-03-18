@@ -250,6 +250,8 @@ def run_batch_jobs(
     
     # Storage for cross-folder aggregation
     all_collected_entries = []
+    failed_jobs = []
+    completed_jobs = []
     
     for i, job in enumerate(jobs):
         job_name = job["name"]
@@ -327,17 +329,17 @@ def run_batch_jobs(
                     )
             
             else:
-                log(f"[ERROR] Unknown job_type: {job_type}")
-                if not continue_on_error:
-                    break
+                raise ValueError(f"Unknown job_type: {job_type}")
                     
             if update_callback:
-                update_callback(i, total, job_name, "success")
+                update_callback(i + 1, total, job_name, "success")
+            completed_jobs.append(job_name)
                 
         except Exception as e:
             log(f"[ERROR] Job '{job_name}' failed: {e}")
+            failed_jobs.append(job_name)
             if update_callback:
-                update_callback(i, total, job_name, f"failed: {e}")
+                update_callback(i + 1, total, job_name, f"error: {e}")
             if not continue_on_error:
                 log("[BATCH] Stopping batch due to error.")
                 break
@@ -361,5 +363,9 @@ def run_batch_jobs(
 
     log("[BATCH] Batch run complete.")
     if update_callback:
-        # Send final 100% update to UI
-        update_callback(total, total, "Done", "success")
+        update_callback(total, total, "Done", "done")
+    return {
+        "total_jobs": total,
+        "completed_jobs": completed_jobs,
+        "failed_jobs": failed_jobs,
+    }

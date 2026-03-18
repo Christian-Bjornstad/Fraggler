@@ -1,9 +1,11 @@
 import unittest
 from tempfile import TemporaryDirectory
 from pathlib import Path
+from unittest.mock import patch
 
 import yaml
 
+import config
 from config import get_analysis_settings, load_settings, save_settings
 
 
@@ -87,6 +89,35 @@ class TestConfig(unittest.TestCase):
             get_analysis_settings("clonality", settings)["batch"]["base_input_dir"],
             "/clonality/in",
         )
+
+    def test_load_settings_warns_and_tracks_error_on_invalid_yaml(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "settings.yaml"
+            cfg_path.write_text("{invalid", encoding="utf-8")
+
+            with self.assertWarns(RuntimeWarning):
+                settings = load_settings(cfg_path, env={})
+
+        self.assertEqual(settings["active_analysis"], "clonality")
+        self.assertIsNotNone(config.LAST_SETTINGS_LOAD_ERROR)
+
+    def test_save_settings_warns_and_tracks_error_on_write_failure(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "settings.yaml"
+            settings = load_settings(Path("/does/not/exist.yaml"), env={})
+
+            with patch("builtins.open", side_effect=OSError("disk full")):
+                with self.assertWarns(RuntimeWarning):
+                    save_settings(settings, cfg_path)
+
+        self.assertIsNotNone(config.LAST_SETTINGS_SAVE_ERROR)
+
+    def test_invalid_active_analysis_falls_back_to_default(self):
+        settings = load_settings(
+            Path("/does/not/exist.yaml"),
+            env={"FRAGGLER_ACTIVE_ANALYSIS": "does-not-exist"},
+        )
+        self.assertEqual(settings["active_analysis"], "clonality")
 
 
 if __name__ == "__main__":
