@@ -1,5 +1,6 @@
 """FLT3 / NPM1 FSA classification."""
 from __future__ import annotations
+from functools import lru_cache
 import re
 from pathlib import Path
 
@@ -77,10 +78,12 @@ def _build_selection_key(
         ]
     )
 
-def get_injection_metadata(fsa_path: Path) -> dict:
-    """Extracts injection time from FSA metadata."""
+@lru_cache(maxsize=4096)
+def _read_injection_metadata_cached(path_str: str) -> dict:
+    """Extract ABI metadata once per file path for the current process."""
+    fsa_path = Path(path_str)
     try:
-        record = SeqIO.read(str(fsa_path), "abi")
+        record = SeqIO.read(path_str, "abi")
         tags = record.annotations.get("abif_raw", {})
         return {
             "injection_time": tags.get("InSc1", 0),
@@ -102,6 +105,11 @@ def get_injection_metadata(fsa_path: Path) -> dict:
             "run_time": "",
             "injection_protocol": "",
         }
+
+
+def get_injection_metadata(fsa_path: Path) -> dict:
+    """Extracts injection metadata from the ABI file."""
+    return dict(_read_injection_metadata_cached(str(fsa_path)))
 
 def detect_assay(name: str, *, default_to_d835: bool = False) -> str:
     """Detects FLT3/NPM1 assay from filename."""

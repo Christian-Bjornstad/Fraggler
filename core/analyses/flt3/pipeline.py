@@ -33,6 +33,7 @@ from core.html_reports import extract_dit_from_name
 
 FLT3_LADDER_QC_THRESHOLD = 0.99
 RELEVANT_PEAK_LABELS = {"WT", "MUT", "ITD"}
+FLT3_QC_TRENDS_FILENAME = "FLT3_QC_TRENDS.xlsx"
 
 
 def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
@@ -112,6 +113,24 @@ def _calculate_peak_area(
     return _calculate_auc(trace, time_all[auc_mask])
 
 
+def _correct_peak_channel_traces(
+    fsa: FsaFile,
+    channels: list[str],
+    *,
+    bin_size: int = 5000,
+    quantile: float = 0.01,
+) -> dict[str, np.ndarray]:
+    """Baseline-correct each peak channel once and reuse the result."""
+    corrected: dict[str, np.ndarray] = {}
+    for ch in channels:
+        if ch not in fsa.fsa:
+            continue
+        raw = np.asarray(fsa.fsa[ch]).astype(float)
+        baseline = estimate_running_baseline(raw, bin_size=bin_size, quantile=quantile)
+        corrected[ch] = np.maximum(raw - baseline, 0.0)
+    return corrected
+
+
 def _assay_positive_ratio(assay: str) -> float:
     return float(ASSAY_CONFIG.get(assay, {}).get("positive_ratio", 0.01))
 
@@ -151,6 +170,7 @@ def _detect_peaks(
     trace: np.ndarray,
     mut_bp: float | None = None,
     analysis_type: str | None = None,
+    corrected_channel_traces: dict[str, np.ndarray] | None = None,
 ) -> pd.DataFrame:
     """Detect WT and mutant peaks and estimate their corrected AUC."""
     sample_data = getattr(fsa, "sample_data_with_basepairs", None)
@@ -187,13 +207,10 @@ def _detect_peaks(
     wt_range = assay_cfg.get("wt_range")
     mut_ranges = assay_cfg.get("mut_ranges")
 
-    channel_traces: dict[str, np.ndarray] = {}
-    for ch in assay_cfg.get("peak_channels", ["DATA1", "DATA2", "DATA3"]):
-        if ch not in fsa.fsa:
-            continue
-        raw = np.asarray(fsa.fsa[ch]).astype(float)
-        baseline = estimate_running_baseline(raw, bin_size=5000, quantile=0.01)
-        channel_traces[ch] = np.maximum(raw - baseline, 0.0)
+    channel_traces = corrected_channel_traces or _correct_peak_channel_traces(
+        fsa,
+        assay_cfg.get("peak_channels", ["DATA1", "DATA2", "DATA3"]),
+    )
 
     for idx in peak_idx:
         p_bp = float(bp_win[idx])
@@ -244,14 +261,18 @@ def _detect_peaks(
     return pd.DataFrame(peaks)
 
 
-def _combine_peak_traces(fsa: FsaFile, peak_channels: list[str], primary_channel: str) -> np.ndarray:
+def _combine_peak_traces(
+    fsa: FsaFile,
+    peak_channels: list[str],
+    primary_channel: str,
+    corrected_channel_traces: dict[str, np.ndarray] | None = None,
+) -> np.ndarray:
     combined_trace = None
+    channel_traces = corrected_channel_traces or _correct_peak_channel_traces(fsa, peak_channels)
     for ch in peak_channels:
-        if ch not in fsa.fsa:
+        corrected = channel_traces.get(ch)
+        if corrected is None:
             continue
-        raw = np.asarray(fsa.fsa[ch]).astype(float)
-        baseline = estimate_running_baseline(raw, bin_size=5000, quantile=0.01)
-        corrected = np.maximum(raw - baseline, 0.0)
         combined_trace = corrected if combined_trace is None else combined_trace + corrected
 
     if combined_trace is not None:
@@ -349,10 +370,15 @@ def _build_entry_from_candidate(fsa_path: Path, meta: dict) -> dict | None:
         return None
 
     _apply_bp_offset(fsa, meta["assay"])
+    corrected_channel_traces = _correct_peak_channel_traces(
+        fsa,
+        meta.get("peak_channels", [meta["primary_peak_channel"]]),
+    )
     combined_trace = _combine_peak_traces(
         fsa=fsa,
         peak_channels=meta.get("peak_channels", [meta["primary_peak_channel"]]),
         primary_channel=meta["primary_peak_channel"],
+        corrected_channel_traces=corrected_channel_traces,
     )
     peaks = _detect_peaks(
         fsa=fsa,
@@ -361,6 +387,7 @@ def _build_entry_from_candidate(fsa_path: Path, meta: dict) -> dict | None:
         trace=combined_trace,
         mut_bp=meta.get("mut_bp"),
         analysis_type=meta.get("analysis_type"),
+        corrected_channel_traces=corrected_channel_traces,
     )
 
     metrics = compute_ladder_qc_metrics(fsa)
@@ -658,71 +685,190 @@ def generate_flt3_peak_report(entries: list[dict], outdir: Path) -> None:
     print_green(f"FLT3 detailed peak report saved to {csv_path}")
 
 
-def generate_flt3_qc_report(entries: list[dict], outdir: Path) -> None:
-    qc_data = []
+def _build_control_qc_row(entry: dict) -> dict | None:
+    group = entry.get("group")
+    if group not in ["negative_control", "positive_control", "reactive_control"]:
+        return None
 
-    for entry in entries:
-        group = entry.get("group")
-        if group not in ["negative_control", "positive_control", "reactive_control"]:
-            continue
+    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+    wt_peaks = peaks[peaks.label == "WT"]
+    mut_peaks = peaks[peaks.label.isin(["MUT", "ITD"])]
+    wt_area, mut_area = _summarize_peak_areas(entry)
+    ratio = float(entry.get("ratio", 0.0))
+    assay_cfg = ASSAY_CONFIG.get(entry["assay"], {})
+    min_wt_area = float(assay_cfg.get("control_wt_min_area", 0.0))
+    min_ratio = _assay_positive_ratio(entry["assay"])
 
-        peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
-        wt_peaks = peaks[peaks.label == "WT"]
-        mut_peaks = peaks[peaks.label.isin(["MUT", "ITD"])]
+    status = "FAIL"
+    details = ""
+    expectation = ""
+
+    if group == "negative_control":
+        expectation = "Ingen mutant/ITD-topper forventet"
+        if mut_peaks.empty:
+            status = "PASS"
+        else:
+            details = f"Unexpected mutant peaks found: {mut_peaks.basepairs.tolist()}"
+    elif group == "reactive_control":
+        expectation = f"WT-topp forventet (min area {min_wt_area:.0f})"
+        if not wt_peaks.empty and wt_area >= min_wt_area:
+            status = "PASS"
+        elif wt_peaks.empty:
+            details = "No WT peak detected"
+        else:
+            details = f"WT area below threshold ({wt_area:.0f} < {min_wt_area:.0f})"
+    elif group == "positive_control":
+        expectation = f"Mutantsignal forventet (ratio >= {min_ratio:.4f})"
+        if not mut_peaks.empty and (ratio >= min_ratio or wt_peaks.empty):
+            status = "PASS"
+        elif mut_peaks.empty:
+            details = "No mutant/ITD peak detected"
+        else:
+            details = f"Mutant ratio below threshold ({ratio:.4f} < {min_ratio:.4f})"
+
+    return {
+        "File": entry["fsa"].file_name,
+        "ControlGroup": group,
+        "Assay": entry["assay"],
+        "Well": entry.get("well_id") or "",
+        "SelectedInjection": entry.get("selected_injection") or "",
+        "SelectionReason": entry.get("selection_reason") or "",
+        "InjectionTime": entry.get("injection_time"),
+        "WT_Area": round(wt_area, 2),
+        "Mutant_Area": round(mut_area, 2),
+        "Ratio": round(ratio, 4),
+        "Status": status,
+        "Details": details,
+        "Expectation": expectation,
+    }
+
+
+def _flt3_control_entries(entries: list[dict]) -> list[dict]:
+    return [
+        entry for entry in entries
+        if entry.get("group") in {"negative_control", "positive_control", "reactive_control"}
+    ]
+
+
+def _build_flt3_qc_trend_frames(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    control_entries = _flt3_control_entries(entries)
+    run_rows = []
+    peak_rows = []
+
+    for entry in control_entries:
+        peak_summary = _summarize_detected_peaks(entry)
         wt_area, mut_area = _summarize_peak_areas(entry)
-        ratio = float(entry.get("ratio", 0.0))
-        assay_cfg = ASSAY_CONFIG.get(entry["assay"], {})
-        min_wt_area = float(assay_cfg.get("control_wt_min_area", 0.0))
-        min_ratio = _assay_positive_ratio(entry["assay"])
+        peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+        interpretation = _interpret_entry(entry)
 
-        status = "FAIL"
-        details = ""
-
-        if group == "negative_control":
-            if mut_peaks.empty:
-                status = "PASS"
-            else:
-                details = f"Unexpected mutant peaks found: {mut_peaks.basepairs.tolist()}"
-        elif group == "reactive_control":
-            if not wt_peaks.empty and wt_area >= min_wt_area:
-                status = "PASS"
-            elif wt_peaks.empty:
-                details = "No WT peak detected"
-            else:
-                details = f"WT area below threshold ({wt_area:.0f} < {min_wt_area:.0f})"
-        elif group == "positive_control":
-            if not mut_peaks.empty and (ratio >= min_ratio or wt_peaks.empty):
-                status = "PASS"
-            elif mut_peaks.empty:
-                details = "No mutant/ITD peak detected"
-            else:
-                details = f"Mutant ratio below threshold ({ratio:.4f} < {min_ratio:.4f})"
-
-        qc_data.append(
+        run_rows.append(
             {
                 "File": entry["fsa"].file_name,
-                "ControlGroup": group,
-                "Assay": entry["assay"],
+                "ControlGroup": entry.get("group") or "",
+                "Assay": entry.get("assay") or "",
+                "Treatment": entry.get("analysis_type") or "",
+                "DIT": entry.get("dit") or "",
+                "SpecimenID": entry.get("specimen_id") or "",
                 "Well": entry.get("well_id") or "",
-                "SelectedInjection": entry.get("selected_injection") or "",
-                "SelectionReason": entry.get("selection_reason") or "",
+                "RunDate": entry.get("run_date") or "",
+                "RunTime": entry.get("run_time") or "",
+                "RunName": entry.get("run_name") or "",
+                "SourceRunDir": entry.get("source_run_dir") or "",
+                "InjectionProtocol": entry.get("injection_protocol") or "",
                 "InjectionTime": entry.get("injection_time"),
+                "SelectedInjection": entry.get("selected_injection") or "",
+                "PreferredInjection": (
+                    f"{int(entry.get('preferred_injection_time', 0) or 0)}s"
+                    if entry.get("preferred_injection_time") else ""
+                ),
+                "ProtocolInjectionTime": entry.get("protocol_injection_time"),
+                "SelectionReason": entry.get("selection_reason") or "",
+                "AlternateInjections": entry.get("alternate_injections_summary") or "",
+                "SizingMethod": entry.get("sizing_method") or "",
+                "Ladder": entry.get("ladder") or "",
+                "LadderQC": entry.get("ladder_qc_status") or "",
+                "LadderR2": round(float(entry.get("ladder_r2", np.nan)), 4) if not np.isnan(entry.get("ladder_r2", np.nan)) else "",
+                "PeakQC": entry.get("peak_qc_status") or "",
+                "WT_bp": round(float(peak_summary["wt_bp"]), 2) if not np.isnan(peak_summary["wt_bp"]) else "",
                 "WT_Area": round(wt_area, 2),
-                "Mutant_Area": round(mut_area, 2),
-                "Ratio": round(ratio, 4),
-                "Status": status,
-                "Details": details,
+                "MutantMain_bp": round(float(peak_summary["mut_main_bp"]), 2) if not np.isnan(peak_summary["mut_main_bp"]) else "",
+                "MutantMain_Area": round(float(peak_summary["mut_main_area"]), 2),
+                "Mutant_bp_List": ", ".join(f"{bp:.2f}" for bp in peak_summary["mut_bps"]),
+                "Mutant_Area_List": ", ".join(f"{area:.2f}" for area in peak_summary["mut_areas"]),
+                "Mutant_Area_Total": round(mut_area, 2),
+                "RatioNumeratorArea": round(float(entry.get("ratio_numerator_area", 0.0)), 2),
+                "RatioDenominatorArea": round(float(entry.get("ratio_denominator_area", 0.0)), 2),
+                "Ratio": round(float(entry.get("ratio", 0.0)), 4),
+                "MutantFractionMutPlusWT": round(float(entry.get("mutant_fraction", 0.0)), 4),
+                "Interpretation": interpretation,
             }
         )
 
-    if not qc_data:
+        for idx, peak in enumerate(peaks.sort_values(["label", "basepairs", "peaks"], ascending=[True, True, False]).itertuples(index=False), start=1):
+            peak_rows.append(
+                {
+                    "File": entry["fsa"].file_name,
+                    "ControlGroup": entry.get("group") or "",
+                    "Assay": entry.get("assay") or "",
+                    "Well": entry.get("well_id") or "",
+                    "RunDate": entry.get("run_date") or "",
+                    "RunTime": entry.get("run_time") or "",
+                    "SelectedInjection": entry.get("selected_injection") or "",
+                    "LadderQC": entry.get("ladder_qc_status") or "",
+                    "PeakRank": idx,
+                    "PeakLabel": getattr(peak, "label", ""),
+                    "PeakBP": round(float(getattr(peak, "basepairs", np.nan)), 2) if not np.isnan(getattr(peak, "basepairs", np.nan)) else "",
+                    "PeakHeight": round(float(getattr(peak, "peaks", 0.0)), 2),
+                    "PeakArea": round(float(getattr(peak, "area", 0.0)), 2),
+                    "Keep": bool(getattr(peak, "keep", True)),
+                    "PrimaryChannel": entry.get("primary_peak_channel") or "",
+                }
+            )
+
+    return pd.DataFrame(run_rows), pd.DataFrame(peak_rows)
+
+
+def update_flt3_qc_trends(excel_path: Path, entries: list[dict]) -> None:
+    excel_path.parent.mkdir(parents=True, exist_ok=True)
+
+    df_runs, df_peaks = _build_flt3_qc_trend_frames(entries)
+    if df_runs.empty and df_peaks.empty:
         return
 
-    df = pd.DataFrame(qc_data)
-    outdir.mkdir(parents=True, exist_ok=True)
-    csv_path = outdir / "QC_FLT3_Injections.csv"
-    df.to_csv(csv_path, index=False)
-    print_green(f"FLT3 QC report saved to {csv_path}")
+    if excel_path.exists():
+        try:
+            with pd.ExcelFile(excel_path, engine="openpyxl") as xls:
+                has_runs = "Control_Runs" in xls.sheet_names
+                has_peaks = "Control_Peaks" in xls.sheet_names
+        except Exception:
+            has_runs = False
+            has_peaks = False
+
+        old_runs = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_runs else pd.DataFrame()
+        old_peaks = pd.read_excel(excel_path, sheet_name="Control_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame()
+
+        if not df_runs.empty and not old_runs.empty and "File" in old_runs.columns:
+            old_runs = old_runs[~old_runs["File"].isin(df_runs["File"])]
+        if not df_peaks.empty and not old_peaks.empty and "File" in old_peaks.columns:
+            old_peaks = old_peaks[~old_peaks["File"].isin(df_peaks["File"])]
+
+        all_runs = pd.concat([old_runs, df_runs], ignore_index=True)
+        all_peaks = pd.concat([old_peaks, df_peaks], ignore_index=True)
+
+        if not all_runs.empty and "File" in all_runs.columns:
+            all_runs = all_runs.drop_duplicates(subset=["File"], keep="last")
+        if not all_peaks.empty and {"File", "PeakRank"}.issubset(all_peaks.columns):
+            all_peaks = all_peaks.drop_duplicates(subset=["File", "PeakRank"], keep="last")
+
+        with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+            all_runs.to_excel(writer, sheet_name="Control_Runs", index=False)
+            all_peaks.to_excel(writer, sheet_name="Control_Peaks", index=False)
+    else:
+        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+            df_runs.to_excel(writer, sheet_name="Control_Runs", index=False)
+            df_peaks.to_excel(writer, sheet_name="Control_Peaks", index=False)
+
+    print_green(f"FLT3 QC trends updated in {excel_path}")
 
 
 def generate_flt3_bp_validation_report(entries: list[dict], outdir: Path) -> None:
@@ -820,9 +966,9 @@ def run_pipeline(
         return [] if return_entries else None
 
     _calculate_ratios(entries)
-    generate_flt3_qc_report(entries, assay_dir)
     generate_flt3_peak_report(entries, assay_dir)
     generate_flt3_bp_validation_report(entries, assay_dir)
+    update_flt3_qc_trends(assay_dir / FLT3_QC_TRENDS_FILENAME, entries)
 
     return finalize_pipeline_run(
         entries,

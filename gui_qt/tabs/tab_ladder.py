@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import copy
 import subprocess
 import sys
 
@@ -18,13 +19,14 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QAbstractItemView,
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QThreadPool
 
 from config import APP_SETTINGS, get_analysis_settings
-from core.analysis import save_ladder_adjustment
+from core.analysis import load_ladder_adjustment, save_ladder_adjustment
 from core.html_reports import extract_dit_from_name
 from gui_qt.dialogs.ladder_dialog import LadderAdjustmentDialog
 from gui_qt.ladder_utils import detect_fsa_for_ladder, load_adjustable_fsa
+from gui_qt.worker import Worker
 
 
 def _open_path(path: Path) -> None:
@@ -39,11 +41,17 @@ def _open_path(path: Path) -> None:
 class TabLadder(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.threadpool = QThreadPool.globalInstance()
         self._all_files: list[Path] = []
         self._current_file: Path | None = None
         self._current_meta: dict | None = None
+        self._current_fsa = None
         self._report_matches: list[Path] = []
         self._current_analysis_id = APP_SETTINGS.get("active_analysis", "clonality")
+        self._scan_request_id = 0
+        self._metadata_request_id = 0
+        self._report_request_id = 0
+        self._metadata_loading = False
 
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -58,7 +66,7 @@ class TabLadder(QWidget):
         header.addWidget(sub)
         main_layout.addLayout(header)
 
-        main_layout.addWidget(self._build_source_card(), stretch=2)
+        main_layout.addWidget(self._build_source_card(), stretch=1)
         main_layout.addWidget(self._build_details_card())
         main_layout.addWidget(self._build_report_card(), stretch=1)
 
@@ -82,14 +90,14 @@ class TabLadder(QWidget):
         self.source_dir.setPlaceholderText("/path/to/folder with .fsa files")
         btn_browse_dir = QPushButton("Browse Folder...")
         btn_browse_dir.clicked.connect(self._choose_source_dir)
-        btn_scan = QPushButton("Scan .fsa Files")
-        btn_scan.clicked.connect(self._scan_files)
+        self.btn_scan = QPushButton("Scan .fsa Files")
+        self.btn_scan.clicked.connect(self._scan_files)
         btn_browse_file = QPushButton("Open Single File...")
         btn_browse_file.clicked.connect(self._choose_single_file)
         row1.addWidget(QLabel("Input Folder:"))
         row1.addWidget(self.source_dir, stretch=1)
         row1.addWidget(btn_browse_dir)
-        row1.addWidget(btn_scan)
+        row1.addWidget(self.btn_scan)
         row1.addWidget(btn_browse_file)
         layout.addLayout(row1)
 
@@ -102,7 +110,7 @@ class TabLadder(QWidget):
         layout.addLayout(row2)
 
         self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(280)
+        self.file_list.setMinimumHeight(220)
         self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.file_list.itemSelectionChanged.connect(self._on_file_selected)
         self.file_list.itemDoubleClicked.connect(lambda _: self._open_ladder_editor())
@@ -191,12 +199,12 @@ class TabLadder(QWidget):
         self.report_root.setPlaceholderText("/optional/path/to/report root")
         btn_browse = QPushButton("Browse Reports...")
         btn_browse.clicked.connect(self._choose_report_root)
-        btn_find = QPushButton("Find Matching Reports")
-        btn_find.clicked.connect(self._refresh_report_matches)
+        self.btn_find_reports = QPushButton("Find Matching Reports")
+        self.btn_find_reports.clicked.connect(self._refresh_report_matches)
         row1.addWidget(QLabel("Report Root:"))
         row1.addWidget(self.report_root, stretch=1)
         row1.addWidget(btn_browse)
-        row1.addWidget(btn_find)
+        row1.addWidget(self.btn_find_reports)
         layout.addLayout(row1)
 
         self.report_list = QListWidget()
@@ -248,6 +256,13 @@ class TabLadder(QWidget):
             self.report_root.setText(next_profile.get("batch", {}).get("output_base", ""))
 
         self._current_analysis_id = analysis_id
+        self._current_meta = None
+        self._current_fsa = None
+        self._clear_details()
+        if self._current_file:
+            self._set_status(
+                f"Analysis switched to {analysis_id}. Refresh metadata to re-evaluate the current file."
+            )
 
     def _choose_source_dir(self) -> None:
         folder = QFileDialog.getExistingDirectory(
@@ -291,9 +306,15 @@ class TabLadder(QWidget):
             self._set_status("Input folder does not exist.", error=True)
             return
 
-        self._all_files = sorted(source.rglob("*.fsa"), key=lambda p: p.name.lower())
-        self._rebuild_file_list()
-        self._set_status(f"Found {len(self._all_files)} .fsa files in {source}.")
+        self._scan_request_id += 1
+        request_id = self._scan_request_id
+        self.btn_scan.setEnabled(False)
+        self._set_status(f"Scanning {source} for .fsa files...")
+
+        worker = Worker(self._scan_fsa_files_worker, source)
+        worker.signals.result.connect(lambda files, rid=request_id, src=source: self._on_scan_result(rid, src, files))
+        worker.signals.error.connect(lambda err, rid=request_id: self._on_scan_error(rid, err))
+        self.threadpool.start(worker)
 
     def _rebuild_file_list(self) -> None:
         active_path = self._current_file
@@ -335,6 +356,7 @@ class TabLadder(QWidget):
     def _update_current_file(self, file_path: Path | None) -> None:
         self._current_file = file_path
         self._current_meta = None
+        self._current_fsa = None
         self._clear_details()
 
         enabled = file_path is not None
@@ -352,6 +374,7 @@ class TabLadder(QWidget):
             self._update_report_buttons()
             return
 
+        self.detail_labels["file"].setText(str(file_path))
         self._refresh_current_metadata()
         self._refresh_report_matches()
 
@@ -359,70 +382,15 @@ class TabLadder(QWidget):
         if not self._current_file:
             return
 
-        meta = detect_fsa_for_ladder(
-            self._current_file,
-            preferred_analysis=APP_SETTINGS.get("active_analysis"),
-        )
-        self._current_meta = meta
-
         self.detail_labels["file"].setText(str(self._current_file))
-        if not meta:
-            for key in [
-                "assay",
-                "ladder",
-                "fit_strategy",
-                "fit_counts",
-                "review_state",
-                "missing_steps",
-                "adjustment",
-            ]:
-                self.detail_labels[key].setText("Could not classify")
-            self._set_status(f"Could not classify {self._current_file.name}.", error=True)
-            return
-
-        adj_status = "Saved" if self._current_file.with_suffix(".ladder_adj.json").exists() else "None"
-        self.detail_labels["assay"].setText(meta["assay"])
-        self.detail_labels["ladder"].setText(meta["ladder"])
-        self.detail_labels["adjustment"].setText(adj_status)
+        self.detail_labels["assay"].setText("Loading...")
+        self.detail_labels["ladder"].setText("Loading...")
+        self.detail_labels["adjustment"].setText("Loading...")
         self.detail_labels["fit_strategy"].setText("Loading...")
         self.detail_labels["fit_counts"].setText("—")
         self.detail_labels["review_state"].setText("—")
         self.detail_labels["missing_steps"].setText("—")
-
-        try:
-            fsa, _ = load_adjustable_fsa(
-                self._current_file,
-                preferred_analysis=APP_SETTINGS.get("active_analysis"),
-            )
-            fit_strategy = str(getattr(fsa, "ladder_fit_strategy", "auto_full")).replace("_", " ")
-            expected_steps = list(
-                map(float, getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", [])))
-            )
-            fitted_steps = list(map(float, getattr(fsa, "ladder_steps", [])))
-            missing_steps = list(map(float, getattr(fsa, "ladder_missing_expected_steps", [])))
-            fit_note = str(getattr(fsa, "ladder_fit_note", ""))
-            review_required = bool(getattr(fsa, "ladder_review_required", bool(missing_steps)))
-
-            if getattr(fsa, "ladder_fit_strategy", "") == "manual_adjustment":
-                review_state = "Manual correction active"
-            elif review_required:
-                review_state = "Usable but incomplete"
-            else:
-                review_state = "Full fit"
-
-            self.detail_labels["fit_strategy"].setText(fit_strategy)
-            self.detail_labels["fit_counts"].setText(f"{len(expected_steps)} / {len(fitted_steps)}")
-            self.detail_labels["review_state"].setText(review_state)
-            self.detail_labels["missing_steps"].setText(
-                ", ".join(f"{bp:.0f}" for bp in missing_steps) if missing_steps else "None"
-            )
-            self._set_status(fit_note or f"Loaded metadata for {self._current_file.name}.")
-        except Exception as exc:
-            self.detail_labels["fit_strategy"].setText("Could not load")
-            self.detail_labels["fit_counts"].setText("—")
-            self.detail_labels["review_state"].setText("Unknown")
-            self.detail_labels["missing_steps"].setText("—")
-            self._set_status(f"Loaded metadata, but not ladder state: {exc}", error=True)
+        self._start_metadata_load(self._current_file)
 
     def _clear_details(self) -> None:
         for label in self.detail_labels.values():
@@ -432,16 +400,15 @@ class TabLadder(QWidget):
         if not self._current_file:
             return
 
-        try:
-            fsa, meta = load_adjustable_fsa(
-                self._current_file,
-                preferred_analysis=APP_SETTINGS.get("active_analysis"),
-            )
-        except Exception as exc:
-            QMessageBox.critical(self, "Load Failed", f"Could not load file for ladder adjustment:\n{exc}")
-            self._set_status(f"Could not load {self._current_file.name}.", error=True)
+        if self._metadata_loading:
+            QMessageBox.information(self, "Metadata Loading", "Metadata is still loading for the selected file.")
+            return
+        if self._current_meta is None or self._current_fsa is None:
+            self._refresh_current_metadata()
+            QMessageBox.information(self, "Metadata Required", "Refresh metadata before opening the ladder editor.")
             return
 
+        fsa = copy.deepcopy(self._current_fsa)
         dialog = LadderAdjustmentDialog(fsa, self)
         if dialog.exec():
             adjustment = dialog.get_adjustment_payload()
@@ -485,42 +452,24 @@ class TabLadder(QWidget):
             _open_path(self._current_file.parent)
 
     def _refresh_report_matches(self) -> None:
-        self.report_list.clear()
-        self._report_matches = []
-
         root_text = self.report_root.text().strip()
         if not self._current_file or not root_text:
+            self.report_list.clear()
+            self._report_matches = []
             self._update_report_buttons()
             return
 
-        root = Path(root_text).expanduser()
-        if not root.exists():
-            self._set_status("Report root does not exist.", error=True)
-            self._update_report_buttons()
-            return
-
-        dit = extract_dit_from_name(self._current_file.name)
-        stem = self._current_file.stem.lower()
-        tokens = [token for token in [dit, stem] if token]
-
-        html_matches = []
-        for path in root.rglob("*.html"):
-            lower = path.name.lower()
-            if any(token.lower() in lower for token in tokens):
-                html_matches.append(path)
-
-        self._report_matches = sorted(set(html_matches))
-        for path in self._report_matches:
-            item = QListWidgetItem(str(path.relative_to(root)))
-            item.setData(Qt.ItemDataRole.UserRole, str(path))
-            self.report_list.addItem(item)
-
-        if self._report_matches:
-            self.report_list.setCurrentRow(0)
-            self._set_status(f"Found {len(self._report_matches)} matching reports.")
-        else:
-            self._set_status("No matching reports found under the selected report root.")
+        self._report_request_id += 1
+        request_id = self._report_request_id
+        self.btn_find_reports.setEnabled(False)
+        self.report_list.clear()
+        self._report_matches = []
         self._update_report_buttons()
+
+        worker = Worker(self._find_report_matches_worker, self._current_file, root_text)
+        worker.signals.result.connect(lambda result, rid=request_id: self._on_report_matches_result(rid, result))
+        worker.signals.error.connect(lambda err, rid=request_id: self._on_report_matches_error(rid, err))
+        self.threadpool.start(worker)
 
     def _update_report_buttons(self) -> None:
         has_selection = bool(self.report_list.selectedItems())
@@ -543,3 +492,159 @@ class TabLadder(QWidget):
         color = "#ef4444" if error else "#64748b"
         self.status_lbl.setText(text)
         self.status_lbl.setStyleSheet(f"color: {color}; font-weight: 500;")
+
+    @staticmethod
+    def _adjustment_status_for(file_path: Path) -> str:
+        payload = load_ladder_adjustment(type("Dummy", (), {"file": file_path})())
+        return "Saved" if payload else "None"
+
+    def _start_metadata_load(self, file_path: Path) -> None:
+        self._metadata_request_id += 1
+        request_id = self._metadata_request_id
+        analysis_id = APP_SETTINGS.get("active_analysis")
+        self._metadata_loading = True
+        self.btn_open_editor.setEnabled(False)
+        self._set_status(f"Loading ladder metadata for {file_path.name}...")
+
+        worker = Worker(self._load_metadata_worker, file_path, analysis_id)
+        worker.signals.result.connect(lambda result, rid=request_id: self._on_metadata_result(rid, result))
+        worker.signals.error.connect(lambda err, rid=request_id: self._on_metadata_error(rid, err))
+        self.threadpool.start(worker)
+
+    @staticmethod
+    def _scan_fsa_files_worker(source: Path) -> list[Path]:
+        return sorted(source.rglob("*.fsa"), key=lambda p: p.name.lower())
+
+    @staticmethod
+    def _load_metadata_worker(file_path: Path, analysis_id: str | None) -> dict:
+        meta = detect_fsa_for_ladder(file_path, preferred_analysis=analysis_id)
+        if not meta:
+            return {"file_path": file_path, "meta": None, "fsa": None}
+        fsa, refreshed_meta = load_adjustable_fsa(file_path, preferred_analysis=analysis_id, metadata=meta)
+        return {"file_path": file_path, "meta": refreshed_meta, "fsa": fsa}
+
+    @staticmethod
+    def _find_report_matches_worker(file_path: Path, root_text: str) -> dict:
+        root = Path(root_text).expanduser()
+        if not root.exists():
+            raise FileNotFoundError("Report root does not exist.")
+
+        dit = extract_dit_from_name(file_path.name)
+        stem = file_path.stem.lower()
+        tokens = [token for token in [dit, stem] if token]
+
+        html_matches = []
+        for path in root.rglob("*.html"):
+            lower = path.name.lower()
+            if any(token.lower() in lower for token in tokens):
+                html_matches.append(path)
+
+        return {"root": root, "matches": sorted(set(html_matches))}
+
+    def _on_scan_result(self, request_id: int, source: Path, files: list[Path]) -> None:
+        if request_id != self._scan_request_id:
+            return
+        self.btn_scan.setEnabled(True)
+        self._all_files = files
+        self._rebuild_file_list()
+        self._set_status(f"Found {len(self._all_files)} .fsa files in {source}.")
+
+    def _on_scan_error(self, request_id: int, err_tuple) -> None:
+        if request_id != self._scan_request_id:
+            return
+        self.btn_scan.setEnabled(True)
+        self._set_status(f"Could not scan .fsa files: {err_tuple[1]}", error=True)
+
+    def _on_metadata_result(self, request_id: int, result: dict) -> None:
+        if request_id != self._metadata_request_id:
+            return
+        self._metadata_loading = False
+
+        file_path = result["file_path"]
+        if file_path != self._current_file:
+            return
+
+        meta = result["meta"]
+        if not meta:
+            for key in [
+                "assay",
+                "ladder",
+                "fit_strategy",
+                "fit_counts",
+                "review_state",
+                "missing_steps",
+                "adjustment",
+            ]:
+                self.detail_labels[key].setText("Could not classify")
+            self._set_status(f"Could not classify {file_path.name}.", error=True)
+            return
+
+        self._current_meta = meta
+        self._current_fsa = result["fsa"]
+        adj_status = self._adjustment_status_for(file_path)
+        self.detail_labels["assay"].setText(meta["assay"])
+        self.detail_labels["ladder"].setText(meta["ladder"])
+        self.detail_labels["adjustment"].setText(adj_status)
+
+        fsa = self._current_fsa
+        fit_strategy = str(getattr(fsa, "ladder_fit_strategy", "auto_full")).replace("_", " ")
+        expected_steps = list(map(float, getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", []))))
+        fitted_steps = list(map(float, getattr(fsa, "ladder_steps", [])))
+        missing_steps = list(map(float, getattr(fsa, "ladder_missing_expected_steps", [])))
+        fit_note = str(getattr(fsa, "ladder_fit_note", ""))
+        review_required = bool(getattr(fsa, "ladder_review_required", bool(missing_steps)))
+
+        if getattr(fsa, "ladder_fit_strategy", "") == "manual_adjustment":
+            review_state = "Manual correction active"
+        elif review_required:
+            review_state = "Usable but incomplete"
+        else:
+            review_state = "Full fit"
+
+        self.detail_labels["fit_strategy"].setText(fit_strategy)
+        self.detail_labels["fit_counts"].setText(f"{len(expected_steps)} / {len(fitted_steps)}")
+        self.detail_labels["review_state"].setText(review_state)
+        self.detail_labels["missing_steps"].setText(
+            ", ".join(f"{bp:.0f}" for bp in missing_steps) if missing_steps else "None"
+        )
+        self.btn_open_editor.setEnabled(True)
+        self._set_status(fit_note or f"Loaded metadata for {file_path.name}.")
+
+    def _on_metadata_error(self, request_id: int, err_tuple) -> None:
+        if request_id != self._metadata_request_id:
+            return
+        self._metadata_loading = False
+        self.btn_open_editor.setEnabled(self._current_file is not None)
+        self.detail_labels["fit_strategy"].setText("Could not load")
+        self.detail_labels["fit_counts"].setText("—")
+        self.detail_labels["review_state"].setText("Unknown")
+        self.detail_labels["missing_steps"].setText("—")
+        self._set_status(f"Loaded metadata, but not ladder state: {err_tuple[1]}", error=True)
+
+    def _on_report_matches_result(self, request_id: int, result: dict) -> None:
+        if request_id != self._report_request_id:
+            return
+        self.btn_find_reports.setEnabled(True)
+        root = result["root"]
+        self._report_matches = result["matches"]
+        self.report_list.clear()
+        for path in self._report_matches:
+            item = QListWidgetItem(str(path.relative_to(root)))
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            self.report_list.addItem(item)
+
+        if self._report_matches:
+            self.report_list.setCurrentRow(0)
+            self._set_status(f"Found {len(self._report_matches)} matching reports.")
+        else:
+            self._set_status("No matching reports found under the selected report root.")
+        self._update_report_buttons()
+
+    def _on_report_matches_error(self, request_id: int, err_tuple) -> None:
+        if request_id != self._report_request_id:
+            return
+        self.btn_find_reports.setEnabled(True)
+        self.report_list.clear()
+        self._report_matches = []
+        self._update_report_buttons()
+        self._set_status(str(err_tuple[1]), error=True)

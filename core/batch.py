@@ -83,10 +83,15 @@ def scan_jobs_from_yaml(yaml_path: Path) -> List[Path]:
 
 def find_all_fsa_files(folders: List[Path]) -> List[Path]:
     """Find all .fsa files in the given folders."""
+    from core.utils import is_water_file
+
     fsa_files = []
     for f in folders:
         if f.is_dir():
-            fsa_files.extend(f.glob("*.fsa"))
+            fsa_files.extend(
+                path for path in f.glob("*.fsa")
+                if not is_water_file(path.name)
+            )
     return fsa_files
 
 
@@ -102,10 +107,13 @@ def group_files_by_patient(fsa_files: List[Path], regex_pattern: str) -> Dict[st
         except Exception as e:
             log(f"[ERROR] Invalid regex '{regex_pattern}': {e}")
             
-    from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
+    from core.utils import CONTROL_PREFIX_RE, is_water_file, strip_stage_prefix
     qc_pattern = CONTROL_PREFIX_RE
 
     for f in sorted(fsa_files):
+        if is_water_file(f.name):
+            continue
+
         # Use the stripped name for identification logic
         clean_name = strip_stage_prefix(f.name)
         
@@ -187,11 +195,14 @@ def generate_jobs(
         if jobs:
             log(f"[INFO] Aggregated {len(all_fsa)} files into {len(jobs)} jobs.")
     else:
-        from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
+        from core.utils import CONTROL_PREFIX_RE, is_water_file, strip_stage_prefix
         qc_pattern = CONTROL_PREFIX_RE
         all_qc_files = []
         for folder in folders_to_scan:
-            fsa_files = list(folder.glob("*.fsa"))
+            fsa_files = [
+                f for f in folder.glob("*.fsa")
+                if not is_water_file(f.name)
+            ]
             qc_files = [f for f in fsa_files if qc_pattern.match(strip_stage_prefix(f.name))]
             pat_files = [f for f in fsa_files if not qc_pattern.match(strip_stage_prefix(f.name))]
             
@@ -239,6 +250,7 @@ def run_batch_jobs(
     from config import APP_SETTINGS
     from core.qc.qc_rules import QCRules
     s_qc = APP_SETTINGS.get("qc", {})
+    active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     qc_rules = QCRules(
         min_r2_ok=s_qc.get("min_r2_ok", 0.999),
         min_r2_warn=s_qc.get("min_r2_warn", 0.995),
@@ -280,7 +292,8 @@ def run_batch_jobs(
                         out_folder_name=resolved_out_folder,
                         scope=pipeline_scope,
                         needle=assay_filter,
-                        files=job_files
+                        files=job_files,
+                        chunk_files=(active_analysis != "flt3"),
                     )
                     all_collected_entries.extend(entries)
                     log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
@@ -313,7 +326,8 @@ def run_batch_jobs(
                         out_folder_name=resolved_out_folder,
                         scope=pipeline_scope,
                         needle=assay_filter,
-                        files=job_files
+                        files=job_files,
+                        chunk_files=(active_analysis != "flt3"),
                     )
                     all_collected_entries.extend(entries)
                     log(f"[BATCH] Collected {len(entries)} entries from {job_name} for DIT aggregation.")

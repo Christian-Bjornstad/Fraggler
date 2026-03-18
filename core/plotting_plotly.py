@@ -26,6 +26,8 @@ from core.analysis import (
 )
 from core.plotly_offline import local_plotly_tag as _local_plotly_tag
 
+FLT3_NEGATIVE_CONTROL_YMIN = 250.0
+
 
 def compute_group_ymax(entries: list[dict]) -> float:
     """
@@ -217,6 +219,7 @@ def _prepare_plot_data(entry: dict) -> dict | None:
         "bp_min": float(entry["bp_min"]),
         "bp_max": float(entry["bp_max"]),
         "assay_name": entry.get("assay"),
+        "group": entry.get("group"),
         "forced_ymax": entry.get("forced_ymax") or entry.get("force_ymax"),
         "forced_xmin": entry.get("forced_xmin"),
         "forced_xmax": entry.get("forced_xmax"),
@@ -271,6 +274,9 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
         multi_channel_assays = {"TCRgA", "TCRgB", "TCRg", "TCRγA", "TCRγB", "TCRγ", "TCRbA", "TCRbB", "TCRbC", "TCRβA", "TCRβB", "TCRβC"}
         base = ymax_auto_all if assay_name in multi_channel_assays else (ymax_auto_primary or ymax_auto_all)
         ymax = base if base > 0 else 1000.0
+
+    if assay_name in {"FLT3-ITD", "FLT3-D835", "NPM1"} and data.get("group") == "negative_control":
+        ymax = max(ymax, FLT3_NEGATIVE_CONTROL_YMIN)
 
     # Shapes
     shapes = []

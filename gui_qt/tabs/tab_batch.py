@@ -4,9 +4,9 @@ import sys
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, 
     QTableWidget, QTableWidgetItem, QProgressBar, 
-    QHeaderView, QAbstractItemView, QFileDialog, QListWidget
+    QHeaderView, QAbstractItemView, QFileDialog, QListWidget, QSizePolicy, QScroller
 )
-from PyQt6.QtCore import Qt, QThreadPool
+from PyQt6.QtCore import Qt, QThreadPool, QEvent
 from gui_qt.worker import Worker
 from config import APP_SETTINGS, get_analysis_settings
 
@@ -15,6 +15,39 @@ ANALYSIS_LABELS = {
     "clonality": "Klonalitet",
     "flt3": "FLT3 Analysis",
 }
+
+
+class JobsTableWidget(QTableWidget):
+    """QTableWidget with reliable wheel scrolling on the viewport."""
+
+    def __init__(self, rows: int, columns: int, parent=None):
+        super().__init__(rows, columns, parent)
+        self.viewport().installEventFilter(self)
+        QScroller.grabGesture(self.viewport(), QScroller.ScrollerGestureType.TouchGesture)
+
+    def eventFilter(self, source, event):
+        if source is self.viewport() and event.type() == QEvent.Type.Wheel:
+            self.wheelEvent(event)
+            return event.isAccepted()
+        return super().eventFilter(source, event)
+
+    def wheelEvent(self, event):
+        delta = event.pixelDelta().y()
+        if not delta:
+            delta = event.angleDelta().y()
+            if delta:
+                delta = int(delta / 120) * self.verticalScrollBar().singleStep()
+
+        if delta:
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+                bar = self.horizontalScrollBar()
+            else:
+                bar = self.verticalScrollBar()
+            bar.setValue(bar.value() - delta)
+            event.accept()
+            return
+
+        super().wheelEvent(event)
 
 class TabBatch(QWidget):
     def __init__(self, parent=None):
@@ -136,16 +169,34 @@ class TabBatch(QWidget):
         t_btns.addWidget(self.btn_sel_none)
         t_btns.addStretch()
         
-        self.table = QTableWidget(0, 5)
+        self.table = JobsTableWidget(0, 5)
         self.table.setHorizontalHeaderLabels(["Name", "Type", "Source", "Files", "Status"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setStretchLastSection(False)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
         self.table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setMinimumSectionSize(80)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setWordWrap(False)
+        self.table.setTextElideMode(Qt.TextElideMode.ElideMiddle)
+        self.table.setShowGrid(False)
+        self.table.setVerticalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
+        self.table.setAutoScroll(False)
+        self.table.setMinimumHeight(280)
+        self.table.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.table.setFocusPolicy(Qt.FocusPolicy.WheelFocus)
+        self.table.verticalHeader().setVisible(False)
+        self.table.verticalHeader().setDefaultSectionSize(32)
+        self.table.verticalHeader().setMinimumSectionSize(28)
+        self.table.verticalScrollBar().setSingleStep(24)
         
         self.btn_sel_all.clicked.connect(self.table.selectAll)
         self.btn_sel_none.clicked.connect(self.table.clearSelection)
@@ -155,7 +206,7 @@ class TabBatch(QWidget):
         
         t_layout.addWidget(t_title)
         t_layout.addLayout(t_btns)
-        t_layout.addWidget(self.table)
+        t_layout.addWidget(self.table, stretch=1)
         
         # Add to main
         main_layout.addLayout(header)
@@ -227,6 +278,15 @@ class TabBatch(QWidget):
             self.folder_list.takeItem(self.folder_list.row(item))
             
     def _rebuild_table(self):
+        selected_names = {
+            self.table.item(index.row(), 0).text()
+            for index in self.table.selectionModel().selectedRows()
+            if self.table.item(index.row(), 0) is not None
+        } if self.table.selectionModel() else set()
+        v_scroll = self.table.verticalScrollBar().value()
+        h_scroll = self.table.horizontalScrollBar().value()
+
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(0)
         for row_idx, j in enumerate(self._detected_jobs):
             self.table.insertRow(row_idx)
@@ -266,6 +326,12 @@ class TabBatch(QWidget):
             self.table.setItem(row_idx, 2, item_src)
             self.table.setItem(row_idx, 3, item_files)
             self.table.setItem(row_idx, 4, item_state)
+            if j["name"] in selected_names:
+                self.table.selectRow(row_idx)
+
+        self.table.setUpdatesEnabled(True)
+        self.table.verticalScrollBar().setValue(v_scroll)
+        self.table.horizontalScrollBar().setValue(h_scroll)
     def on_scan(self):
         from core.batch import generate_jobs
         

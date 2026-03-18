@@ -579,7 +579,7 @@ def save_ladder_adjustment(
     mapping_times: dict[int, float] | None = None,
 ) -> None:
     """Saves a manual mapping payload to a .json file alongside the .fsa file."""
-    adj_path = fsa.file.with_suffix(".ladder_adj.json")
+    adj_path = Path(fsa.file).resolve().with_suffix(".ladder_adj.json")
     try:
         if manual_candidates is not None or mapping_times is not None:
             payload = {
@@ -595,44 +595,31 @@ def save_ladder_adjustment(
             }
         with open(adj_path, "w") as f:
             json.dump(payload, f)
-        mirrored = 0
-        for sibling in _sibling_fsa_paths(fsa.file):
-            sibling_adj = sibling.with_suffix(".ladder_adj.json")
-            try:
-                with open(sibling_adj, "w") as f:
-                    json.dump(payload, f)
-                mirrored += 1
-            except Exception:
-                continue
         print_green(f"Saved ladder adjustment to {adj_path.name}")
-        if mirrored:
-            print_green(f"Mirrored ladder adjustment to {mirrored} sibling project copie(s)")
     except Exception as e:
         print_warning(f"Could not save ladder adjustment: {e}")
 
 
 def load_ladder_adjustment(fsa: FsaFile) -> dict | None:
     """Loads a manual mapping payload from a .json file if it exists."""
-    adj_path = fsa.file.with_suffix(".ladder_adj.json")
-    if adj_path.exists():
+    candidate_files: list[Path] = [Path(fsa.file)]
+    try:
+        resolved = Path(fsa.file).resolve()
+    except Exception:
+        resolved = None
+    if resolved is not None and resolved not in candidate_files:
+        candidate_files.append(resolved)
+
+    for candidate_file in candidate_files:
+        adj_path = candidate_file.with_suffix(".ladder_adj.json")
+        if not adj_path.exists():
+            continue
         try:
             with open(adj_path, "r") as f:
                 payload = json.load(f)
                 return _normalize_ladder_adjustment_payload(payload)
         except Exception as e:
             print_warning(f"Could not load ladder adjustment {adj_path.name}: {e}")
-
-    for sibling in _sibling_fsa_paths(fsa.file):
-        sibling_adj = sibling.with_suffix(".ladder_adj.json")
-        if not sibling_adj.exists():
-            continue
-        try:
-            with open(sibling_adj, "r") as f:
-                payload = json.load(f)
-            print_green(f"Using sibling ladder adjustment from {sibling_adj}")
-            return _normalize_ladder_adjustment_payload(payload)
-        except Exception as e:
-            print_warning(f"Could not load sibling ladder adjustment {sibling_adj.name}: {e}")
     return None
 
 

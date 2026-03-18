@@ -219,7 +219,7 @@ class TestLadderSelection(unittest.TestCase):
         self.assertIn(2444, cleaned.tolist())
         self.assertIn(3042, cleaned.tolist())
 
-    def test_load_ladder_adjustment_can_fall_back_to_sibling_project_copy(self):
+    def test_load_ladder_adjustment_does_not_fall_back_to_sibling_project_copy(self):
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"
             root_a = desktop / "OUS"
@@ -239,9 +239,7 @@ class TestLadderSelection(unittest.TestCase):
             dummy = type("Dummy", (), {"file": file_b})()
             payload = load_ladder_adjustment(dummy)
 
-        self.assertEqual(payload["mapping"], {0: 1})
-        self.assertEqual(payload["mapping_times"], {0: 10.0})
-        self.assertEqual(payload["manual_candidates"], [12.0])
+        self.assertIsNone(payload)
 
     def test_ladder_utils_prefer_clonality_runtime_even_if_active_analysis_is_flt3(self):
         path = Path("/tmp/sample.fsa")
@@ -271,7 +269,7 @@ class TestLadderSelection(unittest.TestCase):
         APP_SETTINGS["active_analysis"] = "flt3"
         try:
             with patch("gui_qt.ladder_utils.classify_clonality_fsa", return_value=clonality_classification), \
-                 patch("gui_qt.ladder_utils.classify_flt3_fsa", return_value=flt3_classification), \
+                 patch("gui_qt.ladder_utils.classify_flt3_fsa", return_value=flt3_classification) as mock_flt3_classify, \
                  patch("gui_qt.ladder_utils.analyse_fsa_rox", return_value=sentinel_fsa) as mock_analyse:
                 meta = detect_fsa_for_ladder(path, preferred_analysis="clonality")
                 fsa, refreshed_meta = load_adjustable_fsa(path, preferred_analysis="clonality")
@@ -287,6 +285,7 @@ class TestLadderSelection(unittest.TestCase):
         self.assertIs(fsa, sentinel_fsa)
         self.assertEqual(refreshed_meta["analysis"], "clonality")
         self.assertEqual(refreshed_meta["ladder"], "ROX400HD")
+        mock_flt3_classify.assert_not_called()
         mock_analyse.assert_called_once_with(
             path,
             "DATA1",
@@ -295,7 +294,31 @@ class TestLadderSelection(unittest.TestCase):
             min_size_standard_height=200.0,
         )
 
-    def test_save_ladder_adjustment_mirrors_to_sibling_project_copy(self):
+    def test_load_adjustable_fsa_reuses_precomputed_metadata(self):
+        path = Path("/tmp/sample.fsa")
+        metadata = {
+            "analysis": "clonality",
+            "assay": "IGH",
+            "group": "sample",
+            "ladder": "ROX400HD",
+            "trace_channels": ["DATA1"],
+            "peak_channels": ["DATA1"],
+            "primary_peak_channel": "DATA1",
+            "bp_min": 50.0,
+            "bp_max": 500.0,
+            "sample_channel": "DATA1",
+        }
+        sentinel_fsa = object()
+
+        with patch("gui_qt.ladder_utils.detect_fsa_for_ladder") as mock_detect, \
+             patch("gui_qt.ladder_utils.analyse_fsa_rox", return_value=sentinel_fsa):
+            fsa, refreshed_meta = load_adjustable_fsa(path, preferred_analysis="clonality", metadata=metadata.copy())
+
+        self.assertIs(fsa, sentinel_fsa)
+        self.assertEqual(refreshed_meta["ladder"], "ROX400HD")
+        mock_detect.assert_not_called()
+
+    def test_save_ladder_adjustment_stays_with_original_file(self):
         with TemporaryDirectory() as tmp:
             desktop = Path(tmp) / "Desktop"
             root_a = desktop / "OUS"
@@ -312,7 +335,8 @@ class TestLadderSelection(unittest.TestCase):
             save_ladder_adjustment(dummy, {"mapping": {0: 1}, "mapping_times": {0: 10.0}, "manual_candidates": [12.0]})
 
             mirrored = file_b.with_suffix(".ladder_adj.json")
-            self.assertTrue(mirrored.exists())
+            self.assertFalse(mirrored.exists())
+            self.assertTrue(file_a.with_suffix(".ladder_adj.json").exists())
 
 
 if __name__ == "__main__":

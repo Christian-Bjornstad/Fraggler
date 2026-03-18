@@ -14,6 +14,7 @@ class TestPipeline(unittest.TestCase):
             (base / "25OUM10166_sample_FR1.fsa").write_text("")
             (base / "NK_sample_IGK.fsa").write_text("")
             (base / "water_blank.fsa").write_text("")
+            (base / "Vann_kontroll.fsa").write_text("")
             files = _scan_files(base)
             self.assertEqual([p.name for p in files], ["25OUM10166_sample_FR1.fsa", "NK_sample_IGK.fsa"])
 
@@ -122,6 +123,34 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(len(staged_dirs[1][1]), 2)
         self.assertEqual([e["fsa_dir"] for e in entries], [chunk_dir for chunk_dir, _ in staged_dirs])
 
+    def test_run_pipeline_job_collect_can_stage_all_files_once(self):
+        from core.runner import CHUNK_SIZE, run_pipeline_job_collect
+
+        files = [Path(f"/tmp/sample_{i}.fsa") for i in range(CHUNK_SIZE + 2)]
+        staged_dirs = []
+
+        def _fake_stage(chunk):
+            tmp = Path(f"/tmp/staged_{len(staged_dirs)}")
+            staged_dirs.append((tmp, list(chunk)))
+            return tmp
+
+        with patch("core.runner.stage_files", side_effect=_fake_stage), \
+             patch("core.runner.cleanup_temp"), \
+             patch("core.pipeline.run_pipeline", side_effect=lambda **kwargs: [{"fsa_dir": kwargs["fsa_dir"]}]):
+            entries = run_pipeline_job_collect(
+                fsa_dir=None,
+                base_outdir=Path("/tmp/out"),
+                out_folder_name="ASSAY_REPORTS",
+                scope="all",
+                needle="",
+                files=files,
+                chunk_files=False,
+            )
+
+        self.assertEqual(len(staged_dirs), 1)
+        self.assertEqual(staged_dirs[0][1], files)
+        self.assertEqual([e["fsa_dir"] for e in entries], [staged_dirs[0][0]])
+
     def test_clonality_report_generation_respects_controls_mode(self):
         from core.analyses.clonality import pipeline as clonality_pipeline
 
@@ -175,9 +204,9 @@ class TestPipeline(unittest.TestCase):
              patch.object(flt3_pipeline, "classify_fsa", side_effect=classified_meta), \
              patch.object(flt3_pipeline, "_select_best_entry", side_effect=selected_entries) as mock_select, \
              patch.object(flt3_pipeline, "_calculate_ratios") as mock_ratios, \
-             patch.object(flt3_pipeline, "generate_flt3_qc_report") as mock_qc, \
              patch.object(flt3_pipeline, "generate_flt3_peak_report") as mock_peak, \
              patch.object(flt3_pipeline, "generate_flt3_bp_validation_report") as mock_bp, \
+             patch.object(flt3_pipeline, "update_flt3_qc_trends") as mock_trends, \
              patch.object(flt3_pipeline, "finalize_pipeline_run", return_value=["finalized"]) as mock_finalize:
             result = flt3_pipeline.run_pipeline(
                 fsa_dir,
@@ -191,9 +220,9 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(result, ["finalized"])
         self.assertEqual(mock_select.call_count, 2)
         mock_ratios.assert_called_once_with(selected_entries)
-        mock_qc.assert_called_once_with(selected_entries, outdir)
         mock_peak.assert_called_once_with(selected_entries, outdir)
         mock_bp.assert_called_once_with(selected_entries, outdir)
+        mock_trends.assert_called_once_with(outdir / flt3_pipeline.FLT3_QC_TRENDS_FILENAME, selected_entries)
         mock_finalize.assert_called_once_with(
             selected_entries,
             outdir,

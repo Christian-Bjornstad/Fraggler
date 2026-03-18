@@ -87,30 +87,42 @@ def _normalize_flt3_classification(fsa_path: Path, classified: dict) -> dict:
     }
 
 
-def detect_fsa_for_ladder(fsa_path: Path, preferred_analysis: str | None = None) -> dict | None:
-    normalized: list[dict] = []
-
-    clonality = classify_clonality_fsa(fsa_path)
-    if clonality:
-        normalized.append(_normalize_clonality_classification(fsa_path, clonality))
-
-    flt3 = classify_flt3_fsa(fsa_path)
-    if flt3:
-        normalized.append(_normalize_flt3_classification(fsa_path, flt3))
-
-    if not normalized:
+def _classify_for_analysis(fsa_path: Path, analysis_id: str) -> dict | None:
+    if analysis_id == "clonality":
+        classified = classify_clonality_fsa(fsa_path)
+        if classified:
+            return _normalize_clonality_classification(fsa_path, classified)
         return None
+    if analysis_id == "flt3":
+        classified = classify_flt3_fsa(fsa_path)
+        if classified:
+            return _normalize_flt3_classification(fsa_path, classified)
+        return None
+    return None
 
+
+def detect_fsa_for_ladder(fsa_path: Path, preferred_analysis: str | None = None) -> dict | None:
     if preferred_analysis:
-        for item in normalized:
-            if item["analysis"] == preferred_analysis:
-                return item
+        preferred = _classify_for_analysis(fsa_path, preferred_analysis)
+        if preferred:
+            return preferred
 
-    return normalized[0]
+    for analysis_id in ("clonality", "flt3"):
+        if analysis_id == preferred_analysis:
+            continue
+        detected = _classify_for_analysis(fsa_path, analysis_id)
+        if detected:
+            return detected
+
+    return None
 
 
-def load_adjustable_fsa(fsa_path: Path, preferred_analysis: str | None = None) -> tuple[FsaFile, dict]:
-    metadata = detect_fsa_for_ladder(fsa_path, preferred_analysis=preferred_analysis)
+def load_adjustable_fsa(
+    fsa_path: Path,
+    preferred_analysis: str | None = None,
+    metadata: dict | None = None,
+) -> tuple[FsaFile, dict]:
+    metadata = metadata or detect_fsa_for_ladder(fsa_path, preferred_analysis=preferred_analysis)
     if not metadata:
         raise ValueError(f"Could not classify {fsa_path.name}")
 

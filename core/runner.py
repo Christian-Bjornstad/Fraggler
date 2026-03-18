@@ -218,6 +218,8 @@ def run_pipeline_job_collect(
     scope: str,
     needle: str,
     files: Optional[List[Path]] = None,
+    *,
+    chunk_files: bool = True,
 ) -> list:
     """
     Like run_pipeline_job but returns entries for cross-folder DIT aggregation.
@@ -242,8 +244,24 @@ def run_pipeline_job_collect(
                 if not selected_files:
                     return []
 
-            all_entries = []
             from core.pipeline import run_pipeline
+            if not chunk_files:
+                tmp_input = stage_files(selected_files)
+                try:
+                    entries = run_pipeline(
+                        fsa_dir=tmp_input,
+                        base_outdir=base_outdir,
+                        assay_folder_name=out_folder_name,
+                        mode=effective_mode,
+                        return_entries=True,
+                        make_dit_reports=False,
+                    )
+                    return entries or []
+                finally:
+                    cleanup_temp(tmp_input)
+                    tmp_input = None
+
+            all_entries = []
             for offset in range(0, len(selected_files), CHUNK_SIZE):
                 chunk = selected_files[offset: offset + CHUNK_SIZE]
                 tmp_input = stage_files(chunk)

@@ -603,6 +603,21 @@ def _render_ladder_status_badge(entry: dict) -> str:
     title_attr = escape(note, quote=True)
     return f"<span class='status-badge {css}' title='{title_attr}'>{escape(label)}</span>"
 
+
+def _render_status_badge(label: str, css: str, note: str = "") -> str:
+    title_attr = escape(note, quote=True) if note else ""
+    return f"<span class='status-badge {css}' title='{title_attr}'>{escape(label)}</span>"
+
+
+def _flt3_qc_status_badge(row: dict) -> str:
+    status = str(row.get("Status", "")).upper()
+    details = str(row.get("Details") or "")
+    if status == "PASS":
+        return _render_status_badge("PASS", "ok", details or "Kontrollen bestod.")
+    if status == "REVIEW":
+        return _render_status_badge("REVIEW", "warning", details or "Kontrollen krever vurdering.")
+    return _render_status_badge("FAIL", "failed", details or "Kontrollen feilet.")
+
 def _format_flt3_treatment(entry: dict) -> str:
     atype = entry["analysis_type"]
     treatment = "Standard"
@@ -956,6 +971,121 @@ def _render_sl_section(all_sl_entries: list[dict], html_lines: list[str]):
             html_lines.append(f"<tr><td>{bp_val:.0f}</td><td>{area_str}</td><td>{pct_str}</td></tr>")
         tot_str = f"{total_area:,.0f}".replace(",", " ") if not np.isnan(total_area) else "&mdash;"
         html_lines.append(f"<tr><td><strong>Total</strong></td><td><strong>{tot_str}</strong></td><td></td></tr></table>")
+
+
+def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_outdir: Path) -> Path | None:
+    """Build an FLT3 control/QC HTML report using the shared report styling."""
+    control_entries = [
+        e for e in entries
+        if e.get("group") in {"negative_control", "positive_control", "reactive_control"}
+    ]
+    if not control_entries or not qc_rows:
+        return None
+
+    assay_outdir.mkdir(exist_ok=True, parents=True)
+    title = "FLT3_QC_Resultater"
+    report_name = "FLT3 QC"
+    html_lines: list[str] = []
+    html_lines.extend(["<!DOCTYPE html>", "<html lang='no'>", "<head>", "<meta charset='utf-8'>"])
+    html_lines.append(f"<title>{escape(title)}</title>")
+    html_lines.append(REPORT_STYLE)
+    html_lines.append(_local_plotly_tag(assay_outdir, version="2.35.2"))
+    html_lines.append(_build_plotly_reflow_script())
+    html_lines.extend(["</head>", "<body>"])
+
+    gen_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+    run_dirs = sorted({str(e.get("source_run_dir") or "") for e in control_entries if e.get("source_run_dir")})
+    meta = [f"{len(control_entries)} kontrollfiler", f"{len(run_dirs)} kjoringer", f"Generert: {gen_date}"]
+    html_lines.append(
+        f"""
+<div class='report-header no-print'>
+  <h1>{escape(title)}</h1>
+  <div class='meta'>{' &nbsp;&bull;&nbsp; '.join(meta)}</div>
+</div>
+<div style='display:none' class='print-only-header'>
+  <h1>{escape(title)}</h1>
+  <p>{' | '.join(meta)}</p>
+</div>
+"""
+    )
+
+    pass_count = sum(1 for row in qc_rows if str(row.get("Status", "")).upper() == "PASS")
+    fail_count = sum(1 for row in qc_rows if str(row.get("Status", "")).upper() == "FAIL")
+    html_lines.append("<h2>QC-oversikt</h2>")
+    html_lines.append(
+        "<table><tr><th>Rapport</th><th>Kontroller</th><th>Bestatt</th><th>Feilet</th><th>Kjoringer</th></tr>"
+        f"<tr><td>{escape(report_name)}</td><td>{len(qc_rows)}</td><td>{pass_count}</td><td>{fail_count}</td>"
+        f"<td>{', '.join(escape(r) for r in run_dirs) if run_dirs else '&mdash;'}</td></tr></table>"
+    )
+
+    html_lines.append("<h2>Kontrolltabell</h2>")
+    html_lines.append(
+        "<table><tr><th>Filnavn</th><th>Assay</th><th>Kontroll</th><th>Status</th><th>Forventning</th>"
+        "<th>Valgt injeksjon</th><th>Ratio</th><th>Ladder QC</th><th>Detaljer</th></tr>"
+    )
+    entry_map = {e["fsa"].file_name: e for e in control_entries}
+    for row in sorted(qc_rows, key=lambda item: (item.get("Assay", ""), item.get("ControlGroup", ""), item.get("File", ""))):
+        entry = entry_map.get(row["File"])
+        ladder_badge = _render_ladder_status_badge(entry) if entry is not None else _render_status_badge("Unknown", "unknown")
+        ratio = float(row.get("Ratio", 0.0))
+        ratio_text = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+        html_lines.append(
+            f"<tr><td>{escape(str(row.get('File', '')))}</td>"
+            f"<td>{escape(str(row.get('Assay', '')))}</td>"
+            f"<td>{escape(str(row.get('ControlGroup', '')))}</td>"
+            f"<td>{_flt3_qc_status_badge(row)}</td>"
+            f"<td>{escape(str(row.get('Expectation', '')))}</td>"
+            f"<td>{escape(str(row.get('SelectedInjection', '') or ''))}</td>"
+            f"<td>{ratio_text}</td>"
+            f"<td>{ladder_badge}</td>"
+            f"<td>{escape(str(row.get('Details', '') or '')) or '&mdash;'}</td></tr>"
+        )
+    html_lines.append("</table>")
+
+    html_lines.append("<h2>Detaljer per kontroll</h2>")
+    for row in sorted(qc_rows, key=lambda item: (item.get("Assay", ""), item.get("ControlGroup", ""), item.get("File", ""))):
+        entry = entry_map.get(row["File"])
+        if entry is None:
+            continue
+        html_lines.append("<div class='assay-block'>")
+        html_lines.append(f"<h3>{escape(str(row.get('Assay', '')))} - {escape(str(row.get('ControlGroup', '')))}</h3>")
+        html_lines.append(f"<p class='sample-header'>{escape(entry['fsa'].file_name)}</p>")
+        meta_parts = [
+            f"Well: {entry.get('well_id') or '—'}",
+            f"Injeksjon: {entry.get('selected_injection') or '—'}",
+            f"Run: {entry.get('source_run_dir') or '—'}",
+        ]
+        html_lines.append(f"<p class='small'>{escape(' | '.join(meta_parts))}</p>")
+        html_lines.append(
+            "<table><tr><th>QC-status</th><th>Forventning</th><th>WT area</th><th>Mutant area</th><th>Ratio</th><th>Ladder QC</th></tr>"
+            f"<tr><td>{_flt3_qc_status_badge(row)}</td>"
+            f"<td>{escape(str(row.get('Expectation', '')))}</td>"
+            f"<td>{float(row.get('WT_Area', 0.0)):,.2f}</td>"
+            f"<td>{float(row.get('Mutant_Area', 0.0)):,.2f}</td>"
+            f"<td>{float(row.get('Ratio', 0.0)):.4f}</td>"
+            f"<td>{_render_ladder_status_badge(entry)}</td></tr></table>"
+        )
+        details = str(row.get("Details") or "")
+        if details:
+            html_lines.append(f"<p class='small'><strong>Kommentar:</strong> {escape(details)}</p>")
+        try:
+            frag = build_interactive_peak_plot_for_entry(entry)
+            html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
+        except Exception as ex:
+            html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+        html_lines.append(_build_flt3_summary_table(entry))
+        html_lines.append("</div>")
+
+    html_lines.append("""
+<div class="print-fab no-print">
+  <button class="print-btn" onclick="window.print()">🖨&nbsp; Print / PDF</button>
+</div>
+</body></html>""")
+
+    out_html = assay_outdir / "QC_FLT3_Injections.html"
+    out_html.write_text("\n".join(html_lines), encoding="utf-8")
+    print_green(f"FLT3 QC HTML report saved to {out_html}")
+    return out_html
 
 
 def build_dit_html_reports(entries: list[dict], assay_outdir: Path):

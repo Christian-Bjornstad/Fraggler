@@ -3,7 +3,7 @@ import unittest
 import pandas as pd
 
 from core.html_reports import _build_plotly_reflow_script
-from core.plotting_plotly import build_interactive_peak_plot_for_entry
+from core.plotting_plotly import _create_plotly_figure, _prepare_plot_data, build_interactive_peak_plot_for_entry
 
 
 class _DummyFsa:
@@ -49,6 +49,28 @@ class TestHtmlPlotlyReflow(unittest.TestCase):
         self.assertIsNotNone(html)
         self.assertIn("window.ReportPlotManager.register(g)", html)
         self.assertIn("window.ReportPlotManager.getInitialStateForPlot(divId)", html)
+
+    def test_flt3_negative_control_plot_uses_minimum_ymax_of_250(self):
+        fsa = _DummyFsa()
+        entry = {
+            "fsa": fsa,
+            "primary_peak_channel": "DATA1",
+            "trace_channels": ["DATA1"],
+            "bp_min": 70.0,
+            "bp_max": 90.0,
+            "assay": "FLT3-D835",
+            "group": "negative_control",
+            "peaks_by_channel": {"DATA1": pd.DataFrame(columns=["basepairs", "peaks", "area", "label"])},
+            "wt_bp": 80.0,
+            "mut_bp": 129.0,
+        }
+
+        data = _prepare_plot_data(entry)
+        self.assertIsNotNone(data)
+
+        _, ymax, _ = _create_plotly_figure(data)
+
+        self.assertEqual(ymax, 250.0)
 
 
 if __name__ == "__main__":
