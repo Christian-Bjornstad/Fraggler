@@ -189,17 +189,25 @@ class MainWindow(QMainWindow):
         scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(page)
         return scroll
+
+    def _activate_analysis(self, analysis_id: str) -> bool:
+        """Switch the active analysis and persist the related settings."""
+        if APP_SETTINGS.get("active_analysis") == analysis_id:
+            return False
+
+        APP_SETTINGS["active_analysis"] = analysis_id
+        profile = get_analysis_settings(analysis_id)
+        APP_SETTINGS.setdefault("batch", {}).update(profile.get("batch", {}))
+        APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
+        save_settings(APP_SETTINGS)
+        print(f"[UI] Analysis switched to: {analysis_id}")
+        return True
         
     def on_group_clicked(self, group):
         # Update active analysis in core
         new_ana = group.internal_id
-        if APP_SETTINGS.get("active_analysis") != new_ana:
-            APP_SETTINGS["active_analysis"] = new_ana
-            profile = get_analysis_settings(new_ana)
-            APP_SETTINGS.setdefault("batch", {}).update(profile.get("batch", {}))
-            APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
-            save_settings(APP_SETTINGS)
-            print(f"[UI] Analysis switched to: {new_ana}")
+        changed = self._activate_analysis(new_ana)
+        if changed:
             # Refresh tabs if needed
             self.tab_run.set_analysis(new_ana)
             self.tab_ladder.set_analysis(new_ana)
@@ -217,13 +225,7 @@ class MainWindow(QMainWindow):
             
     def on_sub_tab_clicked(self, analysis_id, tab_idx):
         # Ensure we are on the right analysis
-        if APP_SETTINGS.get("active_analysis") != analysis_id:
-            # This shouldn't happen with our set_expanded logic but good to have
-            APP_SETTINGS["active_analysis"] = analysis_id
-            profile = get_analysis_settings(analysis_id)
-            APP_SETTINGS.setdefault("batch", {}).update(profile.get("batch", {}))
-            APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
-            save_settings(APP_SETTINGS)
+        self._activate_analysis(analysis_id)
             
         if tab_idx == 3:
             page_map = {

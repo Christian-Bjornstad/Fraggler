@@ -302,13 +302,8 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
             pipeline[key] = str(pipeline.get(key, ""))
     if pipeline.get("mode") not in {"all", "controls", "custom"}:
         pipeline["mode"] = "all"
-    
-    # Ensure min_r2 is within 0-1 range
+
     qc = settings.get("qc", {})
-    if not (0 <= qc.get("min_r2_ok", 0.995) <= 1):
-        qc["min_r2_ok"] = 0.995
-    if not (0 <= qc.get("min_r2_warn", 0.990) <= 1):
-        qc["min_r2_warn"] = 0.990
 
     batch = settings.get("batch", {})
     if not isinstance(batch.get("base_input_dir"), str):
@@ -328,6 +323,22 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
         settings["active_analysis"] = DEFAULT_SETTINGS["active_analysis"]
 
     settings["default_output"] = general.get("default_output", "")
+
+    qc_min_r2_ok = qc.get("min_r2_ok", 0.995)
+    try:
+        qc["min_r2_ok"] = float(qc_min_r2_ok)
+    except (TypeError, ValueError):
+        qc["min_r2_ok"] = 0.995
+    if not (0 <= qc["min_r2_ok"] <= 1):
+        qc["min_r2_ok"] = 0.995
+
+    qc_min_r2_warn = qc.get("min_r2_warn", 0.990)
+    try:
+        qc["min_r2_warn"] = float(qc_min_r2_warn)
+    except (TypeError, ValueError):
+        qc["min_r2_warn"] = 0.990
+    if not (0 <= qc["min_r2_warn"] <= 1):
+        qc["min_r2_warn"] = 0.990
 
     analyses = settings.setdefault("analyses", {})
     for analysis_id, defaults in DEFAULT_SETTINGS.get("analyses", {}).items():

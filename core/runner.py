@@ -98,18 +98,12 @@ def cleanup_temp(p: Optional[Path]) -> None:
 
 
 def build_filtered_input(src: Path, needle: str) -> Optional[Path]:
-    """Create a temp directory with symlinks to .fsa files matching needle."""
-    tmpdir = Path(tempfile.mkdtemp(prefix="fraggler_filter_"))
-    count = 0
-    for p in sorted(src.glob("*.fsa")):
-        if needle.lower() in p.name.lower():
-            os.symlink(p, tmpdir / p.name)
-            count += 1
-    if count == 0:
-        shutil.rmtree(tmpdir, ignore_errors=True)
+    """Create a temp directory with staged .fsa files matching needle."""
+    matched = [p for p in sorted(src.glob("*.fsa")) if needle.lower() in p.name.lower()]
+    if not matched:
         return None
-    log(f"[INFO] Custom filter: {count} files matched '{needle}'.")
-    return tmpdir
+    log(f"[INFO] Custom filter: {len(matched)} files matched '{needle}'.")
+    return stage_files(matched)
 
 
 # ============================================================
@@ -242,6 +236,8 @@ def run_pipeline_job_collect(
     effective_mode = "all"
     if scope == "controls":
         effective_mode = "controls"
+    elif scope == "custom" and not needle.strip():
+        raise ValueError("scope=custom requires an assay filter.")
 
     effective_in = fsa_dir
     tmp_input = None
@@ -257,7 +253,7 @@ def run_pipeline_job_collect(
             if scope == "custom" and needle.strip():
                 selected_files = [p for p in files if needle.lower() in p.name.lower()]
                 if not selected_files:
-                    return []
+                    raise ValueError(f"No .fsa files matched '{needle}'.")
 
             from core.pipeline import run_pipeline
             if not chunk_files:
@@ -298,7 +294,7 @@ def run_pipeline_job_collect(
         if scope == "custom" and needle.strip():
             filtered = build_filtered_input(effective_in, needle)
             if not filtered:
-                return []
+                raise ValueError(f"No .fsa files matched '{needle}'.")
             if tmp_input:
                 cleanup_temp(tmp_input)
             tmp_input = filtered

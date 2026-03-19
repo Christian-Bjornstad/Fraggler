@@ -219,6 +219,12 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 .peak-table-container td {
     padding: 6px 12px;
 }
+.peak-table-container tr.selected-wt td {
+    background: #dbeafe !important;
+}
+.peak-table-container tr.selected-mut td {
+    background: #dcfce7 !important;
+}
 
 /* ── Comment Boxes ── */
 .comment-box-container {
@@ -472,8 +478,56 @@ function toggleComment(btn) {
 window.PeakManager = {
     plots: {},
     registerPlot: function(id, plotObj) { this.plots[id] = plotObj; },
-    getAllPeaks: function() { var all = {}; for (var id in this.plots) { all[id] = this.plots[id].getPeaks(); } return all; },
-    getInitialPeaksForPlot: function(id) { try { var data = JSON.parse(document.getElementById('peak-data').textContent); return data[id] || []; } catch(e) { return []; } },
+    _readPeakData: function() {
+        try {
+            var tag = document.getElementById('peak-data');
+            return tag ? JSON.parse(tag.textContent || '{}') : {};
+        } catch(e) {
+            return {};
+        }
+    },
+    _normalizePeakPayload: function(payload) {
+        if (Array.isArray(payload)) {
+            return { peaks: payload.slice(), flt3_manual_ratio_selection: null };
+        }
+        if (payload && typeof payload === 'object') {
+            return {
+                peaks: Array.isArray(payload.peaks) ? payload.peaks.slice() : [],
+                flt3_manual_ratio_selection: (payload.flt3_manual_ratio_selection && typeof payload.flt3_manual_ratio_selection === 'object')
+                    ? payload.flt3_manual_ratio_selection
+                    : null
+            };
+        }
+        return { peaks: [], flt3_manual_ratio_selection: null };
+    },
+    getAllPeaks: function() {
+        var all = {};
+        for (var id in this.plots) {
+            if (!Object.prototype.hasOwnProperty.call(this.plots, id)) continue;
+            all[id] = this.plots[id].getPeaks();
+        }
+        return all;
+    },
+    getAllPeakData: function() {
+        var all = {};
+        for (var id in this.plots) {
+            if (!Object.prototype.hasOwnProperty.call(this.plots, id)) continue;
+            var plot = this.plots[id];
+            if (plot && typeof plot.getPeakData === 'function') {
+                all[id] = plot.getPeakData();
+            } else if (plot && typeof plot.getPeaks === 'function') {
+                all[id] = plot.getPeaks();
+            }
+        }
+        return all;
+    },
+    getInitialPeakDataForPlot: function(id) {
+        var data = this._readPeakData();
+        return this._normalizePeakPayload(data[id]);
+    },
+    getInitialPeaksForPlot: function(id) {
+        return this.getInitialPeakDataForPlot(id).peaks;
+    },
     downloadUpdatedHtml: function() {
         // Force textareas back to innerHTML so they persist
         var tas = document.querySelectorAll('textarea.report-comment');
@@ -493,7 +547,7 @@ window.PeakManager = {
             }
         }
         
-        var allPeaks = this.getAllPeaks();
+        var allPeaks = this.getAllPeakData();
         var allPlotStates = (window.ReportPlotManager && window.ReportPlotManager.getAllStates)
             ? window.ReportPlotManager.getAllStates()
             : {};
@@ -549,14 +603,25 @@ def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
             peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
             wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
             mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("area", ascending=False) if not peaks.empty else pd.DataFrame()
-            wt_text = _peak_text(_dominant_peak(wt_rows))
-            mut_text = _peak_text(_dominant_peak(mut_rows))
+            if e.get("assay") in ("FLT3-ITD", "FLT3-D835") and e.get("ratio_mode") != "manual":
+                wt_text = "<span class='small'>Manuell WT</span>"
+                mut_text = "<span class='small'>Velg mutantpeaks manuelt</span>"
+            else:
+                wt_text = _flt3_manual_wt_text(e, peaks) or _peak_text(_dominant_peak(wt_rows))
+                mut_text = _flt3_manual_mutant_text(e, peaks) or _peak_text(_dominant_peak(mut_rows))
             ratio = float(e.get("ratio", 0.0))
             ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
+            if e.get("ratio_mode") == "manual":
+                ratio_str += " <span class='status-badge manual'>Manual</span>"
+            fname = escape(e['fsa'].file_name)
+            fname_safe = e['fsa'].file_name.replace('.', '_').replace(' ', '_')
             html_lines.append(
-                f"<tr><td>{escape(e['fsa'].file_name)}</td><td>{escape(e['assay'])}</td>"
+                f"<tr data-filename='{fname}'>"
+                f"<td>{fname}</td><td>{escape(e['assay'])}</td>"
                 f"<td>{escape(_format_flt3_treatment(e))}</td>"
-                f"<td>{wt_text}</td><td>{mut_text}</td><td>{ratio_str}</td>"
+                f"<td><span id='overview_wt_{fname_safe}'>{wt_text}</span></td>"
+                f"<td><span id='overview_mut_{fname_safe}'>{mut_text}</span></td>"
+                f"<td><span id='overview_ratio_{fname_safe}'>{ratio_str}</span></td>"
                 f"<td>{status_badge}</td><td>{r2_str}</td></tr>"
             )
     else:
@@ -697,6 +762,81 @@ def _peak_text(row: pd.Series | None, area_key: str = "area") -> str:
         return "&mdash;"
     return f"{float(row.basepairs):.1f} bp <span class='small'>({float(row.get(area_key, 0.0)):,.0f})</span>"
 
+
+def _flt3_channel_label(channel: str | None) -> str:
+    if channel == "DATA1":
+        return "blue"
+    if channel == "DATA2":
+        return "green"
+    if channel == "DATA3":
+        return "orange"
+    return "auto"
+
+
+def _flt3_lookup_peak(peaks: pd.DataFrame, peak_id: str | None) -> pd.Series | None:
+    if peaks.empty or not peak_id or "peak_id" not in peaks.columns:
+        return None
+    match = peaks[peaks["peak_id"].astype(str) == str(peak_id)]
+    if match.empty:
+        return None
+    return match.iloc[0]
+
+
+def _flt3_selected_area(row: pd.Series | None, channel: str | None) -> float:
+    if row is None:
+        return 0.0
+    if channel in {"DATA1", "DATA2"}:
+        return float(row.get(f"area_{channel}", 0.0) or 0.0)
+    return float(row.get("area", 0.0) or 0.0)
+
+
+def _flt3_manual_wt_text(entry: dict, peaks: pd.DataFrame) -> str | None:
+    peak_id = entry.get("selected_wt_peak_id")
+    channel = entry.get("selected_wt_channel")
+    row = _flt3_lookup_peak(peaks, peak_id)
+    if row is None:
+        return None
+    area = _flt3_selected_area(row, channel)
+    return f"{float(row.basepairs):.1f} bp <span class='small'>({_flt3_channel_label(channel)}; {area:,.0f})</span>"
+
+
+def _flt3_manual_mutant_text(entry: dict, peaks: pd.DataFrame) -> str | None:
+    peak_ids = entry.get("selected_mutant_peak_ids") or []
+    channels = entry.get("selected_mutant_channels") or []
+    parts = []
+    for idx, peak_id in enumerate(peak_ids):
+        row = _flt3_lookup_peak(peaks, peak_id)
+        if row is None:
+            continue
+        channel = channels[idx] if idx < len(channels) else None
+        area = _flt3_selected_area(row, channel)
+        parts.append(f"{float(row.basepairs):.1f} bp <span class='small'>({_flt3_channel_label(channel)}; {area:,.0f})</span>")
+    return "<br>".join(parts) if parts else None
+
+
+def _flt3_manual_channel_totals(entry: dict, peaks: pd.DataFrame) -> tuple[float, float, float, float]:
+    wt_blue = wt_green = mut_blue = mut_green = 0.0
+    wt_row = _flt3_lookup_peak(peaks, entry.get("selected_wt_peak_id"))
+    wt_channel = entry.get("selected_wt_channel")
+    if wt_channel == "DATA1":
+        wt_blue = _flt3_selected_area(wt_row, "DATA1")
+    elif wt_channel == "DATA2":
+        wt_green = _flt3_selected_area(wt_row, "DATA2")
+
+    peak_ids = entry.get("selected_mutant_peak_ids") or []
+    channels = entry.get("selected_mutant_channels") or []
+    for idx, peak_id in enumerate(peak_ids):
+        row = _flt3_lookup_peak(peaks, peak_id)
+        if row is None:
+            continue
+        channel = channels[idx] if idx < len(channels) else None
+        if channel == "DATA1":
+            mut_blue += _flt3_selected_area(row, "DATA1")
+        elif channel == "DATA2":
+            mut_green += _flt3_selected_area(row, "DATA2")
+    return wt_blue, wt_green, mut_blue, mut_green
+
+
 def _dominant_peak(rows: pd.DataFrame, area_key: str = "area") -> pd.Series | None:
     if rows.empty:
         return None
@@ -776,32 +916,40 @@ def _build_flt3_summary_table(e: dict) -> str:
     mut_main = _dominant_peak(mut_rows)
 
     if assay == "FLT3-ITD":
+        if e.get("ratio_mode") != "manual":
+            return ""
         wt_blue = wt_green = mut_blue = mut_green = 0.0
         reportable_mut_rows = peaks[0:0].copy() if peaks.empty else peaks.iloc[0:0].copy()
-        if wt_main is not None:
-            r = wt_main
-            wt_blue = r.get("area_DATA1", 0.0)
-            wt_green = r.get("area_DATA2", 0.0)
-        if not mut_rows.empty:
-            mut_blue = mut_rows.get("area_DATA1", pd.Series(0.0)).sum()
-            mut_green = mut_rows.get("area_DATA2", pd.Series(0.0)).sum()
-            reportable_mut_rows = _reportable_itd_mut_rows_for_report(e, peaks, wt_row, mut_rows)
+        wt_text = _flt3_manual_wt_text(e, peaks) or "<span class='small'>WT valgt manuelt</span>"
+        mut_text = _flt3_manual_mutant_text(e, peaks) or "Ingen mutant valgt"
+        wt_blue, wt_green, mut_blue, mut_green = _flt3_manual_channel_totals(e, peaks)
+        reportable_mut_rows = peaks.iloc[0:0].copy() if peaks is not None else pd.DataFrame()
+        if e.get("selected_mutant_peak_ids"):
+            reportable_mut_rows = pd.DataFrame(
+                [
+                    _flt3_lookup_peak(peaks, peak_id)
+                    for peak_id in e.get("selected_mutant_peak_ids") or []
+                    if _flt3_lookup_peak(peaks, peak_id) is not None
+                ]
+            )
         ratio_num = float(e.get("ratio_numerator_area", 0.0))
         ratio_den = float(e.get("ratio_denominator_area", 0.0))
         mut_prop = (ratio_num / (ratio_num + ratio_den)) if (ratio_num + ratio_den) > 0 else 0.0
         label = "Positiv" if ratio >= positive_ratio else "Negativ"
         if ratio < positive_ratio and not reportable_mut_rows.empty:
             label = "Negativ, dokumentert"
-        concordance = _itd_concordance_text(wt_main, reportable_mut_rows)
+        concordance_row = _flt3_lookup_peak(peaks, e.get("selected_wt_peak_id")) if e.get("ratio_mode") == "manual" else wt_main
+        concordance = _itd_concordance_text(concordance_row, reportable_mut_rows)
         validation_text = f"<strong>{label}</strong>"
+        validation_text += "<br><span class='status-badge manual'>Manual ratio</span>"
         if concordance:
             validation_text += f"<br><span class='small'>{concordance}</span>"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>WT-topp</th><th>Muterte topper</th><th>Bla kanal</th><th>Gronn kanal</th><th>Ratioer</th><th>Validering</th></tr>"
-            f"<tr><td>{_peak_text(wt_main)}</td>"
-            f"<td>{_format_peak_list(mut_rows, max_peaks=6)}</td>"
+            f"<tr><td>{wt_text}</td>"
+            f"<td>{mut_text}</td>"
             f"<td>WT: {wt_blue:,.0f}<br>Mut: {mut_blue:,.0f}</td>"
             f"<td>WT: {wt_green:,.0f}<br>Mut: {mut_green:,.0f}</td>"
             f"<td>ITD-ratio: <strong>{ratio_str}</strong><br>"
@@ -811,22 +959,38 @@ def _build_flt3_summary_table(e: dict) -> str:
         )
 
     if assay == "FLT3-D835":
-        digest_status, digest_row = _d835_digest_status(peaks, wt_main, mut_main)
-        label = "Positiv" if ratio >= positive_ratio else "Negativ" if mut_main is None else "Under positiv grense"
+        if e.get("ratio_mode") != "manual":
+            return ""
+
+        selected_mut_rows = peaks.iloc[0:0].copy() if peaks is not None else pd.DataFrame()
+        if e.get("selected_mutant_peak_ids"):
+            selected_mut_rows = pd.DataFrame(
+                [
+                    _flt3_lookup_peak(peaks, peak_id)
+                    for peak_id in e.get("selected_mutant_peak_ids") or []
+                    if _flt3_lookup_peak(peaks, peak_id) is not None
+                ]
+            )
+        wt_selected_row = _flt3_lookup_peak(peaks, e.get("selected_wt_peak_id"))
+        digest_status, digest_row = _d835_digest_status(peaks, wt_selected_row, _dominant_peak(selected_mut_rows))
+        label = "Positiv" if ratio >= positive_ratio else "Negativ" if selected_mut_rows.empty else "Under positiv grense"
         digest_text = "&mdash;"
         if digest_row is not None:
             digest_text = _peak_text(digest_row)
             if digest_status:
                 digest_text += f"<br><span class='small'>{digest_status}</span>"
+        wt_text = _flt3_manual_wt_text(e, peaks) or "<span class='small'>WT valgt manuelt</span>"
+        mut_text = _flt3_manual_mutant_text(e, peaks) or "Ingen mutant valgt"
+        validation_text = f"<strong>{label}</strong><br><span class='status-badge manual'>Manual ratio</span>"
         return (
             "<div style='margin-top:10px; margin-bottom:24px;'>"
             "<table style='width:100%; border:1px solid #e2e8f0; table-layout:fixed;'>"
             "<tr><th>WT-topp</th><th>Mutert topp</th><th>150 bp kontroll</th><th>TKD-ratio</th><th>Validering</th></tr>"
-            f"<tr><td>{_peak_text(wt_main)}</td>"
-            f"<td>{_peak_text(mut_main)}<br><span class='small'>{_format_peak_list(mut_rows, max_peaks=4)}</span></td>"
+            f"<tr><td>{wt_text}</td>"
+            f"<td>{mut_text}</td>"
             f"<td>{digest_text}</td>"
             f"<td><strong>{ratio_str}</strong><br><span class='small'>Mut/WT: {float(e.get('ratio_numerator_area', 0.0)):,.0f} / {float(e.get('ratio_denominator_area', 0.0)):,.0f}<br>Positiv grense > {positive_ratio:.2f}</span></td>"
-            f"<td><strong>{label}</strong></td></tr></table></div>"
+            f"<td>{validation_text}</td></tr></table></div>"
         )
 
     if assay == "NPM1":

@@ -160,6 +160,26 @@ class TestUiSmallCleanup(unittest.TestCase):
             self.assertIsInstance(page, QScrollArea)
             self.assertTrue(page.widgetResizable())
 
+    def test_main_window_activates_analysis_through_shared_helper(self):
+        with unittest.mock.patch("gui_qt.main_window.save_settings") as mock_save:
+            APP_SETTINGS["batch"] = {"output_base": "/tmp/original-output"}
+            APP_SETTINGS["pipeline"] = {
+                "mode": "all",
+                "assay_filter_substring": "",
+                "ladder": "GS500ROX",
+            }
+            window = MainWindow()
+
+            window.on_group_clicked(window.group_flt3)
+            self.assertEqual(APP_SETTINGS["active_analysis"], "flt3")
+            self.assertEqual(mock_save.call_count, 1)
+
+            window.on_sub_tab_clicked("general", 1)
+            self.assertEqual(APP_SETTINGS["active_analysis"], "general")
+            self.assertEqual(mock_save.call_count, 2)
+            self.assertEqual(APP_SETTINGS["batch"]["output_base"], "/tmp/general-output")
+            self.assertEqual(APP_SETTINGS["pipeline"]["ladder"], "ROX400HD")
+
 
 if __name__ == "__main__":
     unittest.main()

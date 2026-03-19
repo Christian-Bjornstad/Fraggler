@@ -1,0 +1,12 @@
+File,ControlGroup,Assay,Well,SelectedInjection,SelectionReason,InjectionTime,WT_Area,Mutant_Area,Ratio,Status,Details
+IVS-0000_D8365_kutting__310725_D05_H9C0ZIZJ.fsa,reactive_control,FLT3-D835,D05,3s,Preferred 3s injection selected,3,189.0,369.0,1.9524,FAIL,WT area below threshold (189 < 1000)
+IVS-0000_ITD_1-10__310725_D02_H9C0ZIZJ.fsa,reactive_control,FLT3-ITD,D02,3s,Preferred 1s unavailable; selected 3s,3,5041.92,267950.82,53.1446,FAIL,WT area below threshold (5042 < 10000)
+IVS-0000_ITD_1-25__310725_D03_H9C0ZIZJ.fsa,reactive_control,FLT3-ITD,D03,3s,Preferred 1s unavailable; selected 3s,3,6234.4,1353.01,0.217,FAIL,WT area below threshold (6234 < 10000)
+IVS-0000_RATIO__310725_D04_H9C0ZIZJ.fsa,reactive_control,FLT3-ITD,D04,3s,Preferred 1s unavailable; selected 3s,3,0.0,0.0,0.0,FAIL,No WT peak detected
+IVS-0000_ITD_ufort__310725_D01_H9C0ZIZJ.fsa,reactive_control,FLT3-ITD,D01,3s,Preferred 3s injection selected,3,11076.77,442571.36,39.9549,PASS,
+IVS-P001_D8365_kutting__310725_F05_H9C0ZIZJ.fsa,positive_control,FLT3-D835,F05,3s,No candidate passed QC; kept 3s (ladder_qc_failed),3,0.0,0.0,0.0,FAIL,No mutant/ITD peak detected
+NTC_D8365_kutting__310725_E05_H9C0ZIZJ.fsa,negative_control,FLT3-D835,E05,3s,Preferred 3s injection selected,3,820.03,0.0,0.0,PASS,
+NTC_ITD_1-10__310725_E02_H9C0ZIZJ.fsa,negative_control,FLT3-ITD,E02,3s,Preferred 1s unavailable; selected 3s,3,4387.5,25843.92,5.8904,FAIL,"Unexpected mutant peaks found: [335.43, 340.12, 355.38, 362.52, 406.46]"
+NTC_ITD_1-25__310725_E03_H9C0ZIZJ.fsa,negative_control,FLT3-ITD,E03,3s,Preferred 1s unavailable; selected 3s,3,8044.04,5894.43,0.7328,FAIL,"Unexpected mutant peaks found: [340.81, 345.37]"
+NTC_RATIO__310725_E04_H9C0ZIZJ.fsa,negative_control,FLT3-ITD,E04,3s,Preferred 1s unavailable; selected 3s,3,3001.07,12291.11,4.0956,FAIL,"Unexpected mutant peaks found: [338.65, 345.73, 351.28, 364.71, 370.32]"
+NTC_ITD_ufort__310725_E01_H9C0ZIZJ.fsa,negative_control,FLT3-ITD,E01,3s,No candidate passed QC; kept 3s (ladder_qc_failed),3,19662.34,6019.13,0.3061,FAIL,"Unexpected mutant peaks found: [338.91, 343.19, 433.06]"

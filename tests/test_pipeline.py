@@ -151,6 +151,66 @@ class TestPipeline(unittest.TestCase):
         self.assertEqual(staged_dirs[0][1], files)
         self.assertEqual([e["fsa_dir"] for e in entries], [staged_dirs[0][0]])
 
+    def test_run_pipeline_job_collect_rejects_blank_custom_filter(self):
+        from core.runner import run_pipeline_job_collect
+
+        with self.assertRaises(ValueError):
+            run_pipeline_job_collect(
+                fsa_dir=Path("/tmp/in"),
+                base_outdir=Path("/tmp/out"),
+                out_folder_name="ASSAY_REPORTS",
+                scope="custom",
+                needle="",
+                files=[Path("/tmp/sample_1.fsa")],
+            )
+
+    def test_run_pipeline_job_collect_rejects_custom_filter_with_no_matching_explicit_files(self):
+        from core.runner import run_pipeline_job_collect
+
+        with self.assertRaises(ValueError):
+            run_pipeline_job_collect(
+                fsa_dir=None,
+                base_outdir=Path("/tmp/out"),
+                out_folder_name="ASSAY_REPORTS",
+                scope="custom",
+                needle="target",
+                files=[Path("/tmp/sample_1.fsa")],
+            )
+
+    def test_run_pipeline_job_collect_rejects_custom_filter_with_no_matching_folder_files(self):
+        from core.runner import run_pipeline_job_collect
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "sample_1.fsa").write_text("", encoding="utf-8")
+
+            with self.assertRaises(ValueError):
+                run_pipeline_job_collect(
+                    fsa_dir=base,
+                    base_outdir=Path("/tmp/out"),
+                    out_folder_name="ASSAY_REPORTS",
+                    scope="custom",
+                    needle="target",
+                )
+
+    def test_build_filtered_input_uses_shared_staging_helper(self):
+        from core.runner import build_filtered_input
+
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            matched = base / "sample_a.fsa"
+            other = base / "sample_b.txt"
+            matched.write_text("", encoding="utf-8")
+            other.write_text("", encoding="utf-8")
+
+            staged = Path("/tmp/staged-filtered")
+            with patch("core.runner.stage_files", return_value=staged) as mock_stage:
+                result = build_filtered_input(base, "sample")
+
+        self.assertEqual(result, staged)
+        mock_stage.assert_called_once()
+        self.assertEqual([p.name for p in mock_stage.call_args.args[0]], ["sample_a.fsa"])
+
     def test_clonality_report_generation_respects_controls_mode(self):
         from core.analyses.clonality import pipeline as clonality_pipeline
 
@@ -245,6 +305,7 @@ class TestPipeline(unittest.TestCase):
         itd_peaks = pd.DataFrame(
             [
                 {
+                    "peak_id": "pk_wt",
                     "basepairs": 329.8,
                     "peaks": 1200.0,
                     "area": 5000.0,
@@ -253,6 +314,7 @@ class TestPipeline(unittest.TestCase):
                     "area_DATA2": 1800.0,
                 },
                 {
+                    "peak_id": "pk_mut",
                     "basepairs": 360.2,
                     "peaks": 650.0,
                     "area": 2100.0,
@@ -279,14 +341,19 @@ class TestPipeline(unittest.TestCase):
                 "ratio": 0.32,
                 "ratio_numerator_area": 2100.0,
                 "ratio_denominator_area": 5000.0,
+                "ratio_mode": "manual",
                 "primary_peak_channel": "DATA1",
                 "peaks_by_channel": {"DATA1": itd_peaks},
+                "selected_wt_peak_id": "pk_wt",
+                "selected_wt_channel": "DATA1",
+                "selected_mutant_peak_ids": ["pk_mut"],
+                "selected_mutant_channels": ["DATA2"],
             }
         )
 
-        self.assertIn("Validering", d835_html)
-        self.assertIn("150 bp kontroll", d835_html)
-        self.assertIn("TKD-ratio", d835_html)
+        # D835 without ratio_mode="manual" now returns empty (no placeholder table)
+        self.assertEqual(d835_html, "")
+        # ITD with ratio_mode="manual" still renders the full validation table
         self.assertIn("Validering", itd_html)
         self.assertIn("Mut/(Mut+WT)", itd_html)
         self.assertIn("WT-topp", itd_html)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import uuid
 import numpy as np
+import pandas as pd
 import plotly.graph_objects as go
 from pathlib import Path
 from html import escape
@@ -27,6 +28,87 @@ from core.analysis import (
 from core.plotly_offline import local_plotly_tag as _local_plotly_tag
 
 FLT3_NEGATIVE_CONTROL_YMIN = 250.0
+
+
+def _flt3_peak_id(row: pd.Series, index: int) -> str:
+    """Build a stable peak id for persisted FLT3 manual selections."""
+    bp = float(row.get("basepairs", np.nan))
+    height = float(row.get("peaks", np.nan))
+    area = float(row.get("area", np.nan))
+    bp_key = int(round(bp * 10)) if np.isfinite(bp) else 0
+    height_key = int(round(height)) if np.isfinite(height) else 0
+    area_key = int(round(area)) if np.isfinite(area) else 0
+    return f"flt3_pk_{bp_key}_{height_key}_{area_key}_{index}"
+
+
+def _flt3_candidate_peaks_for_entry(entry: dict) -> list[dict]:
+    """Return FLT3 candidate peaks with channel metadata for the HTML editor."""
+    peaks_by_channel = entry.get("peaks_by_channel", {})
+    primary_channel = entry.get("primary_peak_channel")
+    peaks = peaks_by_channel.get(primary_channel, pd.DataFrame())
+    if peaks.empty:
+        return []
+
+    candidates: list[dict] = []
+    for idx, (_, row) in enumerate(peaks.sort_values(["basepairs", "peaks"], ascending=[True, False]).iterrows()):
+        bp = float(row.get("basepairs", np.nan))
+        height = float(row.get("peaks", np.nan))
+        area = float(row.get("area", np.nan))
+        blue_area = float(row.get("area_DATA1", np.nan))
+        green_area = float(row.get("area_DATA2", np.nan))
+        dominant_channel = "DATA1" if np.nan_to_num(blue_area, nan=-1.0) >= np.nan_to_num(green_area, nan=-1.0) else "DATA2"
+        if np.isfinite(blue_area) and np.isfinite(green_area) and abs(blue_area - green_area) < 1e-6:
+            dominant_channel = "BOTH"
+        peak_id = str(row.get("peak_id") or _flt3_peak_id(row, idx))
+        candidates.append(
+            {
+                "peak_id": peak_id,
+                "x": bp,
+                "y": height,
+                "area": area,
+                "active": bool(row.get("keep", True)),
+                "label": str(row.get("label", "")),
+                "blue_area": blue_area,
+                "green_area": green_area,
+                "dominant_channel": dominant_channel,
+            }
+        )
+    return candidates
+
+
+def _flt3_preferred_channel(peak: dict, role: str = "mutant") -> str:
+    blue_area = float(peak.get("blue_area", 0.0) or 0.0)
+    green_area = float(peak.get("green_area", 0.0) or 0.0)
+    if role == "wt":
+        return "DATA1" if blue_area >= green_area else "DATA2"
+    return "DATA2" if green_area >= blue_area else "DATA1"
+
+
+def _flt3_manual_selection_defaults(candidate_peaks: list[dict]) -> dict:
+    """Build an auto-prefilled FLT3 manual selection payload."""
+    wt_candidates = [
+        peak for peak in candidate_peaks
+        if str(peak.get("label", "")) == "WT" and peak.get("active", True)
+    ]
+    wt_candidates.sort(key=lambda peak: (float(peak.get("area", 0.0)) * -1.0, float(peak.get("y", 0.0)) * -1.0, float(peak.get("x", 0.0))))
+    mutant_ids = [
+        {
+            "peak_id": str(peak.get("peak_id")),
+            "channel": _flt3_preferred_channel(peak, role="mutant"),
+        }
+        for peak in candidate_peaks
+        if str(peak.get("label", "")) in {"MUT", "ITD"} and peak.get("active", True)
+    ]
+    mutant_ids = [item for item in mutant_ids if item.get("peak_id")]
+    return {
+        "enabled": False,
+        "version": 1,
+        "wt": {
+            "peak_id": wt_candidates[0]["peak_id"] if wt_candidates else None,
+            "channel": _flt3_preferred_channel(wt_candidates[0], role="wt") if wt_candidates else None,
+        },
+        "mutants": mutant_ids,
+    }
 
 
 def compute_group_ymax(entries: list[dict]) -> float:
@@ -226,6 +308,7 @@ def _prepare_plot_data(entry: dict) -> dict | None:
         "peaks_by_channel": entry["peaks_by_channel"],
         "wt_bp": entry.get("wt_bp"),
         "mut_bp": entry.get("mut_bp"),
+        "file_name": fsa.file_name,
         "sample_id": f"{fsa.file_name}_{primary_ch}"
     }
 
@@ -272,7 +355,8 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
         ymax = float(forced_ymax)
     else:
         multi_channel_assays = {"TCRgA", "TCRgB", "TCRg", "TCRγA", "TCRγB", "TCRγ", "TCRbA", "TCRbB", "TCRbC", "TCRβA", "TCRβB", "TCRβC"}
-        base = ymax_auto_all if assay_name in multi_channel_assays else (ymax_auto_primary or ymax_auto_all)
+        use_all_channel_ymax = assay_name in multi_channel_assays or len(channels_to_plot) > 1
+        base = ymax_auto_all if use_all_channel_ymax else (ymax_auto_primary or ymax_auto_all)
         ymax = base if base > 0 else 1000.0
 
     if assay_name in {"FLT3-ITD", "FLT3-D835", "NPM1"} and data.get("group") == "negative_control":
@@ -358,8 +442,85 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
     primary_trace_index = data["channels_to_plot"].index(data["primary_ch"]) if data["primary_ch"] in data["channels_to_plot"] else 0
 
     div_id = f"peakplot_{data['sample_id'].replace('.','_')}_{uuid.uuid4().hex}"
+    entry["_report_plot_id"] = div_id
     fig_json = json.dumps(fig.to_plotly_json())
     initial_peaks_json = json.dumps(initial_peaks)
+    manual_ratio_assays = {"FLT3-ITD", "FLT3-D835"}
+    is_manual_ratio_assay = data["assay_name"] in manual_ratio_assays
+    manual_trace_channels = [ch for ch in data["channels_to_plot"] if str(ch).startswith("DATA")]
+    flt3_initial_selection = entry.get("manual_ratio_selection") if is_manual_ratio_assay else {}
+    flt3_manual_selection_json = json.dumps(
+        flt3_initial_selection or {"enabled": False, "version": 2, "mutant_peak_ids": [], "wt_peak_ids": []}
+    )
+    manual_trace_channels_json = json.dumps(manual_trace_channels)
+
+    manual_panel_html = ""
+    if is_manual_ratio_assay:
+        channel_button_html = ""
+        if len(manual_trace_channels) > 1:
+            button_parts = [
+                '<button type="button" class="comment-toggle-btn" data-channel-choice="AUTO" '
+                'style="width:auto; padding:6px 10px; border:1px solid #cbd5e1; border-radius:999px;">Auto</button>'
+            ]
+            for channel in manual_trace_channels:
+                label = "Blue" if channel == "DATA1" else "Green" if channel == "DATA2" else channel
+                button_parts.append(
+                    f'<button type="button" class="comment-toggle-btn" data-channel-choice="{escape(channel)}" '
+                    'style="width:auto; padding:6px 10px; border:1px solid #cbd5e1; border-radius:999px;">'
+                    f'{escape(label)}</button>'
+                )
+            channel_button_html = (
+                '<div id="{div_id}_flt3_channel_picker" style="display:flex; gap:0.4rem; flex-wrap:wrap; margin-top:0.4rem;">'
+                '<span class="small" style="align-self:center;">Neste klikk:</span>'
+                + "".join(button_parts)
+                + "</div>"
+            )
+
+        if data["assay_name"] == "FLT3-ITD":
+            table_head_html = (
+                "<tr>"
+                "<th>Kanal</th><th>WT</th><th>Mut</th><th>bp</th><th>RFU</th>"
+                "<th>Blue area</th><th>Green area</th><th>Status</th><th>Fjern</th>"
+                "</tr>"
+            )
+            helper_text = "Legg til peaks manuelt. Velg WT med radio-knappen, velg muterte peaks med avkrysning."
+        else:
+            table_head_html = (
+                "<tr>"
+                "<th>Kanal</th><th>WT</th><th>Mut</th><th>bp</th><th>RFU</th>"
+                "<th>Area</th><th>Status</th><th>Fjern</th>"
+                "</tr>"
+            )
+            helper_text = "Legg til peaks manuelt. Velg WT med radio-knappen, velg muterte peaks med avkrysning."
+
+        manual_panel_html = f"""
+<div id="{div_id}_flt3_panel" class="peak-table-container" style="display:none; margin-top:0.75rem;">
+    <div style="display:flex; align-items:center; gap:0.5rem; flex-wrap:wrap; margin-bottom:0.5rem;">
+        <span id="{div_id}_flt3_mode_badge" class="status-badge warning">Manuell ratio</span>
+        <span id="{div_id}_flt3_mode_text" class="small">{helper_text}</span>
+        <button type="button" id="{div_id}_flt3_reset" class="comment-toggle-btn" style="width:auto; padding:6px 10px;">Nullstill valg</button>
+    </div>
+    {channel_button_html.format(div_id=div_id) if channel_button_html else ""}
+    <div id="{div_id}_flt3_ratio_cards" style="display:grid; grid-template-columns:repeat(auto-fit, minmax(130px, 1fr)); gap:0.5rem; margin:0.75rem 0;">
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:0.6rem 0.75rem;">
+            <div class="small">WT area</div>
+            <div id="{div_id}_flt3_denominator" style="font-weight:700;">&mdash;</div>
+        </div>
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:0.6rem 0.75rem;">
+            <div class="small">Mut area</div>
+            <div id="{div_id}_flt3_numerator" style="font-weight:700;">&mdash;</div>
+        </div>
+        <div style="background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:0.6rem 0.75rem;">
+            <div class="small">Ratio</div>
+            <div id="{div_id}_flt3_ratio_value" style="font-weight:700;">&mdash;</div>
+        </div>
+    </div>
+    <table id="{div_id}_flt3_table">
+        <thead>{table_head_html}</thead>
+        <tbody></tbody>
+    </table>
+</div>
+"""
 
     html_fragment = f"""
 <div id="{div_id}" class="peak-editor-block"></div>
@@ -371,10 +532,12 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         <tbody></tbody>
     </table>
 </div>
+{manual_panel_html}
 <script type="text/javascript">
 (function() {{
   var fig = {fig_json};
   var initialPeaks = {initial_peaks_json};
+  var flt3InitialSelection = {flt3_manual_selection_json};
   var divId = "{div_id}";
   var gd = document.getElementById(divId);
   if (!gd) return;
@@ -383,8 +546,14 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var peaksTraceIndex = {final_peaks_trace_index};
   var primaryTraceIndex = {primary_trace_index};
   var assayName = {json.dumps(data["assay_name"])};
+  var isFlt3ItD = assayName === "FLT3-ITD";
+  var isManualRatioAssay = assayName === "FLT3-ITD" || assayName === "FLT3-D835";
+  var manualTraceChannels = {manual_trace_channels_json};
+  var manualClickChannel = manualTraceChannels.length > 1 ? "AUTO" : (manualTraceChannels[0] || "AUTO");
   var expectedWtBp = {json.dumps(data.get("wt_bp"))};
   var expectedMutBp = {json.dumps(data.get("mut_bp"))};
+  var plotFileName = {json.dumps(data.get("file_name", ""))};
+  var overviewIdPrefix = "overview_" + plotFileName.replace(/\./g, "_").replace(/ /g, "_");
   var initialPlotState = (window.ReportPlotManager && window.ReportPlotManager.getInitialStateForPlot)
     ? window.ReportPlotManager.getInitialStateForPlot(divId)
     : null;
@@ -473,44 +642,527 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       return total;
     }}
 
-    function normalizePeak(p) {{
-      var x = Number(p && p.x);
-      var y = Number(p && p.y);
-      var area = Number(p && p.area);
+    function channelLabel(channel) {{
+      if (channel === "DATA1") return "blue";
+      if (channel === "DATA2") return "green";
+      if (channel === "DATA3") return "orange";
+      return "auto";
+    }}
+
+    function channelAccent(channel) {{
+      if (channel === "DATA1") return "#2563eb";
+      if (channel === "DATA2") return "#16a34a";
+      if (channel === "DATA3") return "#ea580c";
+      return "#dc2626";
+    }}
+
+    function findPeakById(peakId) {{
+      for (var i = 0; i < peaks.length; i++) {{
+        if (peaks[i].peak_id === peakId) return peaks[i];
+      }}
+      return null;
+    }}
+
+    function normalizeSourceChannel(raw, fallbackCurveNumber) {{
+      var channel = raw ? String(raw).toUpperCase() : "";
+      if (channel === "DATA1" || channel === "DATA2" || channel === "DATA3") return channel;
+      if (Number.isFinite(fallbackCurveNumber)) {{
+        var traceName = String((g.data[fallbackCurveNumber] && g.data[fallbackCurveNumber].name) || "");
+        if (traceName.indexOf("DATA1") === 0) return "DATA1";
+        if (traceName.indexOf("DATA2") === 0) return "DATA2";
+        if (traceName.indexOf("DATA3") === 0) return "DATA3";
+      }}
+      return null;
+    }}
+
+    function traceIndexForChannel(channel) {{
+      for (var i = 0; i < g.data.length; i++) {{
+        var traceName = String((g.data[i] && g.data[i].name) || "");
+        if (traceName.indexOf(channel) === 0) return i;
+      }}
+      return primaryTraceIndex;
+    }}
+
+    function computePeakAreaForChannel(xCenter, channel) {{
+      if (!channel) return 0.0;
+      return computePeakArea(xCenter, traceIndexForChannel(channel));
+    }}
+
+    function nearestTracePointForChannel(xClick, channel) {{
+      var traceIndex = traceIndexForChannel(channel);
+      var traceData = traceXYCache[traceIndex] || {{ x: [], y: [] }};
+      var traceX = Array.isArray(traceData.x) ? traceData.x : [];
+      var traceY = Array.isArray(traceData.y) ? traceData.y : [];
+      if (!traceX.length) return null;
+      var bestIdx = -1;
+      var bestDist = Infinity;
+      for (var i = 0; i < traceX.length; i++) {{
+        var x = Number(traceX[i]);
+        var y = Number(traceY[i]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+        var dist = Math.abs(x - xClick);
+        if (dist < bestDist) {{
+          bestDist = dist;
+          bestIdx = i;
+        }}
+      }}
+      if (bestIdx < 0) return null;
       return {{
-        x: x,
-        y: y,
-        area: Number.isFinite(area) ? area : computePeakArea(x, primaryTraceIndex),
-        active: !(p && p.active === false)
+        x: Number(traceX[bestIdx]),
+        y: Number(traceY[bestIdx]),
+        curveNumber: traceIndex
       }};
     }}
 
+    function makePeakId(p, idx) {{
+      if (p && p.peak_id) return String(p.peak_id);
+      var xKey = Number.isFinite(Number(p && p.x)) ? Math.round(Number(p.x) * 10) : 0;
+      var yKey = Number.isFinite(Number(p && p.y)) ? Math.round(Number(p.y)) : 0;
+      var areaKey = Number.isFinite(Number(p && p.area)) ? Math.round(Number(p.area)) : 0;
+      var channelKey = normalizeSourceChannel(p && p.source_channel, Number(p && p.curve_number)) || "AUTO";
+      return "flt3_pk_" + xKey + "_" + yKey + "_" + areaKey + "_" + channelKey + "_" + idx;
+    }}
+
+    function peakIdFor(peak, idx) {{
+      if (!peak) return "";
+      if (!peak.peak_id) {{
+        peak.peak_id = makePeakId(peak, idx);
+      }}
+      return String(peak.peak_id);
+    }}
+
+    function ensurePeakIds() {{
+      for (var i = 0; i < peaks.length; i++) {{
+        peakIdFor(peaks[i], i);
+      }}
+    }}
+
+    function normalizePeak(p, idx) {{
+      var x = Number(p && p.x);
+      var y = Number(p && p.y);
+      var sourceChannel = normalizeSourceChannel(p && p.source_channel, Number(p && p.curve_number));
+      if (!sourceChannel && manualTraceChannels.length === 1) {{
+        sourceChannel = manualTraceChannels[0];
+      }}
+      var blueArea = Number(p && p.blue_area);
+      var greenArea = Number(p && p.green_area);
+      if (!Number.isFinite(blueArea)) blueArea = computePeakAreaForChannel(x, "DATA1");
+      if (!Number.isFinite(greenArea)) greenArea = computePeakAreaForChannel(x, "DATA2");
+      var area = Number(p && p.area);
+      if (!Number.isFinite(area)) {{
+        if (sourceChannel === "DATA2") area = greenArea;
+        else if (sourceChannel === "DATA1") area = blueArea;
+        else area = computePeakAreaForChannel(x, sourceChannel || manualTraceChannels[0] || null);
+      }}
+      return {{
+        x: x,
+        y: y,
+        area: area,
+        active: !(p && p.active === false),
+        peak_id: makePeakId(p, idx),
+        blue_area: blueArea,
+        green_area: greenArea,
+        source_channel: sourceChannel,
+        curve_number: Number(p && p.curve_number)
+      }};
+    }}
+
+    function cloneSelection(selection) {{
+      var out = {{
+        enabled: false,
+        version: 2,
+        mutant_peak_ids: [],
+        wt_peak_ids: []
+      }};
+      if (selection && typeof selection === "object") {{
+        out.enabled = !!selection.enabled;
+        out.version = Number.isFinite(Number(selection.version)) ? Number(selection.version) : 2;
+        if (Array.isArray(selection.mutant_peak_ids)) {{
+          out.mutant_peak_ids = selection.mutant_peak_ids.filter(function(v) {{ return !!v; }}).map(String);
+        }} else if (Array.isArray(selection.mutants)) {{
+          out.mutant_peak_ids = selection.mutants
+            .filter(function(item) {{ return item && item.peak_id; }})
+            .map(function(item) {{ return String(item.peak_id); }});
+        }}
+        if (Array.isArray(selection.wt_peak_ids)) {{
+          out.wt_peak_ids = selection.wt_peak_ids.filter(function(v) {{ return !!v; }}).map(String);
+        }} else if (selection.wt_peak_id) {{
+          out.wt_peak_ids = [String(selection.wt_peak_id)];
+        }} else if (selection.wt && selection.wt.peak_id) {{
+          out.wt_peak_ids = [String(selection.wt.peak_id)];
+        }}
+      }}
+      return out;
+    }}
+
     var peaks = [];
-    if (window.PeakManager) {{ peaks = window.PeakManager.getInitialPeaksForPlot(divId); }}
+    var initialPeakData = (window.PeakManager && window.PeakManager.getInitialPeakDataForPlot)
+      ? window.PeakManager.getInitialPeakDataForPlot(divId)
+      : null;
+    if (initialPeakData && Array.isArray(initialPeakData.peaks) && initialPeakData.peaks.length) {{
+      peaks = initialPeakData.peaks.slice();
+    }} else if (window.PeakManager) {{
+      peaks = window.PeakManager.getInitialPeaksForPlot(divId);
+    }}
     if (!peaks || peaks.length === 0) {{ peaks = (initialPeaks && Array.isArray(initialPeaks)) ? initialPeaks.slice() : []; }}
-    peaks = peaks.map(normalizePeak).filter(function(p) {{ return Number.isFinite(p.x) && Number.isFinite(p.y); }});
+    peaks = peaks.map(function(p, idx) {{ return normalizePeak(p, idx); }}).filter(function(p) {{ return Number.isFinite(p.x) && Number.isFinite(p.y); }});
+    ensurePeakIds();
 
-    if (window.PeakManager) {{ window.PeakManager.registerPlot(divId, {{ getPeaks: function() {{ return peaks; }} }}); }}
+    var manualSelection = cloneSelection(initialPeakData && initialPeakData.flt3_manual_ratio_selection ? initialPeakData.flt3_manual_ratio_selection : flt3InitialSelection);
 
-    function nearestPeakIdx(xClick) {{
+    function updatePeakManagerRegistration() {{
+      if (!window.PeakManager) return;
+      ensurePeakIds();
+      window.PeakManager.registerPlot(divId, {{
+        getPeaks: function() {{ return peaks; }},
+        getPeakData: function() {{
+          return {{
+            peaks: peaks,
+            flt3_manual_ratio_selection: {{
+              enabled: !!manualSelection.enabled && manualSelection.mutant_peak_ids.length > 0,
+              version: 2,
+              mutant_peak_ids: manualSelection.mutant_peak_ids.slice(),
+              wt_peak_ids: manualSelection.wt_peak_ids.slice()
+            }}
+          }};
+        }}
+      }});
+    }}
+
+    function peakAreaForSourceChannel(peak) {{
+      if (!peak) return 0.0;
+      if (peak.source_channel === "DATA2") return Number(peak.green_area) || 0.0;
+      if (peak.source_channel === "DATA1") return Number(peak.blue_area) || 0.0;
+      return Number(peak.area) || 0.0;
+    }}
+
+    function wtToleranceBp() {{
+      if (assayName === "FLT3-D835") return 4.0;
+      if (assayName === "FLT3-ITD") return 8.0;
+      return 5.0;
+    }}
+
+    function inferredWtByChannel() {{
+      var wtMap = {{}};
+      for (var i = 0; i < peaks.length; i++) {{
+        var peak = peaks[i];
+        if (!peak.active || !peak.source_channel) continue;
+        var distance = Math.abs(Number(peak.x) - Number(expectedWtBp));
+        if (!Number.isFinite(distance) || distance > wtToleranceBp()) continue;
+        if (!wtMap[peak.source_channel]) {{
+          wtMap[peak.source_channel] = peak;
+          continue;
+        }}
+        var current = wtMap[peak.source_channel];
+        var currentDistance = Math.abs(Number(current.x) - Number(expectedWtBp));
+        if (distance < currentDistance || (distance === currentDistance && peakAreaForSourceChannel(peak) > peakAreaForSourceChannel(current))) {{
+          wtMap[peak.source_channel] = peak;
+        }}
+      }}
+      return wtMap;
+    }}
+
+    function isWtPeak(peak, wtMap) {{
+      if (!peak || !peak.source_channel) return false;
+      return !!(wtMap[peak.source_channel] && wtMap[peak.source_channel].peak_id === peak.peak_id);
+    }}
+
+    function isManualWt(peakId) {{
+      return manualSelection.wt_peak_ids.indexOf(peakId) >= 0;
+    }}
+
+    function selectionSummary() {{
+      var wtMap;
+      if (manualSelection.wt_peak_ids.length > 0) {{
+        wtMap = {{}};
+        for (var w = 0; w < manualSelection.wt_peak_ids.length; w++) {{
+          var manualWtPeak = findPeakById(manualSelection.wt_peak_ids[w]);
+          if (manualWtPeak && manualWtPeak.active && manualWtPeak.source_channel) {{
+            wtMap[manualWtPeak.source_channel] = manualWtPeak;
+          }}
+        }}
+      }} else {{
+        wtMap = inferredWtByChannel();
+      }}
+      var selectedMutants = peaks.filter(function(peak, idx) {{
+        return peak.active && manualSelection.mutant_peak_ids.indexOf(peakIdFor(peak, idx)) >= 0;
+      }});
+      var activeChannels = [];
+      if (assayName === "FLT3-ITD") {{
+        for (var i = 0; i < selectedMutants.length; i++) {{
+          if (selectedMutants[i].source_channel && activeChannels.indexOf(selectedMutants[i].source_channel) < 0) {{
+            activeChannels.push(selectedMutants[i].source_channel);
+          }}
+        }}
+      }} else if (selectedMutants.length) {{
+        activeChannels = [manualTraceChannels[0] || "DATA3"];
+      }}
+      var numerator = 0.0;
+      var denominator = 0.0;
+      var wtParts = [];
+      var mutParts = [];
+      var missingWtChannels = [];
+      for (var c = 0; c < activeChannels.length; c++) {{
+        var channel = activeChannels[c];
+        var wtPeak = wtMap[channel];
+        if (!wtPeak) {{
+          missingWtChannels.push(channelLabel(channel));
+          continue;
+        }}
+        var wtArea = peakAreaForSourceChannel(wtPeak);
+        denominator += wtArea;
+        wtParts.push(channelLabel(channel) + ": " + wtPeak.x.toFixed(1) + " bp");
+      }}
+      for (var m = 0; m < selectedMutants.length; m++) {{
+        var mutPeak = selectedMutants[m];
+        var mutArea = peakAreaForSourceChannel(mutPeak);
+        numerator += mutArea;
+        mutParts.push(mutPeak.x.toFixed(1) + " bp (" + channelLabel(mutPeak.source_channel) + ")");
+      }}
+      return {{
+        wtMap: wtMap,
+        wtText: wtParts.length ? wtParts.join(", ") : "Ingen WT valgt ennå",
+        mutText: mutParts.length ? mutParts.join(", ") : "Ingen mutant valgt",
+        selectedMutants: selectedMutants,
+        missingWtChannels: missingWtChannels,
+        numerator: numerator,
+        denominator: denominator,
+        ratio: denominator > 0 ? numerator / denominator : 0.0,
+        valid: selectedMutants.length > 0 && missingWtChannels.length === 0 && denominator > 0
+      }};
+    }}
+
+    function updateRatioCards(summary) {{
+      var numeratorEl = document.getElementById(divId + "_flt3_numerator");
+      var denominatorEl = document.getElementById(divId + "_flt3_denominator");
+      var ratioEl = document.getElementById(divId + "_flt3_ratio_value");
+      if (numeratorEl) numeratorEl.textContent = summary.selectedMutants.length ? summary.numerator.toFixed(0) : "—";
+      if (denominatorEl) denominatorEl.textContent = summary.denominator > 0 ? summary.denominator.toFixed(0) : "—";
+      if (ratioEl) ratioEl.textContent = summary.valid ? summary.ratio.toFixed(4) : "—";
+    }}
+
+    function applyChannelChoiceStyles() {{
+      var picker = document.getElementById(divId + "_flt3_channel_picker");
+      if (!picker) return;
+      var buttons = picker.querySelectorAll("[data-channel-choice]");
+      for (var i = 0; i < buttons.length; i++) {{
+        var isActive = buttons[i].dataset.channelChoice === manualClickChannel;
+        buttons[i].style.background = isActive ? "#dbeafe" : "transparent";
+        buttons[i].style.color = isActive ? "#1d4ed8" : "#475569";
+        buttons[i].style.borderColor = isActive ? "#93c5fd" : "#cbd5e1";
+      }}
+    }}
+
+    function redrawSelectionControls() {{
+      if (!isManualRatioAssay) return;
+      var badge = document.getElementById(divId + "_flt3_mode_badge");
+      var modeText = document.getElementById(divId + "_flt3_mode_text");
+      var summaryStatus = selectionSummary();
+      if (badge) {{
+        if (summaryStatus.valid) {{
+          badge.textContent = "Ratio klar";
+          badge.className = "status-badge manual";
+        }} else if (summaryStatus.selectedMutants.length > 0 && summaryStatus.denominator === 0) {{
+          badge.textContent = "Velg WT";
+          badge.className = "status-badge warning";
+        }} else if (summaryStatus.selectedMutants.length > 0) {{
+          badge.textContent = "Mangler WT";
+          badge.className = "status-badge warning";
+        }} else {{
+          badge.textContent = "Velg WT og mutant";
+          badge.className = "status-badge warning";
+        }}
+      }}
+      if (modeText) {{
+        var summary = summaryStatus;
+        var baseText = "WT: " + summary.wtText + " - Mut: " + summary.mutText;
+        if (summary.valid) {{
+          baseText += " - Ratio: " + summary.ratio.toFixed(4) + " (" + summary.numerator.toFixed(0) + "/" + summary.denominator.toFixed(0) + ")";
+        }} else if (summary.missingWtChannels.length) {{
+          baseText += " - Mangler WT i " + summary.missingWtChannels.join(", ");
+        }}
+        modeText.textContent = baseText;
+      }}
+      updateRatioCards(summaryStatus);
+      applyChannelChoiceStyles();
+
+      // Update the overview summary table at the top of the report
+      if (plotFileName) {{
+        var wtEl = document.getElementById("overview_wt_" + overviewIdPrefix.replace("overview_", ""));
+        var mutEl = document.getElementById("overview_mut_" + overviewIdPrefix.replace("overview_", ""));
+        var ratEl = document.getElementById("overview_ratio_" + overviewIdPrefix.replace("overview_", ""));
+        if (wtEl) {{
+          if (summaryStatus.wtText !== "Ingen WT valgt ennå") {{
+            wtEl.innerHTML = summaryStatus.wtText;
+          }} else {{
+            wtEl.innerHTML = "<span class='small'>Manuell WT</span>";
+          }}
+        }}
+        if (mutEl) {{
+          if (summaryStatus.mutText !== "Ingen mutant valgt") {{
+            mutEl.innerHTML = summaryStatus.mutText;
+          }} else {{
+            mutEl.innerHTML = "<span class='small'>Velg mutantpeaks manuelt</span>";
+          }}
+        }}
+        if (ratEl) {{
+          if (summaryStatus.valid) {{
+            ratEl.innerHTML = summaryStatus.ratio.toFixed(4) + " <span class='status-badge manual'>Manual</span>";
+          }} else {{
+            ratEl.innerHTML = "\u2014";
+          }}
+        }}
+      }}
+
+      var table = document.getElementById(divId + "_flt3_table");
+      if (!table) return;
+      var summaryForTable = summaryStatus;
+      var checks = table.querySelectorAll('input[type="checkbox"][data-peak-id]');
+      for (var j = 0; j < checks.length; j++) {{
+        var role = checks[j].dataset.role || "";
+        if (role === "wt") {{
+          checks[j].checked = manualSelection.wt_peak_ids.indexOf(checks[j].dataset.peakId) >= 0;
+        }} else {{
+          checks[j].checked = manualSelection.mutant_peak_ids.indexOf(checks[j].dataset.peakId) >= 0;
+        }}
+      }}
+      var rows = table.querySelectorAll('tbody tr[data-peak-id]');
+      for (var k = 0; k < rows.length; k++) {{
+        var row = rows[k];
+        var peakId = row.dataset.peakId;
+        var peak = findPeakById(peakId);
+        row.classList.toggle("selected-wt", isWtPeak(peak, summaryForTable.wtMap));
+        row.classList.toggle("selected-mut", manualSelection.mutant_peak_ids.indexOf(peakId) >= 0);
+      }}
+      updatePeakManagerRegistration();
+    }}
+
+    function clearMutantSelection() {{
+      manualSelection.mutant_peak_ids = [];
+      manualSelection.wt_peak_ids = [];
+      manualSelection.enabled = false;
+      redrawSelectionControls();
+    }}
+
+    function toggleMutantSelection(peakId, checked) {{
+      if (checked) {{
+        if (manualSelection.mutant_peak_ids.indexOf(peakId) < 0) {{
+          manualSelection.mutant_peak_ids.push(peakId);
+        }}
+      }} else {{
+        manualSelection.mutant_peak_ids = manualSelection.mutant_peak_ids.filter(function(id) {{ return id !== peakId; }});
+      }}
+      manualSelection.enabled = manualSelection.mutant_peak_ids.length > 0;
+    }}
+
+    function removePeakById(peakId) {{
+      peaks = peaks.filter(function(peak) {{ return peak.peak_id !== peakId; }});
+      manualSelection.mutant_peak_ids = manualSelection.mutant_peak_ids.filter(function(id) {{ return id !== peakId; }});
+      manualSelection.wt_peak_ids = manualSelection.wt_peak_ids.filter(function(id) {{ return id !== peakId; }});
+      manualSelection.enabled = manualSelection.mutant_peak_ids.length > 0;
+    }}
+
+    function renderFlt3CandidateTable() {{
+      if (!isManualRatioAssay) return;
+      var panel = document.getElementById(divId + "_flt3_panel");
+      var tbody = document.querySelector("#" + divId + "_flt3_table tbody");
+      if (!panel || !tbody) return;
+      panel.style.display = "block";
+      ensurePeakIds();
+      var summary = selectionSummary();
+      var wtMap = summary.wtMap;
+      var sortedPeaks = peaks.slice().sort(function(a, b) {{ return a.x - b.x; }});
+      var html = "";
+      for (var i = 0; i < sortedPeaks.length; i++) {{
+        var peak = sortedPeaks[i];
+        var peakId = peakIdFor(peak, peaks.indexOf(peak));
+        var blueArea = Number.isFinite(Number(peak.blue_area)) ? Number(peak.blue_area) : 0.0;
+        var greenArea = Number.isFinite(Number(peak.green_area)) ? Number(peak.green_area) : 0.0;
+        var wtHere = isManualWt(peakId) || isWtPeak(peak, wtMap);
+        var isMut = manualSelection.mutant_peak_ids.indexOf(peakId) >= 0;
+        var sourceText = channelLabel(peak.source_channel);
+        html += "<tr data-peak-id='" + peakId + "'>";
+        html += "<td>" + sourceText + "</td>";
+        html += "<td><input type='checkbox' data-role='wt' data-peak-id='" + peakId + "'" + (wtHere ? " checked" : "") + (isMut ? " disabled" : "") + "></td>";
+        html += "<td><input type='checkbox' data-role='mutant' data-peak-id='" + peakId + "'" + (wtHere ? " disabled" : "") + "></td>";
+        html += "<td>" + peak.x.toFixed(1) + "</td>";
+        html += "<td>" + peak.y.toFixed(0) + "</td>";
+        if (isFlt3ItD) {{
+          html += "<td>" + blueArea.toFixed(0) + "</td>";
+          html += "<td>" + greenArea.toFixed(0) + "</td>";
+        }} else {{
+          html += "<td>" + peakAreaForSourceChannel(peak).toFixed(0) + "</td>";
+        }}
+        html += "<td>" + (wtHere ? "WT" : isMut ? "Mutant" : "Peak") + "</td>";
+        html += "<td><button type='button' class='comment-toggle-btn' data-role='delete-peak' data-peak-id='" + peakId + "' style='width:auto; padding:4px 8px;'>Slett</button></td>";
+        html += "</tr>";
+      }}
+      tbody.innerHTML = html;
+      redrawSelectionControls();
+    }}
+
+    function nearestPeakIdx(xClick, preferredChannel) {{
       if (!peaks.length) return -1;
-      var bestIdx = 0;
-      var bestDist = Math.abs(peaks[0].x - xClick);
-      for (var i = 1; i < peaks.length; i++) {{
-        var d = Math.abs(peaks[i].x - xClick);
-        if (d < bestDist) {{ bestDist = d; bestIdx = i; }}
+      var bestIdx = -1;
+      var bestScore = Infinity;
+      for (var i = 0; i < peaks.length; i++) {{
+        var peak = peaks[i];
+        if (preferredChannel && peak.source_channel !== preferredChannel) continue;
+        var d = Math.abs(peak.x - xClick);
+        var score = d;
+        if (score < bestScore) {{
+          bestScore = score;
+          bestIdx = i;
+        }}
       }}
       return bestIdx;
     }}
 
-    function rebuild() {{
-      var xs = peaks.map(function(p) {{ return p.x; }});
+    function displayXForPeak(peak) {{
+      if (!peak) return 0.0;
+      if (peak.source_channel === "DATA1") return peak.x - 0.16;
+      if (peak.source_channel === "DATA2") return peak.x + 0.16;
+      return peak.x;
+    }}
+
+    function redrawPeaks() {{
+      ensurePeakIds();
+      var summary = isManualRatioAssay ? selectionSummary() : null;
+      var xs = peaks.map(function(p) {{ return displayXForPeak(p); }});
       var ys = peaks.map(function(p) {{ return p.y; }});
       var op = peaks.map(function(p) {{ return p.active ? 1.0 : 0.3; }});
-      var col = peaks.map(function(p) {{ return p.active ? "red" : "gray"; }});
-      var texts = peaks.map(function(p) {{ return p.active ? p.x.toFixed(1) : ""; }});
+      var col = peaks.map(function(p) {{ return p.active ? channelAccent(p.source_channel) : "#94a3b8"; }});
+      var texts = peaks.map(function(p) {{
+        if (!p.active) return "";
+        var shortChannel = p.source_channel ? channelLabel(p.source_channel).charAt(0).toUpperCase() : "";
+        return shortChannel ? (p.x.toFixed(1) + " " + shortChannel) : p.x.toFixed(1);
+      }});
+      var symbols = peaks.map(function(p) {{
+        if (!p.active) return "circle-open";
+        if (summary && isWtPeak(p, summary.wtMap)) return "diamond";
+        if (manualSelection.mutant_peak_ids.indexOf(p.peak_id) >= 0) return "square";
+        return "circle";
+      }});
+      var sizes = peaks.map(function(p) {{
+        if (!p.active) return 8;
+        if (summary && isWtPeak(p, summary.wtMap)) return 11;
+        if (manualSelection.mutant_peak_ids.indexOf(p.peak_id) >= 0) return 10;
+        return 8;
+      }});
 
-      Plotly.restyle(g, {{ x: [xs], y: [ys], "marker.opacity": [op], "marker.color": [col], text: [texts] }}, [peaksTraceIndex]);
+      Plotly.restyle(
+        g,
+        {{
+          x: [xs],
+          y: [ys],
+          "marker.opacity": [op],
+          "marker.color": [col],
+          "marker.symbol": [symbols],
+          "marker.size": [sizes],
+          text: [texts]
+        }},
+        [peaksTraceIndex]
+      );
 
       var ann = [];
       var tbody = document.querySelector("#{div_id}_table tbody");
@@ -524,7 +1176,17 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         if (!p.active) continue;
         
         // Add annotation
-        ann.push({{ x: p.x, y: p.y * 1.03, xref: "x", yref: "y", text: p.x.toFixed(1), showarrow: false, font: {{ size: 9, color: "#222" }}, xanchor: "left", yanchor: "bottom" }});
+        ann.push({{
+          x: displayXForPeak(p),
+          y: p.y * 1.03,
+          xref: "x",
+          yref: "y",
+          text: texts[peaks.indexOf(p)],
+          showarrow: false,
+          font: {{ size: 9, color: "#222" }},
+          xanchor: "left",
+          yanchor: "bottom"
+        }});
         
         // Add table row
         tableHtml += "<tr><td>" + p.x.toFixed(1) + "</td><td>" + p.y.toFixed(0) + "</td><td>" + p.area.toFixed(0) + "</td></tr>";
@@ -535,10 +1197,17 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       // Update Table
       if (tbody) tbody.innerHTML = tableHtml;
       var tCont = document.getElementById("{div_id}_table_container");
-      if (tCont) tCont.style.display = (tableHtml !== "") ? "block" : "none";
+      if (tCont) tCont.style.display = isManualRatioAssay ? "none" : ((tableHtml !== "") ? "block" : "none");
+      if (isManualRatioAssay) {{
+        renderFlt3CandidateTable();
+      }}
     }}
 
-    if (peaks.length) {{ rebuild(); }}
+    if (peaks.length) {{ redrawPeaks(); }}
+    if (isManualRatioAssay) {{
+      renderFlt3CandidateTable();
+      redrawSelectionControls();
+    }}
 
     gd.on("plotly_click", function(ev) {{
       if (!ev.points || !ev.points.length) return;
@@ -546,23 +1215,119 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       var xVal = pt.x;
       var yVal = pt.y;
       var isShift = !!(ev.event && ev.event.shiftKey);
+      var requestedChannel = manualClickChannel === "AUTO" ? normalizeSourceChannel(null, pt.curveNumber) : manualClickChannel;
+      if (!requestedChannel && manualTraceChannels.length === 1) {{
+        requestedChannel = manualTraceChannels[0];
+      }}
+      if (isManualRatioAssay && requestedChannel) {{
+        var channelPoint = nearestTracePointForChannel(xVal, requestedChannel);
+        if (channelPoint) {{
+          xVal = channelPoint.x;
+          yVal = channelPoint.y;
+          pt.curveNumber = channelPoint.curveNumber;
+        }}
+      }}
 
       if (isShift) {{
-        var idxDel = nearestPeakIdx(xVal);
-        if (idxDel >= 0) {{ peaks.splice(idxDel, 1); rebuild(); }}
+        var idxDel = nearestPeakIdx(xVal, requestedChannel);
+        if (idxDel >= 0) {{
+          var removedPeakId = peaks[idxDel].peak_id;
+          peaks.splice(idxDel, 1);
+          manualSelection.mutant_peak_ids = manualSelection.mutant_peak_ids.filter(function(id) {{ return id !== removedPeakId; }});
+          manualSelection.wt_peak_ids = manualSelection.wt_peak_ids.filter(function(id) {{ return id !== removedPeakId; }});
+          manualSelection.enabled = manualSelection.mutant_peak_ids.length > 0;
+          redrawPeaks();
+        }}
         return;
       }}
 
-      var idx = nearestPeakIdx(xVal);
+      var idx = nearestPeakIdx(xVal, requestedChannel);
       if (idx >= 0 && Math.abs(peaks[idx].x - xVal) < 0.4) {{
         peaks[idx].active = !peaks[idx].active;
-        rebuild();
+        if (!peaks[idx].active) {{
+          manualSelection.mutant_peak_ids = manualSelection.mutant_peak_ids.filter(function(id) {{ return id !== peaks[idx].peak_id; }});
+          manualSelection.enabled = manualSelection.mutant_peak_ids.length > 0;
+        }}
+        redrawPeaks();
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, area: computePeakArea(xVal, pt.curveNumber), active: true }});
-      rebuild(); // <--- FIXED: Call rebuild immediately!
+      var sourceChannel = requestedChannel || normalizeSourceChannel(null, pt.curveNumber);
+      var blueArea = computePeakAreaForChannel(xVal, "DATA1");
+      var greenArea = computePeakAreaForChannel(xVal, "DATA2");
+      var peakArea = sourceChannel ? computePeakAreaForChannel(xVal, sourceChannel) : computePeakArea(xVal, pt.curveNumber);
+      var newPeak = {{
+        x: xVal,
+        y: yVal,
+        area: peakArea,
+        blue_area: blueArea,
+        green_area: greenArea,
+        source_channel: sourceChannel,
+        curve_number: pt.curveNumber,
+        active: true
+      }};
+      newPeak.peak_id = makePeakId(newPeak, peaks.length);
+      peaks.push(newPeak);
+      redrawPeaks();
     }});
+
+    if (isManualRatioAssay) {{
+      var table = document.getElementById(divId + "_flt3_table");
+      var resetBtn = document.getElementById(divId + "_flt3_reset");
+      var picker = document.getElementById(divId + "_flt3_channel_picker");
+      if (table) {{
+        table.addEventListener("change", function(ev) {{
+          var target = ev.target || {{}};
+          var peakId = target.dataset ? target.dataset.peakId : "";
+          if (!peakId) return;
+          if (target.type === "checkbox" && target.dataset.role === "wt") {{
+            if (target.checked) {{
+              if (manualSelection.wt_peak_ids.indexOf(peakId) < 0) {{
+                manualSelection.wt_peak_ids.push(peakId);
+              }}
+              manualSelection.mutant_peak_ids = manualSelection.mutant_peak_ids.filter(function(id) {{ return id !== peakId; }});
+            }} else {{
+              manualSelection.wt_peak_ids = manualSelection.wt_peak_ids.filter(function(id) {{ return id !== peakId; }});
+            }}
+            renderFlt3CandidateTable();
+            redrawPeaks();
+            return;
+          }}
+          if (target.type === "checkbox" && target.dataset.role === "mutant") {{
+            toggleMutantSelection(peakId, !!target.checked);
+            if (!!target.checked) {{
+              manualSelection.wt_peak_ids = manualSelection.wt_peak_ids.filter(function(id) {{ return id !== peakId; }});
+            }}
+          }}
+          renderFlt3CandidateTable();
+          redrawPeaks();
+        }});
+        table.addEventListener("click", function(ev) {{
+          var target = ev.target || {{}};
+          if (!target.dataset) return;
+          if (target.dataset.role === "delete-peak" && target.dataset.peakId) {{
+            removePeakById(target.dataset.peakId);
+            redrawPeaks();
+          }}
+        }});
+      }}
+      if (resetBtn) {{
+        resetBtn.addEventListener("click", function() {{
+          clearMutantSelection();
+          redrawPeaks();
+        }});
+      }}
+      if (picker) {{
+        picker.addEventListener("click", function(ev) {{
+          var target = ev.target || {{}};
+          if (!target.dataset || !target.dataset.channelChoice) return;
+          manualClickChannel = target.dataset.channelChoice;
+          applyChannelChoiceStyles();
+        }});
+      }}
+      updatePeakManagerRegistration();
+      applyChannelChoiceStyles();
+    }}
   }});
 }}).call(this);
 </script>

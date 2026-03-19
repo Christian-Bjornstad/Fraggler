@@ -34,6 +34,8 @@ from core.html_reports import extract_dit_from_name
 FLT3_LADDER_QC_THRESHOLD = 0.99
 RELEVANT_PEAK_LABELS = {"WT", "MUT", "ITD"}
 FLT3_QC_TRENDS_FILENAME = "FLT3_QC_TRENDS.xlsx"
+FLT3_MANUAL_RATIO_VERSION = 2
+MANUAL_RATIO_ASSAYS = {"FLT3-ITD", "FLT3-D835"}
 
 
 def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
@@ -98,6 +100,430 @@ def _resolve_peak_area(assay: str, combined_area: float, channel_areas: dict[str
     if not finite_channel_areas:
         return combined_area
     return max(finite_channel_areas)
+
+
+def _peak_id_for_row(row: pd.Series | dict, ordinal: int | None = None) -> str:
+    bp = float(row.get("basepairs", 0.0))
+    height = float(row.get("peaks", 0.0))
+    parts = [f"{int(round(bp * 10)):05d}", f"{int(round(height)):06d}"]
+    if ordinal is not None:
+        parts.append(f"{int(ordinal):03d}")
+    return "pk_" + "_".join(parts)
+
+
+def _ensure_peak_ids(peaks: pd.DataFrame) -> pd.DataFrame:
+    if peaks.empty:
+        if "peak_id" not in peaks.columns:
+            peaks = peaks.copy()
+            peaks["peak_id"] = pd.Series(dtype=str)
+        return peaks
+    ensured = peaks.copy()
+    if "peak_id" not in ensured.columns:
+        ensured["peak_id"] = [
+            _peak_id_for_row(row, ordinal=index)
+            for index, (_, row) in enumerate(ensured.iterrows(), start=1)
+        ]
+    return ensured
+
+
+def _default_manual_ratio_selection() -> dict:
+    return {
+        "enabled": False,
+        "version": FLT3_MANUAL_RATIO_VERSION,
+        "wt": {"peak_id": None, "channel": None},
+        "mutants": [],
+    }
+
+
+def _normalize_manual_peak_spec(spec: dict | None) -> dict:
+    spec = spec if isinstance(spec, dict) else {}
+    peak_id = spec.get("peak_id", spec.get("id", spec.get("peakId")))
+    channel = spec.get("channel")
+    if channel is not None:
+        channel = str(channel).upper()
+    return {
+        "peak_id": peak_id,
+        "channel": channel,
+    }
+
+
+def _normalize_manual_ratio_selection(raw: dict | None) -> dict:
+    normalized = _default_manual_ratio_selection()
+    if not isinstance(raw, dict):
+        return normalized
+
+    normalized["enabled"] = bool(raw.get("enabled", False))
+    try:
+        normalized["version"] = int(raw.get("version", FLT3_MANUAL_RATIO_VERSION))
+    except (TypeError, ValueError):
+        normalized["version"] = FLT3_MANUAL_RATIO_VERSION
+
+    if isinstance(raw.get("wt"), dict):
+        normalized["wt"] = _normalize_manual_peak_spec(raw.get("wt"))
+    else:
+        normalized["wt"] = _normalize_manual_peak_spec(
+            {
+                "peak_id": raw.get("wt_peak_id", raw.get("selected_wt_peak_id")),
+                "channel": raw.get("wt_channel", raw.get("selected_wt_channel")),
+            }
+        )
+
+    mutants = raw.get("mutants")
+    normalized_mutants: list[dict] = []
+    if isinstance(mutants, list):
+        for item in mutants:
+            if isinstance(item, dict):
+                normalized_mutants.append(_normalize_manual_peak_spec(item))
+    else:
+        mutant_ids = raw.get("mutant_peak_ids", raw.get("selected_mutant_peak_ids", []))
+        if mutant_ids is None:
+            mutant_ids = []
+        if not isinstance(mutant_ids, list):
+            mutant_ids = [mutant_ids]
+        mutant_channels = raw.get("mutant_channels", {})
+        if not isinstance(mutant_channels, dict):
+            mutant_channels = {}
+        for peak_id in mutant_ids:
+            normalized_mutants.append(
+                _normalize_manual_peak_spec(
+                    {
+                        "peak_id": peak_id,
+                        "channel": mutant_channels.get(peak_id),
+                    }
+                )
+            )
+    normalized["mutants"] = normalized_mutants
+    return normalized
+
+
+def _peak_area_for_channel(row: pd.Series, channel: str | None) -> float:
+    if channel:
+        value = row.get(f"area_{channel}", np.nan)
+        if np.isfinite(value):
+            return float(value)
+    value = row.get("area", np.nan)
+    return float(value) if np.isfinite(value) else float("nan")
+
+
+def _peak_source_channel(row: pd.Series, fallback: str | None = None) -> str | None:
+    channel = row.get("source_channel", fallback)
+    if channel is None:
+        return None
+    channel = str(channel).upper()
+    return channel if channel.startswith("DATA") else None
+
+
+def _lookup_peak_row(peaks: pd.DataFrame, peak_id: str | None) -> pd.Series | None:
+    if peaks.empty or not peak_id or "peak_id" not in peaks.columns:
+        return None
+    match = peaks[peaks["peak_id"].astype(str) == str(peak_id)]
+    if match.empty:
+        return None
+    return match.iloc[0]
+
+
+def _empty_manual_ratio_resolution(entry: dict, reason: str) -> dict:
+    return {
+        "ratio_mode": "manual_required",
+        "manual_ratio_selection": _normalize_manual_ratio_selection(entry.get("manual_ratio_selection")),
+        "manual_ratio_selection_valid": False,
+        "manual_ratio_selection_reason": reason,
+        "selected_wt_row": None,
+        "selected_wt_rows": pd.DataFrame(),
+        "selected_mut_rows": pd.DataFrame(),
+        "selected_wt_peak_id": None,
+        "selected_wt_peak_ids": [],
+        "selected_mutant_peak_ids": [],
+        "selected_wt_bp": np.nan,
+        "selected_wt_bps": [],
+        "selected_mutant_bps": [],
+        "selected_wt_area": 0.0,
+        "selected_wt_areas": [],
+        "selected_mutant_area": 0.0,
+        "selected_mutant_areas": [],
+        "selected_wt_channel": None,
+        "selected_wt_channels": [],
+        "selected_mutant_channels": [],
+        "ratio_numerator_area": 0.0,
+        "ratio_denominator_area": 0.0,
+        "ratio": 0.0,
+        "mutant_fraction": 0.0,
+    }
+
+
+def _wt_candidates_for_assay(
+    peaks: pd.DataFrame,
+    assay: str,
+    expected_wt_bp: float,
+    *,
+    channel: str | None = None,
+) -> pd.DataFrame:
+    if peaks.empty:
+        return pd.DataFrame()
+
+    channel_rows = peaks.copy()
+    if channel and "source_channel" in channel_rows.columns:
+        channel_rows = channel_rows[
+            channel_rows["source_channel"].astype(str).str.upper() == str(channel).upper()
+        ]
+    if channel_rows.empty:
+        return channel_rows
+
+    if assay == "FLT3-D835":
+        wt_min, wt_max = ASSAY_CONFIG.get("FLT3-D835", {}).get("wt_range", (expected_wt_bp - 4.0, expected_wt_bp + 4.0))
+        wt_candidates = channel_rows[
+            (channel_rows["basepairs"].astype(float) >= float(wt_min))
+            & (channel_rows["basepairs"].astype(float) <= float(wt_max))
+        ].copy()
+    else:
+        wt_candidates = channel_rows.assign(
+            _wt_distance=(channel_rows["basepairs"].astype(float) - expected_wt_bp).abs()
+        )
+        wt_candidates = wt_candidates[wt_candidates["_wt_distance"] <= 8.0].copy()
+
+    if wt_candidates.empty:
+        return wt_candidates
+    if "_wt_distance" not in wt_candidates.columns:
+        wt_candidates["_wt_distance"] = (wt_candidates["basepairs"].astype(float) - expected_wt_bp).abs()
+    return wt_candidates
+
+
+def _peak_row_payload(row: pd.Series | None, *, channel: str | None = None) -> dict:
+    if row is None:
+        return {
+            "peak_id": None,
+            "basepairs": np.nan,
+            "peaks": np.nan,
+            "label": "",
+            "area": 0.0,
+            "channel": channel,
+        }
+    payload = {
+        "peak_id": row.get("peak_id"),
+        "basepairs": float(row.get("basepairs", np.nan)),
+        "peaks": float(row.get("peaks", np.nan)),
+        "label": row.get("label", ""),
+        "area": float(row.get("area", 0.0)),
+        "channel": channel,
+    }
+    if channel:
+        payload["area"] = _peak_area_for_channel(row, channel)
+    return payload
+
+
+def _resolve_auto_ratio_selection(entry: dict, peaks: pd.DataFrame) -> dict:
+    assay = entry.get("assay")
+    wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
+    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].copy() if not peaks.empty else pd.DataFrame()
+
+    selected_mut_rows = mut_rows
+    if assay == "FLT3-ITD":
+        selected_mut_rows = _reportable_itd_mut_rows(entry, peaks, wt_rows=wt_rows, mut_rows=mut_rows)
+
+    wt_main = wt_rows.iloc[0] if not wt_rows.empty else None
+    if wt_main is None:
+        return {
+            "ratio_mode": "auto",
+            "manual_ratio_selection": _normalize_manual_ratio_selection(entry.get("manual_ratio_selection")),
+            "manual_ratio_selection_valid": False,
+            "manual_ratio_selection_reason": "",
+            "selected_wt_row": None,
+            "selected_mut_rows": selected_mut_rows.iloc[0:0].copy(),
+            "selected_wt_peak_id": None,
+            "selected_mutant_peak_ids": [],
+            "selected_wt_bp": np.nan,
+            "selected_mutant_bps": [],
+            "selected_wt_area": 0.0,
+            "selected_mutant_area": 0.0,
+            "selected_wt_channel": None,
+            "selected_mutant_channels": [],
+            "ratio_numerator_area": 0.0,
+            "ratio_denominator_area": 0.0,
+            "ratio": 0.0,
+            "mutant_fraction": 0.0,
+        }
+    if assay == "FLT3-ITD" and not selected_mut_rows.empty:
+        mut_area = float(selected_mut_rows.area.sum())
+    elif assay in {"FLT3-D835", "NPM1"} and not mut_rows.empty:
+        selected_mut_rows = mut_rows.sort_values("area", ascending=False).iloc[[0]]
+        mut_area = float(selected_mut_rows.iloc[0].area)
+    else:
+        selected_mut_rows = selected_mut_rows.iloc[0:0].copy()
+        mut_area = 0.0
+
+    wt_area = float(wt_main.area) if wt_main is not None else 0.0
+    ratio = (mut_area / wt_area) if wt_area > 0 else 0.0
+
+    return {
+        "ratio_mode": "auto",
+        "manual_ratio_selection": _normalize_manual_ratio_selection(entry.get("manual_ratio_selection")),
+        "manual_ratio_selection_valid": False,
+        "manual_ratio_selection_reason": "",
+        "selected_wt_row": wt_main,
+        "selected_mut_rows": selected_mut_rows,
+        "selected_wt_peak_id": wt_main.get("peak_id") if wt_main is not None else None,
+        "selected_mutant_peak_ids": [row.peak_id for row in selected_mut_rows.itertuples(index=False)] if not selected_mut_rows.empty and "peak_id" in selected_mut_rows.columns else [],
+        "selected_wt_bp": float(wt_main.basepairs) if wt_main is not None else np.nan,
+        "selected_mutant_bps": [round(float(v), 2) for v in selected_mut_rows.basepairs.tolist()] if not selected_mut_rows.empty else [],
+        "selected_wt_area": wt_area,
+        "selected_mutant_area": mut_area,
+        "selected_wt_channel": None,
+        "selected_mutant_channels": [],
+        "ratio_numerator_area": mut_area,
+        "ratio_denominator_area": wt_area,
+        "ratio": ratio,
+        "mutant_fraction": (mut_area / (mut_area + wt_area)) if (mut_area + wt_area) > 0 else 0.0,
+    }
+
+
+def _resolve_manual_ratio_selection(entry: dict, peaks: pd.DataFrame) -> dict | None:
+    assay = entry.get("assay")
+    if assay not in MANUAL_RATIO_ASSAYS:
+        return None
+    if peaks.empty:
+        return _empty_manual_ratio_resolution(entry, "Ingen manuelle peaks registrert")
+
+    manual = _normalize_manual_ratio_selection(entry.get("manual_ratio_selection"))
+    if not manual["enabled"]:
+        return _empty_manual_ratio_resolution(entry, f"Manuelt peakvalg kreves for {assay}-ratio")
+
+    wt_spec = manual.get("wt") or {}
+    mut_specs = manual.get("mutants") or []
+    if not mut_specs:
+        return _empty_manual_ratio_resolution(entry, "Velg minst en mutantpeak manuelt")
+
+    selected_mut_rows: list[pd.Series] = []
+    selected_mut_ids: list[str] = []
+    selected_mut_bps: list[float] = []
+    selected_mut_areas: list[float] = []
+    selected_mut_channels: list[str | None] = []
+    mut_area = 0.0
+    seen_pairs: set[tuple[str, str | None]] = set()
+
+    for spec in mut_specs:
+        peak_id = spec.get("peak_id")
+        if not peak_id:
+            continue
+        mut_row = _lookup_peak_row(peaks, peak_id)
+        if mut_row is None:
+            continue
+        mut_channel = spec.get("channel")
+        if mut_channel is not None:
+            mut_channel = str(mut_channel).upper()
+        if mut_channel is None:
+            mut_channel = entry.get("primary_peak_channel")
+        mut_channel = _peak_source_channel(mut_row, fallback=mut_channel)
+        selection_key = (str(peak_id), mut_channel)
+        if selection_key in seen_pairs:
+            continue
+        mut_area_value = _peak_area_for_channel(mut_row, mut_channel)
+        if not np.isfinite(mut_area_value) or mut_area_value <= 0:
+            return _empty_manual_ratio_resolution(entry, "Valgt mutantpeak mangler brukbar kanal/area")
+        seen_pairs.add(selection_key)
+        selected_mut_rows.append(mut_row)
+        selected_mut_ids.append(str(mut_row.get("peak_id")))
+        selected_mut_bps.append(round(float(mut_row.get("basepairs", np.nan)), 2))
+        selected_mut_channels.append(mut_channel)
+        selected_mut_areas.append(float(mut_area_value))
+        mut_area += float(mut_area_value)
+
+    if not selected_mut_rows:
+        return _empty_manual_ratio_resolution(entry, "Ingen gyldige manuelle mutantpeaks valgt")
+
+    expected_wt_bp = float(ASSAY_CONFIG.get(assay, {}).get("wt_bp", entry.get("wt_bp", 330.0) or 330.0))
+    selected_wt_rows: list[pd.Series] = []
+    selected_wt_ids: list[str] = []
+    selected_wt_bps: list[float] = []
+    selected_wt_areas: list[float] = []
+    selected_wt_channels: list[str] = []
+    denominator_area = 0.0
+    wt_row = _lookup_peak_row(peaks, wt_spec.get("peak_id"))
+    wt_channel = wt_spec.get("channel")
+    if wt_channel is not None:
+        wt_channel = str(wt_channel).upper()
+    if wt_channel is None:
+        wt_channel = entry.get("primary_peak_channel")
+    if wt_row is not None:
+        wt_channel = _peak_source_channel(wt_row, fallback=wt_channel)
+    if wt_row is not None or wt_channel:
+        if wt_row is None:
+            wt_candidates = _wt_candidates_for_assay(peaks, assay, expected_wt_bp, channel=wt_channel)
+            if wt_candidates.empty:
+                return _empty_manual_ratio_resolution(entry, "Mangler manuell WT-peak for valgt WT-kanal")
+            wt_row = wt_candidates.sort_values(["_wt_distance", "peaks"], ascending=[True, False]).iloc[0]
+        if wt_channel is None:
+            wt_channel = _peak_source_channel(wt_row, fallback=entry.get("primary_peak_channel"))
+        wt_area = _peak_area_for_channel(wt_row, wt_channel)
+        if not np.isfinite(wt_area) or wt_area <= 0:
+            return _empty_manual_ratio_resolution(entry, "Valgt WT-peak mangler brukbar area")
+        if str(wt_row.get("peak_id")) in selected_mut_ids:
+            return _empty_manual_ratio_resolution(entry, "WT-peaken kan ikke ogsa brukes som mutant")
+        selected_wt_rows.append(wt_row)
+        selected_wt_ids.append(str(wt_row.get("peak_id")))
+        selected_wt_bps.append(round(float(wt_row.get("basepairs", np.nan)), 2))
+        selected_wt_areas.append(float(wt_area))
+        selected_wt_channels.append(wt_channel)
+        denominator_area += float(wt_area)
+    else:
+        active_channels = [channel for channel in dict.fromkeys(selected_mut_channels) if channel]
+        if assay == "FLT3-D835":
+            active_channels = [entry.get("primary_peak_channel") or "DATA3"]
+        for channel in active_channels:
+            wt_candidates = _wt_candidates_for_assay(peaks, assay, expected_wt_bp, channel=channel)
+            if wt_candidates.empty:
+                return _empty_manual_ratio_resolution(entry, f"Mangler manuell WT-peak i {channel}")
+            inferred_wt_row = wt_candidates.sort_values(["_wt_distance", "peaks"], ascending=[True, False]).iloc[0]
+            wt_area = _peak_area_for_channel(inferred_wt_row, channel)
+            if not np.isfinite(wt_area) or wt_area <= 0:
+                return _empty_manual_ratio_resolution(entry, f"WT-peak i {channel} mangler brukbar area")
+            if str(inferred_wt_row.get("peak_id")) in selected_mut_ids:
+                return _empty_manual_ratio_resolution(entry, f"WT-peaken i {channel} er valgt som mutant")
+            selected_wt_rows.append(inferred_wt_row)
+            selected_wt_ids.append(str(inferred_wt_row.get("peak_id")))
+            selected_wt_bps.append(round(float(inferred_wt_row.get("basepairs", np.nan)), 2))
+            selected_wt_areas.append(float(wt_area))
+            selected_wt_channels.append(channel)
+            denominator_area += float(wt_area)
+
+    if denominator_area <= 0:
+        return _empty_manual_ratio_resolution(entry, "Ingen gyldig WT-area funnet for valgt mutantkanal")
+
+    wt_row = selected_wt_rows[0] if selected_wt_rows else None
+    wt_area = denominator_area
+
+    return {
+        "ratio_mode": "manual",
+        "manual_ratio_selection": manual,
+        "manual_ratio_selection_valid": True,
+        "manual_ratio_selection_reason": "",
+        "selected_wt_row": wt_row,
+        "selected_wt_rows": pd.DataFrame(selected_wt_rows) if selected_wt_rows else pd.DataFrame(),
+        "selected_mut_rows": pd.DataFrame(selected_mut_rows),
+        "selected_wt_peak_id": wt_row.get("peak_id") if wt_row is not None else None,
+        "selected_wt_peak_ids": selected_wt_ids,
+        "selected_mutant_peak_ids": selected_mut_ids,
+        "selected_wt_bp": float(wt_row.get("basepairs", np.nan)) if wt_row is not None else np.nan,
+        "selected_wt_bps": selected_wt_bps,
+        "selected_mutant_bps": selected_mut_bps,
+        "selected_wt_area": wt_area,
+        "selected_wt_areas": selected_wt_areas,
+        "selected_mutant_area": mut_area,
+        "selected_mutant_areas": selected_mut_areas,
+        "selected_wt_channel": selected_wt_channels[0] if selected_wt_channels else None,
+        "selected_wt_channels": selected_wt_channels,
+        "selected_mutant_channels": selected_mut_channels,
+        "ratio_numerator_area": mut_area,
+        "ratio_denominator_area": wt_area,
+        "ratio": (mut_area / wt_area) if wt_area > 0 else 0.0,
+        "mutant_fraction": (mut_area / (mut_area + wt_area)) if (mut_area + wt_area) > 0 else 0.0,
+    }
+
+
+def _resolve_flt3_ratio_selection(entry: dict) -> dict:
+    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
+    if entry.get("assay") in MANUAL_RATIO_ASSAYS:
+        return _resolve_manual_ratio_selection(entry, peaks)
+    return _resolve_auto_ratio_selection(entry, peaks)
 
 
 def _calculate_peak_area(
@@ -257,8 +683,8 @@ def _detect_peaks(
         peaks.append(peak_info)
 
     if not peaks:
-        return pd.DataFrame(columns=["basepairs", "peaks", "area", "keep", "label"])
-    return pd.DataFrame(peaks)
+        return pd.DataFrame(columns=["basepairs", "peaks", "area", "keep", "label", "peak_id"])
+    return _ensure_peak_ids(pd.DataFrame(peaks))
 
 
 def _combine_peak_traces(
@@ -429,6 +855,23 @@ def _build_entry_from_candidate(fsa_path: Path, meta: dict) -> dict | None:
         "alternate_injections": [],
         "alternate_injections_summary": "",
         "sizing_method": _infer_sizing_method(fsa),
+        "manual_ratio_selection": _default_manual_ratio_selection(),
+        "ratio_mode": "auto",
+        "manual_ratio_selection_valid": False,
+        "manual_ratio_selection_reason": "",
+        "selected_wt_peak_id": None,
+        "selected_wt_peak_ids": [],
+        "selected_mutant_peak_ids": [],
+        "selected_wt_bp": np.nan,
+        "selected_wt_bps": [],
+        "selected_mutant_bps": [],
+        "selected_wt_area": 0.0,
+        "selected_wt_areas": [],
+        "selected_mutant_area": 0.0,
+        "selected_mutant_areas": [],
+        "selected_wt_channel": None,
+        "selected_wt_channels": [],
+        "selected_mutant_channels": [],
         "peak_qc_pass": peak_qc_pass,
         "peak_qc_status": peak_qc_reason,
     }
@@ -520,39 +963,28 @@ def _select_best_entry(candidates: list[tuple[Path, dict]]) -> dict | None:
 def _calculate_ratios(entries: list[dict]) -> None:
     """Calculate FLT3 mutant ratios and store explicit numerator/denominator fields."""
     for entry in entries:
-        peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
-        if peaks.empty:
-            entry["ratio"] = 0.0
-            entry["ratio_numerator_area"] = 0.0
-            entry["ratio_denominator_area"] = 0.0
-            entry["mutant_fraction"] = 0.0
-            continue
-
-        wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
-        mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])]
-
-        if wt_rows.empty:
-            entry["ratio"] = 0.0
-            entry["ratio_numerator_area"] = 0.0
-            entry["ratio_denominator_area"] = 0.0
-            entry["mutant_fraction"] = 0.0
-            continue
-
-        wt_main = wt_rows.iloc[0]
-        wt_area = float(wt_main.area)
-
-        if entry["assay"] == "FLT3-ITD":
-            mut_rows = _reportable_itd_mut_rows(entry, peaks, wt_rows=wt_rows, mut_rows=mut_rows)
-            mut_area = float(mut_rows.area.sum()) if not mut_rows.empty else 0.0
-        elif not mut_rows.empty:
-            mut_area = float(mut_rows.sort_values("area", ascending=False).iloc[0].area)
-        else:
-            mut_area = 0.0
-
-        entry["ratio_numerator_area"] = mut_area
-        entry["ratio_denominator_area"] = wt_area
-        entry["ratio"] = (mut_area / wt_area) if wt_area > 0 else 0.0
-        entry["mutant_fraction"] = (mut_area / (mut_area + wt_area)) if (mut_area + wt_area) > 0 else 0.0
+        resolved = _resolve_flt3_ratio_selection(entry)
+        entry["manual_ratio_selection"] = resolved.get("manual_ratio_selection", _default_manual_ratio_selection())
+        entry["ratio_mode"] = resolved.get("ratio_mode", "auto")
+        entry["manual_ratio_selection_valid"] = bool(resolved.get("manual_ratio_selection_valid", False))
+        entry["manual_ratio_selection_reason"] = resolved.get("manual_ratio_selection_reason", "")
+        entry["selected_wt_peak_id"] = resolved.get("selected_wt_peak_id")
+        entry["selected_wt_peak_ids"] = resolved.get("selected_wt_peak_ids", [])
+        entry["selected_mutant_peak_ids"] = resolved.get("selected_mutant_peak_ids", [])
+        entry["selected_wt_bp"] = resolved.get("selected_wt_bp", np.nan)
+        entry["selected_wt_bps"] = resolved.get("selected_wt_bps", [])
+        entry["selected_mutant_bps"] = resolved.get("selected_mutant_bps", [])
+        entry["selected_wt_area"] = float(resolved.get("selected_wt_area", 0.0))
+        entry["selected_wt_areas"] = [float(v) for v in resolved.get("selected_wt_areas", [])]
+        entry["selected_mutant_area"] = float(resolved.get("selected_mutant_area", 0.0))
+        entry["selected_mutant_areas"] = [float(v) for v in resolved.get("selected_mutant_areas", [])]
+        entry["selected_wt_channel"] = resolved.get("selected_wt_channel")
+        entry["selected_wt_channels"] = resolved.get("selected_wt_channels", [])
+        entry["selected_mutant_channels"] = resolved.get("selected_mutant_channels", [])
+        entry["ratio_numerator_area"] = float(resolved.get("ratio_numerator_area", 0.0))
+        entry["ratio_denominator_area"] = float(resolved.get("ratio_denominator_area", 0.0))
+        entry["ratio"] = float(resolved.get("ratio", 0.0))
+        entry["mutant_fraction"] = float(resolved.get("mutant_fraction", 0.0))
 
 
 def _summarize_peak_areas(entry: dict) -> tuple[float, float]:
@@ -589,20 +1021,44 @@ def _reportable_itd_mut_rows(
 
 
 def _summarize_detected_peaks(entry: dict) -> dict:
-    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
-    wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
-    mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].sort_values("basepairs") if not peaks.empty else pd.DataFrame()
+    resolved = _resolve_flt3_ratio_selection(entry)
+    wt_row = resolved.get("selected_wt_row")
+    mut_rows = resolved.get("selected_mut_rows", pd.DataFrame())
+    if not isinstance(mut_rows, pd.DataFrame):
+        mut_rows = pd.DataFrame(mut_rows)
+    mut_channels = resolved.get("selected_mutant_channels", [])
+    wt_channel = resolved.get("selected_wt_channel")
 
-    wt_bp = float(wt_rows.iloc[0].basepairs) if not wt_rows.empty else np.nan
-    wt_area = float(wt_rows.iloc[0].area) if not wt_rows.empty else 0.0
-    mut_bps = [round(float(v), 2) for v in mut_rows.basepairs.tolist()] if not mut_rows.empty else []
-    mut_areas = [round(float(v), 2) for v in mut_rows.area.tolist()] if not mut_rows.empty else []
-    mut_main_bp = float(mut_rows.sort_values("area", ascending=False).iloc[0].basepairs) if not mut_rows.empty else np.nan
-    mut_main_area = float(mut_rows.sort_values("area", ascending=False).iloc[0].area) if not mut_rows.empty else 0.0
+    wt_bp = float(wt_row.basepairs) if wt_row is not None else np.nan
+    wt_area = float(resolved.get("selected_wt_area", 0.0))
+    mut_bps: list[float] = []
+    mut_areas: list[float] = []
+    for idx, (_, row) in enumerate(mut_rows.iterrows()):
+        channel = mut_channels[idx] if idx < len(mut_channels) else None
+        mut_bps.append(round(float(row.get("basepairs", np.nan)), 2))
+        mut_areas.append(round(float(_peak_area_for_channel(row, channel)), 2))
+
+    mut_main_bp = np.nan
+    mut_main_area = 0.0
+    if mut_areas:
+        mut_main_idx = int(np.argmax(mut_areas))
+        mut_main_bp = mut_bps[mut_main_idx]
+        mut_main_area = float(mut_areas[mut_main_idx])
 
     return {
+        "ratio_mode": resolved.get("ratio_mode", "auto"),
+        "manual_ratio_selection_valid": bool(resolved.get("manual_ratio_selection_valid", False)),
+        "manual_ratio_selection_reason": resolved.get("manual_ratio_selection_reason", ""),
+        "selected_wt_peak_id": resolved.get("selected_wt_peak_id"),
+        "selected_wt_peak_ids": resolved.get("selected_wt_peak_ids", []),
+        "selected_mutant_peak_ids": resolved.get("selected_mutant_peak_ids", []),
+        "selected_wt_channel": wt_channel,
+        "selected_wt_channels": resolved.get("selected_wt_channels", []),
+        "selected_mutant_channels": mut_channels,
         "wt_bp": wt_bp,
         "wt_area": wt_area,
+        "wt_bps": resolved.get("selected_wt_bps", []),
+        "wt_areas": [round(float(v), 2) for v in resolved.get("selected_wt_areas", [])],
         "mut_bps": mut_bps,
         "mut_areas": mut_areas,
         "mut_area_total": float(sum(mut_areas)),
@@ -618,11 +1074,9 @@ def _interpret_entry(entry: dict) -> str:
     positive_ratio = _assay_positive_ratio(assay)
 
     if assay == "FLT3-ITD":
-        peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
-        reportable_mut_rows = _reportable_itd_mut_rows(entry, peaks)
         if ratio >= positive_ratio:
             return "Positiv FLT3-ITD"
-        if not reportable_mut_rows.empty:
+        if peak_summary["mut_bps"]:
             return "Negativ FLT3-ITD - lavniva dokumentert"
         return "Ingen FLT3-ITD pavist"
     if assay == "FLT3-D835":
@@ -659,6 +1113,15 @@ def generate_flt3_peak_report(entries: list[dict], outdir: Path) -> None:
                 "SourceRunDir": entry.get("source_run_dir") or "",
                 "AlternateInjections": entry.get("alternate_injections_summary") or "",
                 "SizingMethod": entry.get("sizing_method") or "",
+                "RatioMode": peak_summary.get("ratio_mode", "auto"),
+                "ManualSelectionEnabled": bool(entry.get("manual_ratio_selection_valid", False)),
+                "ManualSelectionReason": entry.get("manual_ratio_selection_reason") or "",
+                "SelectedWT_PeakID": peak_summary.get("selected_wt_peak_id") or "",
+                "SelectedWT_Channel": peak_summary.get("selected_wt_channel") or "",
+                "SelectedMutant_PeakIDs": ", ".join(str(v) for v in peak_summary.get("selected_mutant_peak_ids", [])),
+                "SelectedMutant_Channels": ", ".join(
+                    str(v) for v in peak_summary.get("selected_mutant_channels", []) if v is not None
+                ),
                 "InjectionTime": entry.get("injection_time"),
                 "WT_bp": round(float(peak_summary["wt_bp"]), 2) if not np.isnan(peak_summary["wt_bp"]) else "",
                 "WT_Area": round(peak_summary["wt_area"], 2),
@@ -690,10 +1153,27 @@ def _build_control_qc_row(entry: dict) -> dict | None:
     if group not in ["negative_control", "positive_control", "reactive_control"]:
         return None
 
-    peaks = entry["peaks_by_channel"][entry["primary_peak_channel"]]
-    wt_peaks = peaks[peaks.label == "WT"]
-    mut_peaks = peaks[peaks.label.isin(["MUT", "ITD"])]
-    wt_area, mut_area = _summarize_peak_areas(entry)
+    peak_summary = _summarize_detected_peaks(entry)
+    if peak_summary.get("ratio_mode") == "manual_required":
+        peaks = entry["peaks_by_channel"].get(entry["primary_peak_channel"], pd.DataFrame())
+        if not peaks.empty:
+            raw_wt_rows = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False)
+            raw_mut_rows = peaks[peaks.label.isin(["MUT", "ITD"])].copy()
+            if entry.get("assay") == "FLT3-ITD":
+                raw_mut_rows = _reportable_itd_mut_rows(entry, peaks, wt_rows=raw_wt_rows, mut_rows=raw_mut_rows)
+
+            if raw_wt_rows is not None and not raw_wt_rows.empty and (peak_summary.get("wt_bp") != peak_summary.get("wt_bp")):
+                wt_main = raw_wt_rows.iloc[0]
+                peak_summary["wt_bp"] = float(wt_main.basepairs)
+                peak_summary["wt_area"] = float(wt_main.area)
+
+            if raw_mut_rows is not None and not raw_mut_rows.empty and not peak_summary.get("mut_bps"):
+                peak_summary["mut_bps"] = [round(float(v), 2) for v in raw_mut_rows.basepairs.tolist()]
+                peak_summary["mut_areas"] = [round(float(v), 2) for v in raw_mut_rows.area.tolist()]
+                peak_summary["mut_area_total"] = float(raw_mut_rows.area.sum())
+
+    wt_area = float(peak_summary.get("wt_area", 0.0))
+    mut_area = float(peak_summary.get("mut_area_total", 0.0))
     ratio = float(entry.get("ratio", 0.0))
     assay_cfg = ASSAY_CONFIG.get(entry["assay"], {})
     min_wt_area = float(assay_cfg.get("control_wt_min_area", 0.0))
@@ -705,23 +1185,23 @@ def _build_control_qc_row(entry: dict) -> dict | None:
 
     if group == "negative_control":
         expectation = "Ingen mutant/ITD-topper forventet"
-        if mut_peaks.empty:
+        if not peak_summary["mut_bps"]:
             status = "PASS"
         else:
-            details = f"Unexpected mutant peaks found: {mut_peaks.basepairs.tolist()}"
+            details = f"Unexpected mutant peaks found: {peak_summary['mut_bps']}"
     elif group == "reactive_control":
         expectation = f"WT-topp forventet (min area {min_wt_area:.0f})"
-        if not wt_peaks.empty and wt_area >= min_wt_area:
+        if peak_summary["wt_bp"] == peak_summary["wt_bp"] and wt_area >= min_wt_area:
             status = "PASS"
-        elif wt_peaks.empty:
+        elif peak_summary["wt_bp"] != peak_summary["wt_bp"]:
             details = "No WT peak detected"
         else:
             details = f"WT area below threshold ({wt_area:.0f} < {min_wt_area:.0f})"
     elif group == "positive_control":
         expectation = f"Mutantsignal forventet (ratio >= {min_ratio:.4f})"
-        if not mut_peaks.empty and (ratio >= min_ratio or wt_peaks.empty):
+        if peak_summary["mut_bps"] and (ratio >= min_ratio or peak_summary["wt_bp"] != peak_summary["wt_bp"]):
             status = "PASS"
-        elif mut_peaks.empty:
+        elif not peak_summary["mut_bps"]:
             details = "No mutant/ITD peak detected"
         else:
             details = f"Mutant ratio below threshold ({ratio:.4f} < {min_ratio:.4f})"
@@ -800,6 +1280,11 @@ def _build_flt3_qc_trend_frames(entries: list[dict]) -> tuple[pd.DataFrame, pd.D
                 "RatioDenominatorArea": round(float(entry.get("ratio_denominator_area", 0.0)), 2),
                 "Ratio": round(float(entry.get("ratio", 0.0)), 4),
                 "MutantFractionMutPlusWT": round(float(entry.get("mutant_fraction", 0.0)), 4),
+                "RatioMode": peak_summary.get("ratio_mode", "auto"),
+                "ManualSelectionEnabled": bool(peak_summary.get("manual_ratio_selection_valid", False)),
+                "ManualSelectionReason": peak_summary.get("manual_ratio_selection_reason") or "",
+                "SelectedWT_PeakID": peak_summary.get("selected_wt_peak_id") or "",
+                "SelectedMutant_PeakIDs": ", ".join(str(v) for v in peak_summary.get("selected_mutant_peak_ids", [])),
                 "Interpretation": interpretation,
             }
         )

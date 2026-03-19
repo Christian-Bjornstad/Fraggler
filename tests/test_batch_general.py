@@ -48,6 +48,33 @@ class TestBatchGeneral(unittest.TestCase):
         self.assertEqual([j["type"] for j in jobs], ["pipeline", "pipeline"])
         self.assertTrue(all(j["files"] == [] for j in jobs))
 
+    def test_generate_jobs_general_scans_each_folder_once(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp) / "input"
+            a = root / "a"
+            b = root / "b"
+            root.mkdir()
+            a.mkdir()
+            b.mkdir()
+            (a / "one.fsa").write_text("", encoding="utf-8")
+            (b / "two.fsa").write_text("", encoding="utf-8")
+
+            glob_calls = []
+            original_glob = Path.glob
+
+            def _counting_glob(self, pattern):
+                if pattern == "*.fsa":
+                    glob_calls.append(self)
+                return original_glob(self, pattern)
+
+            with patch.object(Path, "glob", _counting_glob):
+                jobs = generate_jobs([root], aggregate_patients=True)
+
+        self.assertEqual(len(glob_calls), 3)
+        self.assertEqual(set(glob_calls), {root, a, b})
+        self.assertEqual([j["type"] for j in jobs], ["pipeline", "pipeline"])
+        self.assertTrue(all(j["files"] == [] for j in jobs))
+
     def test_run_batch_jobs_disables_dit_aggregation_for_general(self):
         jobs = [{"name": "a", "type": "pipeline", "path": Path("/tmp/input/a"), "files": []}]
 

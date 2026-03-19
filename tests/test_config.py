@@ -33,6 +33,38 @@ class TestConfig(unittest.TestCase):
         self.assertEqual(settings["general"]["author"], "Lab")
         self.assertAlmostEqual(settings["qc"]["min_r2_ok"], 0.991)
 
+    def test_load_settings_falls_back_for_invalid_qc_numeric_values(self):
+        with TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "settings.yaml"
+            cfg_path.write_text(
+                yaml.safe_dump(
+                    {
+                        "qc": {
+                            "min_r2_ok": "abc",
+                            "min_r2_warn": "1.5",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(cfg_path, env={})
+
+        self.assertEqual(settings["qc"]["min_r2_ok"], 0.995)
+        self.assertEqual(settings["qc"]["min_r2_warn"], 0.990)
+
+    def test_load_settings_falls_back_for_invalid_qc_env_values(self):
+        settings = load_settings(
+            Path("/does/not/exist.yaml"),
+            env={
+                "FRAGGLER_QC_MIN_R2_OK": "abc",
+                "FRAGGLER_QC_MIN_R2_WARN": "1.5",
+            },
+        )
+
+        self.assertEqual(settings["qc"]["min_r2_ok"], 0.995)
+        self.assertEqual(settings["qc"]["min_r2_warn"], 0.990)
+
     def test_save_settings_preserves_legacy_key(self):
         with TemporaryDirectory() as tmp:
             cfg_path = Path(tmp) / "settings.yaml"

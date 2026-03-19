@@ -175,9 +175,16 @@ def apply_pk_excel_styling(excel_path: Path):
     fill_warn = PatternFill("solid", fgColor="FFF4E5") # gul
     fill_fail = PatternFill("solid", fgColor="FDE7E9") # rød
 
+    def _reset_conditional_formatting(ws) -> None:
+        """Replace existing conditional-format rules instead of piling on duplicates."""
+        cf_rules = getattr(ws.conditional_formatting, "_cf_rules", None)
+        if cf_rules is not None:
+            cf_rules.clear()
+
     # ---- PK_Runs: ladder_qc farger ----
     if "PK_Runs" in wb.sheetnames:
         ws = wb["PK_Runs"]
+        _reset_conditional_formatting(ws)
         headers = {c.value: c.column for c in ws[1] if c.value}
         if "ladder_qc" in headers:
             col = headers["ladder_qc"]
@@ -190,6 +197,7 @@ def apply_pk_excel_styling(excel_path: Path):
     # ---- PK_Markers: delta_bp farger (start: +/-0.5 gul, +/-1.0 rød) ----
     if "PK_Markers" in wb.sheetnames:
         ws = wb["PK_Markers"]
+        _reset_conditional_formatting(ws)
         headers = {c.value: c.column for c in ws[1] if c.value}
         if "delta_bp" in headers:
             col = headers["delta_bp"]

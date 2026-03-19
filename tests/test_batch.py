@@ -1,14 +1,25 @@
 import unittest
 import os
+import copy
 from tempfile import TemporaryDirectory
 from pathlib import Path
 from unittest.mock import patch
+
+from config import APP_SETTINGS
 
 from core.batch import generate_jobs, group_files_by_patient
 from core.utils import is_water_file
 
 
 class TestBatch(unittest.TestCase):
+    def setUp(self):
+        self._settings_backup = copy.deepcopy(APP_SETTINGS)
+        APP_SETTINGS["active_analysis"] = "clonality"
+
+    def tearDown(self):
+        APP_SETTINGS.clear()
+        APP_SETTINGS.update(self._settings_backup)
+
     def test_group_files_by_patient_separates_qc(self):
         files = [
             Path("25OUM10166_sample_FR1.fsa"),
@@ -38,6 +49,38 @@ class TestBatch(unittest.TestCase):
             names = {(job["name"], job["type"]) for job in jobs}
             self.assertIn(("25OUM10166", "pipeline"), names)
             self.assertIn(("QC", "qc"), names)
+
+    def test_generate_jobs_aggregated_scans_each_folder_once(self):
+        with TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            folder_a = base / "run_a"
+            folder_b = base / "run_b"
+            folder_a.mkdir()
+            folder_b.mkdir()
+
+            for path in [
+                base / "25OUM10166_root_FR1.fsa",
+                folder_a / "25OUM10166_sample_FR1.fsa",
+                folder_b / "NK_sample_IGK.fsa",
+            ]:
+                path.write_text("")
+
+            glob_calls = []
+            original_glob = Path.glob
+
+            def _counting_glob(self, pattern):
+                if pattern == "*.fsa":
+                    glob_calls.append(self)
+                return original_glob(self, pattern)
+
+            with patch.object(Path, "glob", _counting_glob):
+                jobs = generate_jobs([base], aggregate_patients=True)
+
+        self.assertEqual(len(glob_calls), 3)
+        self.assertEqual(set(glob_calls), {base, folder_a, folder_b})
+        names = {(job["name"], job["type"]) for job in jobs}
+        self.assertIn(("25OUM10166", "pipeline"), names)
+        self.assertIn(("QC", "qc"), names)
 
     def test_generate_jobs_excludes_v_and_vann_water_files(self):
         with TemporaryDirectory() as tmp:
@@ -156,6 +199,7 @@ class TestBatch(unittest.TestCase):
         ]
 
         with patch("core.batch.run_pipeline_job_collect", return_value=[{"ok": True}]) as mock_collect, \
+             patch("core.html_reports.build_dit_html_reports"), \
              patch("config.APP_SETTINGS", {"active_analysis": "flt3", "qc": {}}):
             result = run_batch_jobs(
                 jobs=jobs,
@@ -173,6 +217,32 @@ class TestBatch(unittest.TestCase):
         self.assertEqual(result["failed_jobs"], [])
         self.assertEqual(result["completed_jobs"], ["patient"])
         self.assertFalse(mock_collect.call_args.kwargs["chunk_files"])
+
+    def test_run_batch_jobs_records_aggregated_dit_failure(self):
+        from core.batch import run_batch_jobs
+
+        jobs = [
+            {"name": "patient", "type": "dit", "path": None, "files": [Path("a.fsa")]},
+        ]
+
+        with patch("core.batch.run_pipeline_job_collect", return_value=[{"ok": True}]), \
+             patch("core.html_reports.build_dit_html_reports", side_effect=RuntimeError("boom")), \
+             patch("config.APP_SETTINGS", {"active_analysis": "clonality", "qc": {}}):
+            result = run_batch_jobs(
+                jobs=jobs,
+                output_base=Path("/tmp/out"),
+                out_folder_tmpl="ASSAY_REPORTS",
+                outfile_html_tmpl="QC_REPORT_{name}.html",
+                excel_name_tmpl="Fraggler_QC_Trends.xlsx",
+                pipeline_scope="all",
+                assay_filter="",
+                aggregate_dit_reports=True,
+                continue_on_error=True,
+                update_callback=None,
+            )
+
+        self.assertEqual(result["completed_jobs"], ["patient"])
+        self.assertIn("DIT aggregation", result["failed_jobs"])
 
 
 class TestQtBatchTableScrolling(unittest.TestCase):

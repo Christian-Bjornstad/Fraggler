@@ -81,17 +81,32 @@ def scan_jobs_from_yaml(yaml_path: Path) -> List[Path]:
 # PATIENT AGGREGATION UTILITIES
 # ============================================================
 
-def find_all_fsa_files(folders: List[Path]) -> List[Path]:
+def _scan_folder_fsa_files(folder: Path, folder_files: Dict[Path, List[Path]]) -> List[Path]:
+    """Return cached .fsa files for a folder, scanning only once per call site."""
+    if folder not in folder_files:
+        from core.utils import is_water_file
+
+        if not folder.is_dir():
+            folder_files[folder] = []
+        else:
+            folder_files[folder] = [
+                path for path in sorted(folder.glob("*.fsa"))
+                if not is_water_file(path.name)
+            ]
+    return folder_files[folder]
+
+
+def find_all_fsa_files(
+    folders: List[Path],
+    folder_files: Dict[Path, List[Path]] | None = None,
+) -> List[Path]:
     """Find all .fsa files in the given folders."""
-    from core.utils import is_water_file
+    folder_files = folder_files or {}
 
     fsa_files = []
     for f in folders:
         if f.is_dir():
-            fsa_files.extend(
-                path for path in f.glob("*.fsa")
-                if not is_water_file(path.name)
-            )
+            fsa_files.extend(_scan_folder_fsa_files(f, folder_files))
     return fsa_files
 
 
@@ -158,19 +173,20 @@ def generate_jobs(
     from config import APP_SETTINGS
 
     folders_to_scan = []
+    folder_files: Dict[Path, List[Path]] = {}
     active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     for p in input_paths:
         if p.is_file() and p.name.endswith(".yaml"):
             folders_to_scan.extend(scan_jobs_from_yaml(p))
             continue
-            
-        if any(p.glob("*.fsa")):
+
+        if _scan_folder_fsa_files(p, folder_files):
             folders_to_scan.append(p)
-            
+
         if p.is_dir():
             subfolders = [d for d in p.iterdir() if d.is_dir()]
             for sub in subfolders:
-                if any(sub.glob("*.fsa")):
+                if _scan_folder_fsa_files(sub, folder_files):
                     folders_to_scan.append(sub)
 
     folders_to_scan = list(dict.fromkeys(folders_to_scan))
@@ -195,7 +211,7 @@ def generate_jobs(
     jobs = []
     
     if aggregate_patients:
-        all_fsa = find_all_fsa_files(folders_to_scan)
+        all_fsa = find_all_fsa_files(folders_to_scan, folder_files)
         all_fsa = sorted(list(set(all_fsa)))
         
         grouped = group_files_by_patient(all_fsa, patient_regex)
@@ -211,14 +227,11 @@ def generate_jobs(
         if jobs:
             log(f"[INFO] Aggregated {len(all_fsa)} files into {len(jobs)} jobs.")
     else:
-        from core.utils import CONTROL_PREFIX_RE, is_water_file, strip_stage_prefix
+        from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
         qc_pattern = CONTROL_PREFIX_RE
         all_qc_files = []
         for folder in folders_to_scan:
-            fsa_files = [
-                f for f in folder.glob("*.fsa")
-                if not is_water_file(f.name)
-            ]
+            fsa_files = _scan_folder_fsa_files(folder, folder_files)
             qc_files = [f for f in fsa_files if qc_pattern.match(strip_stage_prefix(f.name))]
             pat_files = [f for f in fsa_files if not qc_pattern.match(strip_stage_prefix(f.name))]
             
@@ -281,6 +294,7 @@ def run_batch_jobs(
     all_collected_entries = []
     failed_jobs = []
     completed_jobs = []
+    aggregation_failed = False
     
     for i, job in enumerate(jobs):
         job_name = job["name"]
@@ -390,9 +404,14 @@ def run_batch_jobs(
             build_dit_html_reports(all_collected_entries, agg_outdir)
             log(f"[BATCH] Successfully built aggregated DIT reports in {agg_outdir}")
         except Exception as e:
+            aggregation_failed = True
+            failed_jobs.append("DIT aggregation")
             log(f"[ERROR] Failed to build aggregated DIT reports: {e}")
 
-    log("[BATCH] Batch run complete.")
+    if aggregation_failed:
+        log("[BATCH] Batch run complete with aggregation errors.")
+    else:
+        log("[BATCH] Batch run complete.")
     if update_callback:
         update_callback(total, total, "Done", "done")
     return {

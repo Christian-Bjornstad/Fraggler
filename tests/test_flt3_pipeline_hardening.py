@@ -17,6 +17,7 @@ from core.analyses.flt3.pipeline import (
     _resolve_peak_area,
     _scan_files,
     _select_best_entry,
+    generate_flt3_peak_report,
     run_pipeline,
     update_flt3_qc_trends,
 )
@@ -256,9 +257,9 @@ class TestFlt3PipelineHardening(unittest.TestCase):
     def test_d835_summary_table_shows_real_ratio_and_selection_metadata(self):
         peaks = pd.DataFrame(
             [
-                {"basepairs": 80.0, "peaks": 1000.0, "area": 8000.0, "label": "WT"},
-                {"basepairs": 129.0, "peaks": 400.0, "area": 2400.0, "label": "MUT"},
-                {"basepairs": 150.0, "peaks": 120.0, "area": 900.0, "label": "unspecific"},
+                {"peak_id": "pk_wt", "basepairs": 80.0, "peaks": 1000.0, "area": 8000.0, "label": "WT"},
+                {"peak_id": "pk_mut", "basepairs": 129.0, "peaks": 400.0, "area": 2400.0, "label": "MUT"},
+                {"peak_id": "pk_digest", "basepairs": 150.0, "peaks": 120.0, "area": 900.0, "label": "unspecific"},
             ]
         )
         entry = {
@@ -266,8 +267,13 @@ class TestFlt3PipelineHardening(unittest.TestCase):
             "ratio": 0.3,
             "ratio_numerator_area": 2400.0,
             "ratio_denominator_area": 8000.0,
+            "ratio_mode": "manual",
             "primary_peak_channel": "DATA3",
             "peaks_by_channel": {"DATA3": peaks},
+            "selected_wt_peak_id": "pk_wt",
+            "selected_wt_channel": "DATA3",
+            "selected_mutant_peak_ids": ["pk_mut"],
+            "selected_mutant_channels": ["DATA3"],
             "analysis_type": "standard",
             "protocol_injection_time": 3,
             "selected_injection": "3s",
@@ -329,6 +335,217 @@ class TestFlt3PipelineHardening(unittest.TestCase):
             _resolve_peak_area("FLT3-D835", combined_area=1612.0, channel_areas={"DATA3": 797.0}),
             1612.0,
         )
+
+    def test_manual_itd_ratio_uses_selected_blue_wt_and_green_mutant(self):
+        peaks = pd.DataFrame(
+            [
+                {
+                    "peak_id": "pk_wt",
+                    "basepairs": 330.0,
+                    "peaks": 9000.0,
+                    "area": 14000.0,
+                    "area_DATA1": 10000.0,
+                    "area_DATA2": 4000.0,
+                    "label": "WT",
+                    "keep": True,
+                },
+                {
+                    "peak_id": "pk_mut",
+                    "basepairs": 346.0,
+                    "peaks": 3800.0,
+                    "area": 7000.0,
+                    "area_DATA1": 1000.0,
+                    "area_DATA2": 5000.0,
+                    "label": "ITD",
+                    "keep": True,
+                },
+            ]
+        )
+        entry = {
+            "fsa": type("DummyFsa", (), {"file_name": "sample_itd.fsa"})(),
+            "assay": "FLT3-ITD",
+            "analysis_type": "standard",
+            "primary_peak_channel": "DATA1",
+            "peaks_by_channel": {"DATA1": peaks},
+            "manual_ratio_selection": {
+                "enabled": True,
+                "version": 1,
+                "wt": {"peak_id": "pk_wt", "channel": "DATA1"},
+                "mutants": [{"peak_id": "pk_mut", "channel": "DATA2"}],
+            },
+        }
+
+        _calculate_ratios([entry])
+
+        self.assertEqual(entry["ratio_mode"], "manual")
+        self.assertTrue(entry["manual_ratio_selection_valid"])
+        self.assertEqual(entry["selected_wt_peak_id"], "pk_wt")
+        self.assertEqual(entry["selected_mutant_peak_ids"], ["pk_mut"])
+        self.assertAlmostEqual(entry["ratio_denominator_area"], 10000.0, places=4)
+        self.assertAlmostEqual(entry["ratio_numerator_area"], 5000.0, places=4)
+        self.assertAlmostEqual(entry["ratio"], 0.5, places=4)
+        self.assertAlmostEqual(entry["mutant_fraction"], 1 / 3, places=4)
+        self.assertEqual(_interpret_entry(entry), "Positiv FLT3-ITD")
+
+        with TemporaryDirectory() as tmp:
+            generate_flt3_peak_report([entry], Path(tmp))
+            report = pd.read_csv(Path(tmp) / "Final_Detailed_Peak_Report.csv")
+
+        self.assertEqual(report.iloc[0]["RatioMode"], "manual")
+        self.assertEqual(report.iloc[0]["SelectedWT_PeakID"], "pk_wt")
+        self.assertEqual(report.iloc[0]["SelectedMutant_PeakIDs"], "pk_mut")
+        self.assertAlmostEqual(float(report.iloc[0]["RatioNumeratorArea"]), 5000.0, places=4)
+        self.assertAlmostEqual(float(report.iloc[0]["RatioDenominatorArea"]), 10000.0, places=4)
+
+    def test_invalid_manual_itd_selection_does_not_fall_back_to_auto(self):
+        peaks = pd.DataFrame(
+            [
+                {
+                    "peak_id": "pk_wt",
+                    "basepairs": 330.0,
+                    "peaks": 8200.0,
+                    "area": 12000.0,
+                    "area_DATA1": 12000.0,
+                    "area_DATA2": 3000.0,
+                    "label": "WT",
+                    "keep": True,
+                },
+                {
+                    "peak_id": "pk_mut",
+                    "basepairs": 350.0,
+                    "peaks": 2100.0,
+                    "area": 4500.0,
+                    "area_DATA1": 500.0,
+                    "area_DATA2": 4500.0,
+                    "label": "ITD",
+                    "keep": True,
+                },
+            ]
+        )
+        invalid_manual_entry = {
+            "fsa": type("DummyFsa", (), {"file_name": "sample_itd_invalid.fsa"})(),
+            "assay": "FLT3-ITD",
+            "analysis_type": "standard",
+            "primary_peak_channel": "DATA1",
+            "peaks_by_channel": {"DATA1": peaks},
+            "manual_ratio_selection": {
+                "enabled": True,
+                "version": 1,
+                "wt": {"peak_id": "missing_wt", "channel": "DATA1"},
+                "mutants": [{"peak_id": "missing_mut", "channel": "DATA2"}],
+            },
+        }
+
+        _calculate_ratios([invalid_manual_entry])
+
+        self.assertEqual(invalid_manual_entry["ratio_mode"], "manual_required")
+        self.assertFalse(invalid_manual_entry["manual_ratio_selection_valid"])
+        self.assertEqual(invalid_manual_entry["ratio"], 0.0)
+        self.assertEqual(invalid_manual_entry["ratio_numerator_area"], 0.0)
+        self.assertEqual(invalid_manual_entry["ratio_denominator_area"], 0.0)
+        self.assertIn("Ingen gyldige manuelle mutantpeaks", invalid_manual_entry["manual_ratio_selection_reason"])
+        self.assertEqual(_interpret_entry(invalid_manual_entry), "Ingen FLT3-ITD pavist")
+
+    def test_manual_d835_ratio_uses_inferred_wt_and_selected_mutant(self):
+        peaks = pd.DataFrame(
+            [
+                {
+                    "peak_id": "pk_wt",
+                    "basepairs": 80.1,
+                    "peaks": 2100.0,
+                    "area": 9000.0,
+                    "label": "WT",
+                    "keep": True,
+                },
+                {
+                    "peak_id": "pk_mut",
+                    "basepairs": 129.0,
+                    "peaks": 620.0,
+                    "area": 2700.0,
+                    "label": "MUT",
+                    "keep": True,
+                },
+                {
+                    "peak_id": "pk_digest",
+                    "basepairs": 150.0,
+                    "peaks": 180.0,
+                    "area": 950.0,
+                    "label": "unspecific",
+                    "keep": True,
+                },
+            ]
+        )
+        entry = {
+            "fsa": type("DummyFsa", (), {"file_name": "sample_d835.fsa"})(),
+            "assay": "FLT3-D835",
+            "analysis_type": "standard",
+            "primary_peak_channel": "DATA3",
+            "peaks_by_channel": {"DATA3": peaks},
+            "manual_ratio_selection": {
+                "enabled": True,
+                "version": 2,
+                "mutants": [{"peak_id": "pk_mut", "channel": "DATA3"}],
+            },
+        }
+
+        _calculate_ratios([entry])
+
+        self.assertEqual(entry["ratio_mode"], "manual")
+        self.assertTrue(entry["manual_ratio_selection_valid"])
+        self.assertEqual(entry["selected_wt_peak_id"], "pk_wt")
+        self.assertEqual(entry["selected_mutant_peak_ids"], ["pk_mut"])
+        self.assertAlmostEqual(entry["ratio_denominator_area"], 9000.0, places=4)
+        self.assertAlmostEqual(entry["ratio_numerator_area"], 2700.0, places=4)
+        self.assertAlmostEqual(entry["ratio"], 0.3, places=4)
+        self.assertEqual(_interpret_entry(entry), "Positiv FLT3-D835")
+
+    def test_control_qc_row_uses_manual_selection_areas(self):
+        peaks = pd.DataFrame(
+            [
+                {
+                    "peak_id": "pk_wt",
+                    "basepairs": 330.0,
+                    "peaks": 9100.0,
+                    "area": 16000.0,
+                    "area_DATA1": 11000.0,
+                    "area_DATA2": 5000.0,
+                    "label": "WT",
+                    "keep": True,
+                },
+                {
+                    "peak_id": "pk_mut",
+                    "basepairs": 349.5,
+                    "peaks": 3900.0,
+                    "area": 8000.0,
+                    "area_DATA1": 1200.0,
+                    "area_DATA2": 6200.0,
+                    "label": "ITD",
+                    "keep": True,
+                },
+            ]
+        )
+        entry = {
+            "fsa": type("DummyFsa", (), {"file_name": "control_itd.fsa"})(),
+            "group": "positive_control",
+            "assay": "FLT3-ITD",
+            "analysis_type": "standard",
+            "primary_peak_channel": "DATA1",
+            "peaks_by_channel": {"DATA1": peaks},
+            "manual_ratio_selection": {
+                "enabled": True,
+                "version": 1,
+                "wt": {"peak_id": "pk_wt", "channel": "DATA1"},
+                "mutants": [{"peak_id": "pk_mut", "channel": "DATA2"}],
+            },
+        }
+
+        _calculate_ratios([entry])
+        row = _build_control_qc_row(entry)
+
+        self.assertEqual(row["Status"], "PASS")
+        self.assertAlmostEqual(row["WT_Area"], 11000.0, places=4)
+        self.assertAlmostEqual(row["Mutant_Area"], 6200.0, places=4)
+        self.assertAlmostEqual(row["Ratio"], 6200.0 / 11000.0, places=4)
 
     def test_small_standard_itd_shoulders_do_not_trigger_positive_interpretation(self):
         peaks = pd.DataFrame(
