@@ -54,6 +54,7 @@ LINUX_BINARY_CANDIDATES = [
     "/usr/lib/x86_64-linux-gnu/libxcb-icccm.so.4",
     "/usr/lib/x86_64-linux-gnu/libxcb-image.so.0",
     "/usr/lib/x86_64-linux-gnu/libxcb-keysyms.so.1",
+    "/usr/lib/x86_64-linux-gnu/libxcb-shape.so.0",
     "/usr/lib/x86_64-linux-gnu/libxcb-randr.so.0",
     "/usr/lib/x86_64-linux-gnu/libxcb-render-util.so.0",
     "/usr/lib/x86_64-linux-gnu/libxcb-xinerama.so.0",
