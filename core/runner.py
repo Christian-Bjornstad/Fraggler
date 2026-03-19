@@ -168,6 +168,21 @@ def run_pipeline_job(
         if not files:
             raise ValueError(f"No .fsa files matched '{needle}'.")
 
+    if APP_SETTINGS.get("active_analysis") == "general":
+        tmp_input = None
+        try:
+            tmp_input = stage_files(files)
+            from core.pipeline import run_pipeline
+            run_pipeline(
+                fsa_dir=tmp_input,
+                base_outdir=base_outdir,
+                assay_folder_name=out_folder_name,
+                mode=effective_mode,
+            )
+        finally:
+            cleanup_temp(tmp_input)
+        return None
+
     ok_chunks = 0
     failed_chunks = 0
     collected_entries = []

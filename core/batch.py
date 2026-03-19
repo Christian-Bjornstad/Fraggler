@@ -155,7 +155,10 @@ def generate_jobs(
       - 'path': Path (for subfolder mode) OR None
       - 'files': list[Path] (if aggregated or filtered)
     """
+    from config import APP_SETTINGS
+
     folders_to_scan = []
+    active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     for p in input_paths:
         if p.is_file() and p.name.endswith(".yaml"):
             folders_to_scan.extend(scan_jobs_from_yaml(p))
@@ -175,6 +178,19 @@ def generate_jobs(
     if not folders_to_scan:
         log(f"[WARN] No folders with .fsa data found.")
         return []
+
+    if active_analysis == "general":
+        jobs = []
+        for folder in folders_to_scan:
+            jobs.append({
+                "name": folder.name,
+                "type": "pipeline",
+                "path": folder,
+                "files": [],
+            })
+        if jobs:
+            log(f"[INFO] General analysis: prepared {len(jobs)} folder job(s) without patient aggregation.")
+        return jobs
         
     jobs = []
     
@@ -251,6 +267,7 @@ def run_batch_jobs(
     from core.qc.qc_rules import QCRules
     s_qc = APP_SETTINGS.get("qc", {})
     active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
+    aggregate_dit_reports = bool(aggregate_dit_reports) and active_analysis != "general"
     qc_rules = QCRules(
         min_r2_ok=s_qc.get("min_r2_ok", 0.999),
         min_r2_warn=s_qc.get("min_r2_warn", 0.995),

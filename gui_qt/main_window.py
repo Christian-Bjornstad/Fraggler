@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-    QStackedWidget, QPushButton, QLabel, QFrame, QComboBox
+    QStackedWidget, QPushButton, QLabel, QFrame, QComboBox, QScrollArea
 )
 from PyQt6.QtCore import Qt, QSize
 from PyQt6.QtGui import QIcon
@@ -120,8 +120,9 @@ class MainWindow(QMainWindow):
         
         self.group_clonality = AnalysisGroup("Klonalitet", "clonality", self.on_sub_tab_clicked)
         self.group_flt3 = AnalysisGroup("FLT3 Analysis", "flt3", self.on_sub_tab_clicked)
+        self.group_general = AnalysisGroup("General", "general", self.on_sub_tab_clicked)
         
-        self.groups = [self.group_clonality, self.group_flt3]
+        self.groups = [self.group_clonality, self.group_flt3, self.group_general]
         for g in self.groups:
             sidebar_layout.addWidget(g)
             g.header.clicked.connect(lambda _, grp=g: self.on_group_clicked(grp))
@@ -137,21 +138,24 @@ class MainWindow(QMainWindow):
         self.tab_log = TabLog()
         self.tab_settings_clonality = TabAnalysisSettings("clonality")
         self.tab_settings_flt3 = TabAnalysisSettings("flt3")
+        self.tab_settings_general = TabAnalysisSettings("general")
 
         # Connect settings saved to reload run defaults
         self.tab_settings_clonality.settings_saved.connect(self._on_settings_saved)
         self.tab_settings_flt3.settings_saved.connect(self._on_settings_saved)
+        self.tab_settings_general.settings_saved.connect(self._on_settings_saved)
         
         # Connect global core logging to this tab
         from gui_qt.log_handler import qt_log_handler
         qt_log_handler.emitter.log_signal.connect(self.tab_log.append_log)
         
         # Add to stack
-        self.stacked_widget.addWidget(self.tab_run)
-        self.stacked_widget.addWidget(self.tab_ladder)
-        self.stacked_widget.addWidget(self.tab_log)
-        self.stacked_widget.addWidget(self.tab_settings_clonality)
-        self.stacked_widget.addWidget(self.tab_settings_flt3)
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_run))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_ladder))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_log))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_clonality))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_flt3))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_general))
         
         # Content Container (for padding)
         content_container = QWidget()
@@ -165,12 +169,26 @@ class MainWindow(QMainWindow):
         
         # Initialize
         active_ana = APP_SETTINGS.get("active_analysis", "clonality")
-        start_group = self.group_clonality if active_ana == "clonality" else self.group_flt3
+        group_map = {
+            "clonality": self.group_clonality,
+            "flt3": self.group_flt3,
+            "general": self.group_general,
+        }
+        start_group = group_map.get(active_ana, self.group_clonality)
         self.tab_run.set_analysis(active_ana)
         self.tab_ladder.set_analysis(active_ana)
         self.on_group_clicked(start_group)
         start_group.btn_run.setChecked(True)
         self.stacked_widget.setCurrentIndex(0)
+
+    def _wrap_scroll_page(self, page: QWidget) -> QScrollArea:
+        scroll = QScrollArea()
+        scroll.setObjectName("TabScrollArea")
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setWidget(page)
+        return scroll
         
     def on_group_clicked(self, group):
         # Update active analysis in core
@@ -207,9 +225,15 @@ class MainWindow(QMainWindow):
             APP_SETTINGS.setdefault("pipeline", {}).update(profile.get("pipeline", {}))
             save_settings(APP_SETTINGS)
             
-        page_idx = tab_idx
         if tab_idx == 3:
-            page_idx = 3 if analysis_id == "clonality" else 4
+            page_map = {
+                "clonality": 3,
+                "flt3": 4,
+                "general": 5,
+            }
+            page_idx = page_map.get(analysis_id, 3)
+        else:
+            page_idx = tab_idx
         self.stacked_widget.setCurrentIndex(page_idx)
 
     def _on_settings_saved(self, analysis_id):

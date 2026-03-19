@@ -14,10 +14,37 @@ from core.assay_config import (
     MIN_SIZE_STANDARD_HEIGHT_ROX,
     ROX_LADDER,
 )
+from config import (
+    GENERAL_DEFAULT_BP_MAX,
+    GENERAL_DEFAULT_BP_MIN,
+    GENERAL_DEFAULT_LADDER,
+    GENERAL_DEFAULT_PRIMARY_CHANNEL,
+    GENERAL_DEFAULT_TRACE_CHANNELS,
+    GENERAL_LADDERS,
+    GENERAL_TRACE_CHANNELS,
+    get_analysis_settings,
+)
 from fraggler.fraggler import FsaFile
+
+GENERAL_LADDER_RUNTIME = {
+    "LIZ500_250": (
+        float(MIN_DISTANCE_BETWEEN_PEAKS_LIZ),
+        float(MIN_SIZE_STANDARD_HEIGHT_LIZ),
+    ),
+    "ROX400HD": (
+        float(MIN_DISTANCE_BETWEEN_PEAKS_ROX),
+        float(MIN_SIZE_STANDARD_HEIGHT_ROX),
+    ),
+    "GS500ROX": (
+        float(MIN_DISTANCE_BETWEEN_PEAKS_ROX),
+        float(MIN_SIZE_STANDARD_HEIGHT_ROX),
+    ),
+}
 
 
 def _analysis_config_module(analysis_id: str):
+    if analysis_id == "general":
+        return None
     try:
         return importlib.import_module(f"core.analyses.{analysis_id}.config")
     except ImportError:
@@ -25,6 +52,17 @@ def _analysis_config_module(analysis_id: str):
 
 
 def _resolve_exact_ladder_name(analysis_id: str, ladder_name: str) -> str:
+    if analysis_id == "general":
+        upper = ladder_name.upper()
+        if upper == "LIZ500":
+            return "LIZ500_250"
+        if upper == "LIZ":
+            return "LIZ500_250"
+        if upper == "ROX":
+            return GENERAL_DEFAULT_LADDER
+        if upper in GENERAL_LADDERS:
+            return upper
+        return ladder_name
     config_mod = _analysis_config_module(analysis_id)
     upper = ladder_name.upper()
     if upper == "LIZ":
@@ -35,6 +73,13 @@ def _resolve_exact_ladder_name(analysis_id: str, ladder_name: str) -> str:
 
 
 def _resolve_ladder_runtime(analysis_id: str, ladder_name: str) -> tuple[str, float, float]:
+    if analysis_id == "general":
+        exact_ladder = _resolve_exact_ladder_name(analysis_id, ladder_name)
+        min_distance, min_height = GENERAL_LADDER_RUNTIME.get(
+            exact_ladder,
+            GENERAL_LADDER_RUNTIME[GENERAL_DEFAULT_LADDER],
+        )
+        return exact_ladder, float(min_distance), float(min_height)
     config_mod = _analysis_config_module(analysis_id)
     exact_ladder = _resolve_exact_ladder_name(analysis_id, ladder_name)
     if exact_ladder.upper().startswith("LIZ"):
@@ -87,6 +132,47 @@ def _normalize_flt3_classification(fsa_path: Path, classified: dict) -> dict:
     }
 
 
+def _general_runtime_metadata(fsa_path: Path) -> dict:
+    profile = get_analysis_settings("general")
+    pipeline = profile.get("pipeline", {})
+    ladder = _resolve_exact_ladder_name("general", pipeline.get("ladder", GENERAL_DEFAULT_LADDER))
+
+    trace_channels = pipeline.get("trace_channels", list(GENERAL_DEFAULT_TRACE_CHANNELS))
+    if not isinstance(trace_channels, list):
+        trace_channels = list(GENERAL_DEFAULT_TRACE_CHANNELS)
+    trace_channels = [ch for ch in trace_channels if ch in GENERAL_TRACE_CHANNELS]
+    if not trace_channels:
+        trace_channels = list(GENERAL_DEFAULT_TRACE_CHANNELS)
+
+    primary_peak_channel = str(pipeline.get("primary_peak_channel", GENERAL_DEFAULT_PRIMARY_CHANNEL))
+    if primary_peak_channel not in trace_channels:
+        primary_peak_channel = trace_channels[0]
+
+    try:
+        bp_min = float(pipeline.get("bp_min", GENERAL_DEFAULT_BP_MIN))
+    except (TypeError, ValueError):
+        bp_min = GENERAL_DEFAULT_BP_MIN
+    try:
+        bp_max = float(pipeline.get("bp_max", GENERAL_DEFAULT_BP_MAX))
+    except (TypeError, ValueError):
+        bp_max = GENERAL_DEFAULT_BP_MAX
+
+    return {
+        "analysis": "general",
+        "assay": "General",
+        "group": "sample",
+        "ladder": ladder,
+        "trace_channels": trace_channels,
+        "peak_channels": list(trace_channels),
+        "primary_peak_channel": primary_peak_channel,
+        "sample_channel": primary_peak_channel,
+        "bp_min": bp_min,
+        "bp_max": bp_max,
+        "raw": pipeline,
+        "file_path": fsa_path,
+    }
+
+
 def _classify_for_analysis(fsa_path: Path, analysis_id: str) -> dict | None:
     if analysis_id == "clonality":
         classified = classify_clonality_fsa(fsa_path)
@@ -98,6 +184,8 @@ def _classify_for_analysis(fsa_path: Path, analysis_id: str) -> dict | None:
         if classified:
             return _normalize_flt3_classification(fsa_path, classified)
         return None
+    if analysis_id == "general":
+        return _general_runtime_metadata(fsa_path)
     return None
 
 

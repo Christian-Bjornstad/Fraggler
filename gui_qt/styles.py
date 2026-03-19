@@ -14,6 +14,15 @@ QMainWindow {
     background-color: #f8fafc;
 }
 
+QScrollArea#TabScrollArea {
+    border: none;
+    background: transparent;
+}
+
+QScrollArea#TabScrollArea > QWidget > QWidget {
+    background: transparent;
+}
+
 /* Sidebar */
 #Sidebar {
     background-color: #0f172a;
@@ -222,6 +231,35 @@ QComboBox QAbstractItemView {
     selection-color: #4f46e5;
     padding: 4px;
     outline: none;
+}
+
+QFrame#GeneralSelectorCard,
+QFrame#GeneralTraceCard {
+    background: #f8fafc;
+    border: 1px solid #dbe4f0;
+    border-radius: 12px;
+}
+
+QFrame#GeneralTraceCard:hover {
+    border-color: #94a3b8;
+    background: #f8fbff;
+}
+
+QFrame#GeneralTraceCard[checked="true"] {
+    border-color: #4f46e5;
+    background: #eef2ff;
+}
+
+QCheckBox#GeneralTraceCheckbox {
+    font-size: 13px;
+    font-weight: 700;
+    color: #0f172a;
+    spacing: 10px;
+}
+
+QCheckBox#GeneralTraceCheckbox::indicator {
+    width: 18px;
+    height: 18px;
 }
 
 /* Tabulator / Table styling */

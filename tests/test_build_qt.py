@@ -19,6 +19,7 @@ class TestBuildQt(unittest.TestCase):
 
         self.assertIn("qt_app.py", args)
         self.assertIn(f"--runtime-hook={build_qt.HOOK_DIR / 'runtime_desktop.py'}", args)
+        self.assertIn("--hidden-import=core.analyses.general.pipeline", args)
         self.assertIn("--hidden-import=core.analyses.clonality.pipeline", args)
         self.assertIn("--hidden-import=core.analyses.flt3.pipeline", args)
         self.assertIn(build_qt._format_data_arg("assets", "assets"), args)

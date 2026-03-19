@@ -294,6 +294,65 @@ class TestLadderSelection(unittest.TestCase):
             min_size_standard_height=200.0,
         )
 
+    def test_detect_fsa_for_ladder_uses_general_runtime_settings(self):
+        path = Path("/tmp/general-sample.fsa")
+        original_analysis = APP_SETTINGS.get("active_analysis")
+        APP_SETTINGS["active_analysis"] = "general"
+        try:
+            with patch("gui_qt.ladder_utils.get_analysis_settings", return_value={
+                "pipeline": {
+                    "ladder": "GS500ROX",
+                    "trace_channels": ["DATA1", "DATA3"],
+                    "primary_peak_channel": "DATA3",
+                    "bp_min": 75.0,
+                    "bp_max": 900.0,
+                }
+            }):
+                meta = detect_fsa_for_ladder(path, preferred_analysis="general")
+        finally:
+            if original_analysis is None:
+                APP_SETTINGS.pop("active_analysis", None)
+            else:
+                APP_SETTINGS["active_analysis"] = original_analysis
+
+        self.assertEqual(meta["analysis"], "general")
+        self.assertEqual(meta["ladder"], "GS500ROX")
+        self.assertEqual(meta["trace_channels"], ["DATA1", "DATA3"])
+        self.assertEqual(meta["primary_peak_channel"], "DATA3")
+        self.assertEqual(meta["sample_channel"], "DATA3")
+        self.assertEqual(meta["bp_min"], 75.0)
+        self.assertEqual(meta["bp_max"], 900.0)
+
+    def test_load_adjustable_fsa_uses_general_runtime_metadata(self):
+        path = Path("/tmp/general-sample.fsa")
+        metadata = {
+            "analysis": "general",
+            "assay": "General",
+            "group": "sample",
+            "ladder": "ROX400HD",
+            "trace_channels": ["DATA1", "DATA2"],
+            "peak_channels": ["DATA1", "DATA2"],
+            "primary_peak_channel": "DATA2",
+            "bp_min": 50.0,
+            "bp_max": 1000.0,
+            "sample_channel": "DATA2",
+        }
+        sentinel_fsa = object()
+
+        with patch("gui_qt.ladder_utils.analyse_fsa_rox", return_value=sentinel_fsa) as mock_analyse:
+            fsa, refreshed_meta = load_adjustable_fsa(path, preferred_analysis="general", metadata=metadata.copy())
+
+        self.assertIs(fsa, sentinel_fsa)
+        self.assertEqual(refreshed_meta["analysis"], "general")
+        self.assertEqual(refreshed_meta["ladder"], "ROX400HD")
+        mock_analyse.assert_called_once_with(
+            path,
+            "DATA2",
+            ladder_name="ROX400HD",
+            min_distance_between_peaks=15.0,
+            min_size_standard_height=200.0,
+        )
+
     def test_load_adjustable_fsa_reuses_precomputed_metadata(self):
         path = Path("/tmp/sample.fsa")
         metadata = {

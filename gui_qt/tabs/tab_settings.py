@@ -23,6 +23,7 @@ from config import APP_SETTINGS, get_analysis_settings, save_settings
 ANALYSIS_LABELS = {
     "clonality": "Klonalitet",
     "flt3": "FLT3 Analysis",
+    "general": "General",
 }
 
 

@@ -582,7 +582,8 @@ class TabLadder(QWidget):
         self._current_meta = meta
         self._current_fsa = result["fsa"]
         adj_status = self._adjustment_status_for(file_path)
-        self.detail_labels["assay"].setText(meta["assay"])
+        assay_label = meta.get("assay") or meta.get("analysis", "").capitalize() or "—"
+        self.detail_labels["assay"].setText(assay_label)
         self.detail_labels["ladder"].setText(meta["ladder"])
         self.detail_labels["adjustment"].setText(adj_status)
 

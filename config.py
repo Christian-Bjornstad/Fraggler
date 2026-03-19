@@ -24,6 +24,14 @@ _LOG = logging.getLogger(__name__)
 LAST_SETTINGS_LOAD_ERROR: str | None = None
 LAST_SETTINGS_SAVE_ERROR: str | None = None
 
+GENERAL_LADDERS = ("LIZ500_250", "ROX400HD", "GS500ROX")
+GENERAL_TRACE_CHANNELS = ("DATA1", "DATA2", "DATA3")
+GENERAL_DEFAULT_LADDER = "ROX400HD"
+GENERAL_DEFAULT_TRACE_CHANNELS = ["DATA1"]
+GENERAL_DEFAULT_PRIMARY_CHANNEL = "DATA1"
+GENERAL_DEFAULT_BP_MIN = 50.0
+GENERAL_DEFAULT_BP_MAX = 1000.0
+
 # ============================================================
 # DEFAULTS
 # ============================================================
@@ -97,6 +105,25 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "pipeline": {
                 "mode": "all",
                 "assay_filter_substring": "",
+            },
+        },
+        "general": {
+            "batch": {
+                "base_input_dir": str(Path.home()),
+                "output_base": str(Path.home()),
+                "aggregate_by_patient": False,
+                "patient_id_regex": r"\d{2}OUM\d{5}",
+                "aggregate_dit_reports": False,
+            },
+            "pipeline": {
+                "mode": "all",
+                "assay_filter_substring": "",
+                "ladder": GENERAL_DEFAULT_LADDER,
+                "trace_channels": list(GENERAL_DEFAULT_TRACE_CHANNELS),
+                "peak_channels": list(GENERAL_DEFAULT_TRACE_CHANNELS),
+                "primary_peak_channel": GENERAL_DEFAULT_PRIMARY_CHANNEL,
+                "bp_min": GENERAL_DEFAULT_BP_MIN,
+                "bp_max": GENERAL_DEFAULT_BP_MAX,
             },
         },
     },
@@ -215,8 +242,55 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             profile_pipeline["mode"] = pipeline.get("mode", default_pipeline.get("mode", "all"))
         if not profile_pipeline.get("assay_filter_substring"):
             profile_pipeline["assay_filter_substring"] = pipeline.get("assay_filter_substring", default_pipeline.get("assay_filter_substring", ""))
+        if analysis_id == "general":
+            profile_pipeline.setdefault("ladder", default_pipeline.get("ladder", GENERAL_DEFAULT_LADDER))
+            profile_pipeline.setdefault("trace_channels", copy.deepcopy(default_pipeline.get("trace_channels", list(GENERAL_DEFAULT_TRACE_CHANNELS))))
+            profile_pipeline.setdefault("peak_channels", copy.deepcopy(default_pipeline.get("peak_channels", list(GENERAL_DEFAULT_TRACE_CHANNELS))))
+            profile_pipeline.setdefault("primary_peak_channel", default_pipeline.get("primary_peak_channel", GENERAL_DEFAULT_PRIMARY_CHANNEL))
+            profile_pipeline.setdefault("bp_min", default_pipeline.get("bp_min", GENERAL_DEFAULT_BP_MIN))
+            profile_pipeline.setdefault("bp_max", default_pipeline.get("bp_max", GENERAL_DEFAULT_BP_MAX))
 
     return settings
+
+
+def _normalize_general_pipeline_settings(profile_pipeline: Dict[str, Any]) -> None:
+    """Clamp general runtime settings to the supported ladder/channel contract."""
+    ladder = str(profile_pipeline.get("ladder", GENERAL_DEFAULT_LADDER)).strip() or GENERAL_DEFAULT_LADDER
+    if ladder.upper() == "LIZ500":
+        ladder = "LIZ500_250"
+    if ladder not in GENERAL_LADDERS:
+        ladder = GENERAL_DEFAULT_LADDER
+    profile_pipeline["ladder"] = ladder
+
+    trace_channels = profile_pipeline.get("trace_channels", GENERAL_DEFAULT_TRACE_CHANNELS)
+    if not isinstance(trace_channels, list):
+        trace_channels = list(GENERAL_DEFAULT_TRACE_CHANNELS)
+    normalized_traces = [ch for ch in trace_channels if isinstance(ch, str) and ch in GENERAL_TRACE_CHANNELS]
+    if not normalized_traces:
+        normalized_traces = list(GENERAL_DEFAULT_TRACE_CHANNELS)
+    profile_pipeline["trace_channels"] = normalized_traces
+
+    peak_channels = profile_pipeline.get("peak_channels", normalized_traces)
+    if not isinstance(peak_channels, list):
+        peak_channels = list(normalized_traces)
+    normalized_peaks = [ch for ch in peak_channels if isinstance(ch, str) and ch in normalized_traces]
+    if not normalized_peaks:
+        normalized_peaks = list(normalized_traces)
+    profile_pipeline["peak_channels"] = normalized_peaks
+
+    primary_peak_channel = str(profile_pipeline.get("primary_peak_channel", normalized_traces[0])).strip()
+    if primary_peak_channel not in normalized_traces:
+        primary_peak_channel = normalized_traces[0]
+    profile_pipeline["primary_peak_channel"] = primary_peak_channel
+
+    try:
+        profile_pipeline["bp_min"] = float(profile_pipeline.get("bp_min", GENERAL_DEFAULT_BP_MIN))
+    except (TypeError, ValueError):
+        profile_pipeline["bp_min"] = GENERAL_DEFAULT_BP_MIN
+    try:
+        profile_pipeline["bp_max"] = float(profile_pipeline.get("bp_max", GENERAL_DEFAULT_BP_MAX))
+    except (TypeError, ValueError):
+        profile_pipeline["bp_max"] = GENERAL_DEFAULT_BP_MAX
 
 def _validate_settings(settings: Dict[str, Any]) -> None:
     """Basic validation for critical settings."""
@@ -276,6 +350,8 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
             profile_pipeline["mode"] = defaults["pipeline"]["mode"]
         if not isinstance(profile_pipeline.get("assay_filter_substring"), str):
             profile_pipeline["assay_filter_substring"] = defaults["pipeline"]["assay_filter_substring"]
+        if analysis_id == "general":
+            _normalize_general_pipeline_settings(profile_pipeline)
 
 
 def get_analysis_settings(analysis_id: str | None = None, settings: Dict[str, Any] | None = None) -> Dict[str, Any]:
