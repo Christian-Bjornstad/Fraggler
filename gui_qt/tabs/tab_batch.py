@@ -648,57 +648,6 @@ class TabBatch(QWidget):
         if normalized not in existing:
             self.folder_list.addItem(normalized)
 
-    def _expand_general_path(self, path: Path) -> list[Path]:
-        if path.is_file():
-            return [path] if path.suffix.lower() == ".fsa" else []
-        if path.is_dir():
-            return sorted(
-                {
-                    candidate
-                    for candidate in path.rglob("*")
-                    if candidate.is_file() and candidate.suffix.lower() == ".fsa"
-                },
-                key=lambda p: p.as_posix().lower(),
-            )
-        return []
-
-    def _build_general_jobs_worker(self, input_paths: list[Path]) -> list[dict]:
-        jobs: list[dict] = []
-        seen_names: set[str] = set()
-        seen_files: set[str] = set()
-
-        for source in input_paths:
-            files = self._expand_general_path(source)
-            if not files:
-                continue
-            deduped_files: list[Path] = []
-            for file_path in files:
-                key = file_path.resolve().as_posix() if file_path.exists() else str(file_path)
-                if key in seen_files:
-                    continue
-                seen_files.add(key)
-                deduped_files.append(file_path)
-            if not deduped_files:
-                continue
-
-            base_name = source.stem if source.is_file() else source.name
-            job_name = base_name or source.name
-            suffix = 2
-            while job_name in seen_names:
-                job_name = f"{base_name}_{suffix}"
-                suffix += 1
-            seen_names.add(job_name)
-
-            jobs.append(
-                {
-                    "name": job_name,
-                    "type": "pipeline",
-                    "path": source,
-                    "files": deduped_files,
-                }
-            )
-
-        return jobs
 
     def _general_selected_paths(self) -> list[Path]:
         paths: list[Path] = []
@@ -707,9 +656,6 @@ class TabBatch(QWidget):
             if p_str:
                 paths.append(Path(p_str).expanduser())
         return paths
-
-    def _build_general_scan_worker(self, paths: list[Path]):
-        return Worker(self._build_general_jobs_worker, paths)
 
     def _rebuild_table(self):
         selected_names = {
@@ -781,21 +727,18 @@ class TabBatch(QWidget):
         self.status_lbl.setText("Finding jobs...")
         self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
 
-        if self._is_general_analysis():
-            worker = self._build_general_scan_worker(paths)
-        else:
-            from core.batch import generate_jobs
+        from core.batch import generate_jobs
 
-            batch_settings = self._profile_for().get("batch", {})
-            agg_pat = bool(batch_settings.get("aggregate_by_patient", True))
-            regex = batch_settings.get("patient_id_regex", r"\d{2}OUM\d{5}")
+        batch_settings = self._profile_for().get("batch", {})
+        agg_pat = bool(batch_settings.get("aggregate_by_patient", True))
+        regex = batch_settings.get("patient_id_regex", r"\d{2}OUM\d{5}")
 
-            worker = Worker(
-                generate_jobs,
-                input_paths=paths,
-                aggregate_patients=agg_pat,
-                patient_regex=regex
-            )
+        worker = Worker(
+            generate_jobs,
+            input_paths=paths,
+            aggregate_patients=agg_pat,
+            patient_regex=regex
+        )
         worker.signals.result.connect(self._on_scan_result)
         worker.signals.error.connect(self._on_scan_error)
         

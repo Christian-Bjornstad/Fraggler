@@ -81,32 +81,36 @@ def scan_jobs_from_yaml(yaml_path: Path) -> List[Path]:
 # PATIENT AGGREGATION UTILITIES
 # ============================================================
 
-def _scan_folder_fsa_files(folder: Path, folder_files: Dict[Path, List[Path]]) -> List[Path]:
-    """Return cached .fsa files for a folder, scanning only once per call site."""
-    if folder not in folder_files:
+def _scan_folder_fsa_files(path: Path, folder_files: Dict[Path, List[Path]]) -> List[Path]:
+    """Return cached .fsa files for a folder/file, scanning only once per call site."""
+    if path not in folder_files:
         from core.utils import is_water_file
 
-        if not folder.is_dir():
-            folder_files[folder] = []
+        if path.is_file():
+            if path.suffix.lower() == ".fsa" and not is_water_file(path.name):
+                folder_files[path] = [path]
+            else:
+                folder_files[path] = []
+        elif not path.is_dir():
+            folder_files[path] = []
         else:
-            folder_files[folder] = [
-                path for path in sorted(folder.glob("*.fsa"))
-                if not is_water_file(path.name)
+            folder_files[path] = [
+                f for f in sorted(path.glob("*.fsa"))
+                if not is_water_file(f.name)
             ]
-    return folder_files[folder]
+    return folder_files[path]
 
 
 def find_all_fsa_files(
-    folders: List[Path],
+    paths: List[Path],
     folder_files: Dict[Path, List[Path]] | None = None,
 ) -> List[Path]:
-    """Find all .fsa files in the given folders."""
+    """Find all .fsa files in the given folders or individual paths."""
     folder_files = folder_files or {}
 
     fsa_files = []
-    for f in folders:
-        if f.is_dir():
-            fsa_files.extend(_scan_folder_fsa_files(f, folder_files))
+    for p in paths:
+        fsa_files.extend(_scan_folder_fsa_files(p, folder_files))
     return fsa_files
 
 
@@ -176,9 +180,13 @@ def generate_jobs(
     folder_files: Dict[Path, List[Path]] = {}
     active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     for p in input_paths:
-        if p.is_file() and p.name.endswith(".yaml"):
-            folders_to_scan.extend(scan_jobs_from_yaml(p))
-            continue
+        if p.is_file():
+            if p.suffix.lower() == ".yaml":
+                folders_to_scan.extend(scan_jobs_from_yaml(p))
+                continue
+            if p.suffix.lower() == ".fsa":
+                folders_to_scan.append(p)
+                continue
 
         if _scan_folder_fsa_files(p, folder_files):
             folders_to_scan.append(p)
