@@ -195,18 +195,6 @@ def generate_jobs(
         log(f"[WARN] No folders with .fsa data found.")
         return []
 
-    if active_analysis == "general":
-        jobs = []
-        for folder in folders_to_scan:
-            jobs.append({
-                "name": folder.name,
-                "type": "pipeline",
-                "path": folder,
-                "files": [],
-            })
-        if jobs:
-            log(f"[INFO] General analysis: prepared {len(jobs)} folder job(s) without patient aggregation.")
-        return jobs
         
     jobs = []
     
