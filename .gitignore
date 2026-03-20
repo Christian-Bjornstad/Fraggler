@@ -33,3 +33,7 @@ TEST_REPORTS_RERUN/
 
 # Notes
 Notes.txt
+
+# Tests & scratch
+tests/
+tmp/

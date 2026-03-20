@@ -19,7 +19,6 @@ from fraggler.fraggler import (
 
 from core.analysis import (
     MIN_R2_QUALITY,
-    _refine_polynomial,
     _select_best_ladder_candidate,
     analyse_fsa_rox,
     compute_ladder_qc_metrics,
@@ -767,11 +766,6 @@ def _attempt_lenient_rox_fit(fsa_path: Path, sample_channel: str) -> FsaFile | N
                 setattr(fsa, "_flt3_sizing_method", "spline_lenient")
                 return fsa
 
-            refined = _refine_polynomial(fsa, "ROX-lenient", fsa_path)
-            if refined is not None:
-                setattr(refined, "_flt3_sizing_method", "polynomial_refinement_lenient")
-                return refined
-
             setattr(fsa, "_flt3_sizing_method", "spline_lenient")
             return fsa
         except Exception:
@@ -1425,11 +1419,16 @@ def run_pipeline(
     fsa_dir, assay_dir = normalize_pipeline_paths(fsa_dir, base_outdir, assay_folder_name)
 
     raw_files = _scan_files(fsa_dir, mode=mode)
-    classified = []
-    for path in raw_files:
-        meta = classify_fsa(path)
-        if meta:
-            classified.append((path, meta))
+
+    # Parallel classification
+    from multiprocessing import Pool, cpu_count
+    n_workers = max(1, cpu_count() - 1)
+    try:
+        with Pool(n_workers) as pool:
+            meta_results = pool.map(classify_fsa, raw_files)
+    except Exception:
+        meta_results = [classify_fsa(p) for p in raw_files]
+    classified = [(p, m) for p, m in zip(raw_files, meta_results) if m is not None]
 
     if not classified:
         return [] if return_entries else None
@@ -1438,10 +1437,23 @@ def run_pipeline(
     for path, meta in classified:
         groups[meta["selection_key"]].append((path, meta))
 
+    # Parallel selection (best entry per group)
+    n_workers = max(1, cpu_count() - 1)
+    sorted_groups = sorted(groups.items())
+    candidates_list = [c for _, c in sorted_groups]
+
+    try:
+        with Pool(n_workers) as pool:
+            results = pool.map(_select_best_entry, candidates_list)
+    except Exception as ex:
+        print_warning(f"[PARALLEL] Multiprocessing failed during FLT3 selection ({ex}), falling back to sequential.")
+        results = [_select_best_entry(c) for c in candidates_list]
+
     entries = []
-    for selection_key, candidates in sorted(groups.items()):
-        entry = _select_best_entry(candidates)
+    for i, entry in enumerate(results):
         if entry is None:
+            selection_key = sorted_groups[i][0]
+            candidates = sorted_groups[i][1]
             first_file = candidates[0][0].name if candidates else selection_key
             print_warning(f"FLT3 selection failed for {first_file}")
             continue

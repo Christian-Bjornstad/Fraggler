@@ -39,7 +39,7 @@ from core.assay_config import (
 # --------------------------------------------------------------
 # Analysis Constants (extracted magic numbers)
 # --------------------------------------------------------------
-LADDER_MAX_ITERATIONS = 40
+LADDER_MAX_ITERATIONS = 15
 BASELINE_BIN_SIZE = 200
 BASELINE_QUANTILE = 0.10
 PEAK_MIN_HEIGHT = 800.0
@@ -157,59 +157,6 @@ def _map_step_indices(source_steps: np.ndarray, target_steps: np.ndarray) -> dic
     return mapping
 
 
-def _refine_polynomial(fsa: FsaFile, label: str, fsa_path) -> FsaFile | None:
-    """Apply polynomial degree-3 fit with iterative outlier removal.
-
-    Used as a fallback when standard fitting fails, and also as a
-    post-fit refinement when R² < MIN_R2_QUALITY.
-    """
-    try:
-        from sklearn.linear_model import LinearRegression
-        if not hasattr(fsa, "expected_ladder_steps") or getattr(fsa, "expected_ladder_steps", None) is None:
-            fsa.expected_ladder_steps = np.asarray(fsa.ladder_steps, dtype=float).copy()
-        X_vals = np.array(fsa.best_size_standard, dtype=float)
-        Y_vals = np.array(fsa.ladder_steps, dtype=float)
-
-        X_iter = X_vals.copy()
-        Y_iter = Y_vals.copy()
-        for _it in range(5):
-            if len(X_iter) < 8:
-                break
-            coeffs = np.polyfit(X_iter, Y_iter, 3)
-            Y_pred = np.polyval(coeffs, X_iter)
-            residuals = np.abs(Y_iter - Y_pred)
-            max_idx = np.argmax(residuals)
-            if residuals[max_idx] < 2.0:
-                break
-            X_iter = np.delete(X_iter, max_idx)
-            Y_iter = np.delete(Y_iter, max_idx)
-
-        coeffs = np.polyfit(X_iter, Y_iter, 3)
-        all_time = np.arange(len(fsa.sample_data))
-        bp_all = np.polyval(coeffs, all_time)
-
-        df = (pd.DataFrame({"peaks": fsa.sample_data})
-              .reset_index().rename(columns={"index": "time"}))
-        df["basepairs"] = np.round(bp_all, 2)
-        df = df.loc[df.basepairs >= 0]
-
-        fsa.sample_data_with_basepairs = df
-        fsa.fitted_to_model = True
-        fsa.best_size_standard = X_iter
-        fsa.ladder_steps = Y_iter
-
-        dummy_model = LinearRegression()
-        dummy_model.coef_ = np.array([coeffs[-2]])
-        dummy_model.intercept_ = coeffs[-1]
-        fsa.ladder_model = dummy_model
-        strategy = "polynomial_refine_partial" if _missing_expected_ladder_steps(fsa) else "polynomial_refine_full"
-        fsa = _set_ladder_fit_metadata(fsa, strategy)
-
-        print_green(f"[{label}] Brukte polynomial refinement (degree-3, outlier removal) for {fsa_path.name}")
-        return fsa
-    except Exception as e:
-        print_warning(f"[{label}] Polynomial refinement feilet for {fsa_path.name}: {e}")
-        return None
 
 
 def _rank_size_standard_combinations(fsa: FsaFile) -> list[np.ndarray]:
@@ -746,6 +693,8 @@ def analyse_fsa_liz(
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     qc = compute_ladder_qc_metrics(fsa)
+                    if qc["r2"] >= 0.9995:
+                        return _finalize_auto_fit_metadata(fsa)
                     if qc["r2"] < HIGH_END_RESCUE_R2:
                         rescued = _try_high_end_ladder_rescue(fsa, "LIZ", fsa_path)
                         if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
@@ -756,22 +705,14 @@ def analyse_fsa_liz(
                             )
                             fsa = rescued
                             qc = compute_ladder_qc_metrics(fsa)
-                    if qc["r2"] >= MIN_R2_QUALITY:
-                        return _finalize_auto_fit_metadata(fsa)
-                    else:
-                        refined = _refine_polynomial(fsa, "LIZ", fsa_path)
-                        if refined:
-                            return refined
-                        return _finalize_auto_fit_metadata(fsa)
+                    return _finalize_auto_fit_metadata(fsa)
             except ValueError:
                 pass
         except ValueError:
             continue
 
     if best_fallback_fsa is not None:
-        refined = _refine_polynomial(best_fallback_fsa, "LIZ", fsa_path)
-        if refined:
-            return refined
+        return _finalize_auto_fit_metadata(best_fallback_fsa)
 
     print_warning(f"[LIZ] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
     return None
@@ -873,6 +814,8 @@ def analyse_fsa_rox(
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     qc = compute_ladder_qc_metrics(fsa)
+                    if qc["r2"] >= 0.9995:
+                        return _finalize_auto_fit_metadata(fsa)
                     if qc["r2"] < HIGH_END_RESCUE_R2:
                         rescued = _try_high_end_ladder_rescue(fsa, "ROX", fsa_path)
                         if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
@@ -904,22 +847,14 @@ def analyse_fsa_rox(
                                         )
                                     fsa = completed
                                     qc = compute_ladder_qc_metrics(fsa)
-                    if qc["r2"] >= MIN_R2_QUALITY:
-                        return _finalize_auto_fit_metadata(fsa)
-                    else:
-                        refined = _refine_polynomial(fsa, "ROX", fsa_path)
-                        if refined:
-                            return refined
-                        return _finalize_auto_fit_metadata(fsa)
+                    return _finalize_auto_fit_metadata(fsa)
             except ValueError:
                 pass
         except ValueError:
             continue
 
     if best_fallback_fsa is not None:
-        refined = _refine_polynomial(best_fallback_fsa, "ROX", fsa_path)
-        if refined:
-            return refined
+        return _finalize_auto_fit_metadata(best_fallback_fsa)
 
     print_warning(f"[ROX] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
     return None
