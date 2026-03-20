@@ -287,6 +287,9 @@ def run_batch_jobs(
         sample_peak_window_bp=s_qc.get("sample_peak_window_bp", 2.0)
     )
     
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+
     total = len(jobs)
     log(f"[BATCH] Starting batch run of {total} jobs.")
     
@@ -296,14 +299,19 @@ def run_batch_jobs(
     completed_jobs = []
     aggregation_failed = False
     
-    for i, job in enumerate(jobs):
+    # Thread safety locks
+    data_lock = threading.Lock()
+    callback_lock = threading.Lock()
+    
+    def process_job(i, job):
         job_name = job["name"]
         job_path = job["path"]
         job_files = job["files"]
         
         log(f"[BATCH] Processing job {i+1}/{total}: {job_name}")
-        if update_callback:
-            update_callback(i, total, job_name, "running")
+        with callback_lock:
+            if update_callback:
+                update_callback(i, total, job_name, "running")
             
         try:
             # Format output params
@@ -316,7 +324,7 @@ def run_batch_jobs(
             # Execute based on job type
             if job_type == "pipeline":
                 if aggregate_dit_reports:
-                    # Collect mode: run pipeline but don't build DIT reports yet
+                    # Collect mode
                     entries = run_pipeline_job_collect(
                         fsa_dir=job_path,
                         base_outdir=output_base,
@@ -326,10 +334,11 @@ def run_batch_jobs(
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
                     )
-                    all_collected_entries.extend(entries)
+                    with data_lock:
+                        all_collected_entries.extend(entries)
                     log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
                 else:
-                    # Normal mode: run pipeline and build DIT reports per-job
+                    # Normal mode
                     run_pipeline_job(
                         fsa_dir=job_path,
                         base_outdir=output_base,
@@ -360,10 +369,10 @@ def run_batch_jobs(
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
                     )
-                    all_collected_entries.extend(entries)
+                    with data_lock:
+                        all_collected_entries.extend(entries)
                     log(f"[BATCH] Collected {len(entries)} entries from {job_name} for DIT aggregation.")
                 else:
-                    # Explicit standalone DIT job (just rebuilds reports per folder)
                     run_dit_job(
                         fsa_dir=job_path,
                         base_outdir=output_base,
@@ -376,18 +385,36 @@ def run_batch_jobs(
             else:
                 raise ValueError(f"Unknown job_type: {job_type}")
                     
-            if update_callback:
-                update_callback(i + 1, total, job_name, "success")
-            completed_jobs.append(job_name)
+            with data_lock:
+                completed_jobs.append(job_name)
+            with callback_lock:
+                if update_callback:
+                    update_callback(i + 1, total, job_name, "success")
                 
         except Exception as e:
             log(f"[ERROR] Job '{job_name}' failed: {e}")
-            failed_jobs.append(job_name)
-            if update_callback:
-                update_callback(i + 1, total, job_name, f"error: {e}")
+            with data_lock:
+                failed_jobs.append(job_name)
+            with callback_lock:
+                if update_callback:
+                    update_callback(i + 1, total, job_name, f"error: {e}")
             if not continue_on_error:
                 log("[BATCH] Stopping batch due to error.")
-                break
+                raise  # Stop early by propagating error to executor
+
+    # Perform multi-threaded patient processing
+    # Max workers = 3 (modest to prevent over-subscription of child Pool processes)
+    max_patient_workers = min(3, max(1, os.cpu_count() // 2 or 1))
+    
+    try:
+        with ThreadPoolExecutor(max_workers=max_patient_workers) as executor:
+            # We must map with indices to pass to process_job
+            executor.map(lambda x: process_job(*x), enumerate(jobs))
+    except Exception as ex:
+        if not continue_on_error:
+            log(f"[BATCH] Batch execution halted after error: {ex}")
+        else:
+            log(f"[BATCH] Batch execution completed with some errors.")
                 
     # --- CROSS-FOLDER DIT AGGREGATION ---
     if aggregate_dit_reports and all_collected_entries:

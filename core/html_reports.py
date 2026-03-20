@@ -1061,7 +1061,7 @@ def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: 
     if not entries: return
     html_lines.append("<div class='assay-block'>")
     html_lines.append(f"<h3>TCRβ – Parallell {replicate_num}</h3>")
-    html_lines.append("<p class='small'>TCRβ mix A, B og C med felles y-akse for enkel sammenligning.</p>")
+    html_lines.append("<p class='small'><strong>Referanseområde: 240–285 bp</strong><br>TCRβ mix A: 240–285 bp (Vβ–Jβ1/2)</p>")
     html_lines.append("<div class='combo-grid'>")
     group_y = compute_group_ymax_for_entries(entries)
     
@@ -1098,7 +1098,7 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
     html_lines.append("<h2>Kombinasjonsfigur – TCRγ</h2><div class='assay-block'>")
     html_lines.append("<p class='small'>TCRγ mix A og mix B (begge paralleller) med felles x- og y-akse.</p>")
     html_lines.append("<div class='combo-grid'>")
-    for e in tcrg_entries:
+    for e in sorted(tcrg_entries, key=lambda x: x["assay"]):
         fsa, primary_ch = e["fsa"], e["primary_peak_channel"]
         e_combo = dict(e)
         e_combo["forced_ymax"] = group_y
