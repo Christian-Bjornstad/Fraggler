@@ -21,8 +21,10 @@ from core.qc.qc_markers import (
 from core.qc.qc_rules import QCRules
 from core.utils import strip_stage_prefix
 
+import threading
 
 CLONALITY_TRACKING_FILENAME = "Clonality_Tracking.xlsx"
+_clonality_excel_lock = threading.Lock()
 CONTROL_IDS = {"PK", "PK1", "PK2", "NK", "RK"}
 RUN_SHEET_COLUMNS = [
     "IdentityKey",
@@ -139,56 +141,64 @@ def update_clonality_tracking_workbook(
     if df_patient.empty and df_control.empty and df_peaks.empty:
         return
 
-    if excel_path.exists():
-        try:
-            with pd.ExcelFile(excel_path, engine="openpyxl") as xls:
-                has_patient = "Patient_Runs" in xls.sheet_names
-                has_control = "Control_Runs" in xls.sheet_names
-                has_peaks = "PK_Peaks" in xls.sheet_names
-        except Exception:
-            has_patient = False
-            has_control = False
-            has_peaks = False
+    with _clonality_excel_lock:
+        if excel_path.exists():
+            try:
+                with pd.ExcelFile(excel_path, engine="openpyxl") as xls:
+                    has_patient = "Patient_Runs" in xls.sheet_names
+                    has_control = "Control_Runs" in xls.sheet_names
+                    has_peaks = "PK_Peaks" in xls.sheet_names
+            except Exception:
+                has_patient = False
+                has_control = False
+                has_peaks = False
+                from fraggler.fraggler import print_warning # Import if not already globally available
+                print_warning(f"Kunne ikke lese eksisterende {excel_path.name}, kanskje korrupt. Lager ny...")
 
-        old_patient = pd.read_excel(excel_path, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-        old_control = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-        old_peaks = pd.read_excel(excel_path, sheet_name="PK_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
-    else:
-        old_patient = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-        old_control = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-        old_peaks = pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
+            try:
+                old_patient = pd.read_excel(excel_path, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_control = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_peaks = pd.read_excel(excel_path, sheet_name="PK_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
+            except Exception:
+                old_patient = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_control = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_peaks = pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
+        else:
+            old_patient = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+            old_control = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+            old_peaks = pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
 
-    if not df_patient.empty and "IdentityKey" in old_patient.columns:
-        old_patient = old_patient[~old_patient["IdentityKey"].isin(df_patient["IdentityKey"])]
-    if not df_control.empty and "IdentityKey" in old_control.columns:
-        old_control = old_control[~old_control["IdentityKey"].isin(df_control["IdentityKey"])]
-    if pk_identity_keys and "IdentityKey" in old_peaks.columns:
-        old_peaks = old_peaks[~old_peaks["IdentityKey"].isin(sorted(pk_identity_keys))]
+        if not df_patient.empty and "IdentityKey" in old_patient.columns:
+            old_patient = old_patient[~old_patient["IdentityKey"].isin(df_patient["IdentityKey"])]
+        if not df_control.empty and "IdentityKey" in old_control.columns:
+            old_control = old_control[~old_control["IdentityKey"].isin(df_control["IdentityKey"])]
+        if pk_identity_keys and "IdentityKey" in old_peaks.columns:
+            old_peaks = old_peaks[~old_peaks["IdentityKey"].isin(sorted(pk_identity_keys))]
 
-    all_patient = _concat_frames(old_patient, df_patient)
-    all_control = _concat_frames(old_control, df_control)
-    all_peaks = _concat_frames(old_peaks, df_peaks)
+        all_patient = _concat_frames(old_patient, df_patient)
+        all_control = _concat_frames(old_control, df_control)
+        all_peaks = _concat_frames(old_peaks, df_peaks)
 
-    if not all_patient.empty and "IdentityKey" in all_patient.columns:
-        all_patient = all_patient.drop_duplicates(subset=["IdentityKey"], keep="last")
-    if not all_control.empty and "IdentityKey" in all_control.columns:
-        all_control = all_control.drop_duplicates(subset=["IdentityKey"], keep="last")
-    if not all_peaks.empty and {"IdentityKey", "MarkerName"}.issubset(all_peaks.columns):
-        all_peaks = all_peaks.drop_duplicates(subset=["IdentityKey", "MarkerName"], keep="last")
+        if not all_patient.empty and "IdentityKey" in all_patient.columns:
+            all_patient = all_patient.drop_duplicates(subset=["IdentityKey"], keep="last")
+        if not all_control.empty and "IdentityKey" in all_control.columns:
+            all_control = all_control.drop_duplicates(subset=["IdentityKey"], keep="last")
+        if not all_peaks.empty and {"IdentityKey", "MarkerName"}.issubset(all_peaks.columns):
+            all_peaks = all_peaks.drop_duplicates(subset=["IdentityKey", "MarkerName"], keep="last")
 
-    all_patient = _reindex_columns(all_patient, RUN_SHEET_COLUMNS)
-    all_control = _reindex_columns(all_control, RUN_SHEET_COLUMNS)
-    all_peaks = _reindex_columns(all_peaks, PEAK_SHEET_COLUMNS)
+        all_patient = _reindex_columns(all_patient, RUN_SHEET_COLUMNS)
+        all_control = _reindex_columns(all_control, RUN_SHEET_COLUMNS)
+        all_peaks = _reindex_columns(all_peaks, PEAK_SHEET_COLUMNS)
 
-    writer_kwargs = {"engine": "openpyxl"}
-    if excel_path.exists():
-        writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
+        writer_kwargs = {"engine": "openpyxl"}
+        if excel_path.exists():
+            writer_kwargs.update({"mode": "a", "if_sheet_exists": "replace"})
 
-    with pd.ExcelWriter(excel_path, **writer_kwargs) as writer:
-        all_patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
-        all_control.to_excel(writer, sheet_name="Control_Runs", index=False)
-        all_peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
-    print_green(f"Clonality tracking workbook updated in {excel_path}")
+        with pd.ExcelWriter(excel_path, **writer_kwargs) as writer:
+            all_patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
+            all_control.to_excel(writer, sheet_name="Control_Runs", index=False)
+            all_peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
+        print_green(f"Clonality tracking workbook updated in {excel_path}")
 
 
 def _build_tracking_frames(entries: list[dict], rules: QCRules) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, set[str]]:

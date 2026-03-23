@@ -656,10 +656,14 @@ def analyse_fsa_liz(
             cleaned = []
             for p in all_found:
                 h = liz_data[p]
-                if h > 31000 or p < 1000 or h > 2.0 * median_h:
+                if h > 31000 or p < 1000 or h > 3.0 * median_h:
                     continue
                 cleaned.append(p)
-            if len(cleaned) >= 3:
+            
+            # Fall-through Logic: Only apply cleaned if we have a reasonable amount of peaks left
+            expected_steps = len(getattr(fsa, "expected_ladder_steps", []))
+            min_required = max(10, int(expected_steps * 0.6)) if expected_steps > 0 else 10
+            if len(cleaned) >= min_required:
                 fsa.size_standard_peaks = np.array(cleaned)
 
         ss_peaks = getattr(fsa, "size_standard_peaks", None)

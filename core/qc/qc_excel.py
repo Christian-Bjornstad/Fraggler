@@ -3,6 +3,7 @@ Fraggler QC — Excel trend tracking (append-mode).
 """
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -12,6 +13,8 @@ from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils.dataframe import dataframe_to_rows
 
 from core.qc.qc_rules import QCRules
+
+_qc_excel_lock = threading.Lock()
 from core.qc.qc_markers import (
     markers_for_entry,
     find_peak_near_bp,
@@ -125,43 +128,49 @@ def update_excel_trends(excel_path: Path, entries: list[dict], rules: QCRules, r
     if not df_markers.empty:
         df_markers = df_markers.drop_duplicates(subset=["file", "marker_name"], keep="last")
 
-    # Global dedupe (Excel-historikk + nye rader)
-    if excel_path.exists():
-        try:
-            xls = pd.ExcelFile(excel_path, engine="openpyxl")
-            has_runs = "PK_Runs" in xls.sheet_names
-            has_markers = "PK_Markers" in xls.sheet_names
-        except Exception:
-            has_runs = False
-            has_markers = False
+    # Lås rundt global dedupe og skriving for å unngå race-conditions (viktig i multi-threading!)
+    with _qc_excel_lock:
+        if excel_path.exists():
+            try:
+                xls = pd.ExcelFile(excel_path, engine="openpyxl")
+                has_runs = "PK_Runs" in xls.sheet_names
+                has_markers = "PK_Markers" in xls.sheet_names
+            except Exception:
+                has_runs = False
+                has_markers = False
+                print(f"Warning: Kunne ikke lese eksisterende {excel_path.name}, kanskje korrupt. Lager ny...")
 
-        old_runs = pd.read_excel(excel_path, sheet_name="PK_Runs", engine="openpyxl") if has_runs else pd.DataFrame()
-        old_markers = pd.read_excel(excel_path, sheet_name="PK_Markers", engine="openpyxl") if has_markers else pd.DataFrame()
+            try:
+                old_runs = pd.read_excel(excel_path, sheet_name="PK_Runs", engine="openpyxl") if has_runs else pd.DataFrame()
+                old_markers = pd.read_excel(excel_path, sheet_name="PK_Markers", engine="openpyxl") if has_markers else pd.DataFrame()
+            except Exception:
+                old_runs = pd.DataFrame()
+                old_markers = pd.DataFrame()
 
-        all_runs = pd.concat([old_runs, df_runs], ignore_index=True)
-        all_markers = pd.concat([old_markers, df_markers], ignore_index=True)
+            all_runs = pd.concat([old_runs, df_runs], ignore_index=True)
+            all_markers = pd.concat([old_markers, df_markers], ignore_index=True)
 
-        # Global dedupe-nøkler:
-        # - Runs: file (én rad per fil)
-        # - Markers: file + marker_name (én rad per markør per fil)
-        if not all_runs.empty and "file" in all_runs.columns:
-            all_runs = all_runs.drop_duplicates(subset=["file"], keep="last")
-        if not all_markers.empty and {"file", "marker_name"}.issubset(all_markers.columns):
-            all_markers = all_markers.drop_duplicates(subset=["file", "marker_name"], keep="last")
+            # Global dedupe-nøkler:
+            # - Runs: file (én rad per fil)
+            # - Markers: file + marker_name (én rad per markør per fil)
+            if not all_runs.empty and "file" in all_runs.columns:
+                all_runs = all_runs.drop_duplicates(subset=["file"], keep="last")
+            if not all_markers.empty and {"file", "marker_name"}.issubset(all_markers.columns):
+                all_markers = all_markers.drop_duplicates(subset=["file", "marker_name"], keep="last")
 
-        # Skriv tilbake (replace) for å unngå at Excel vokser ukontrollert
-        with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
-            all_runs.to_excel(writer, sheet_name="PK_Runs", index=False)
-            all_markers.to_excel(writer, sheet_name="PK_Markers", index=False)
+            # Skriv tilbake (replace) for å unngå at Excel vokser ukontrollert
+            with pd.ExcelWriter(excel_path, engine="openpyxl", mode="a", if_sheet_exists="replace") as writer:
+                all_runs.to_excel(writer, sheet_name="PK_Runs", index=False)
+                all_markers.to_excel(writer, sheet_name="PK_Markers", index=False)
 
-    else:
-        # Ny fil
-        with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
-            df_runs.to_excel(writer, sheet_name="PK_Runs", index=False)
-            df_markers.to_excel(writer, sheet_name="PK_Markers", index=False)
+        else:
+            # Ny fil
+            with pd.ExcelWriter(excel_path, engine="openpyxl") as writer:
+                df_runs.to_excel(writer, sheet_name="PK_Runs", index=False)
+                df_markers.to_excel(writer, sheet_name="PK_Markers", index=False)
 
-    # Styling (farger)
-    apply_pk_excel_styling(excel_path)
+        # Styling (farger)
+        apply_pk_excel_styling(excel_path)
 
 def apply_pk_excel_styling(excel_path: Path):
     from openpyxl import load_workbook
