@@ -3,6 +3,7 @@ from __future__ import annotations
 import dis
 import os
 import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -141,11 +142,17 @@ def _zip_path(src: Path, zip_path: Path, root_name: str | None = None) -> Path:
 
 
 def _post_build_mac() -> None:
-    resources_dir = DIST_DIR / f"{APP_NAME}.app" / "Contents" / "Resources"
+    app_path = DIST_DIR / f"{APP_NAME}.app"
+    resources_dir = app_path / "Contents" / "Resources"
     if resources_dir.exists():
         qt_conf_path = resources_dir / "qt.conf"
         print(f"Creating {qt_conf_path} to fix translocation crashes...")
         _write_text(qt_conf_path, "[Paths]\nPrefix = .\n")
+        print(f"Re-signing {app_path} after post-build resource updates...")
+        subprocess.run(
+            ["codesign", "--force", "--deep", "--sign", "-", str(app_path)],
+            check=True,
+        )
 
 
 def _linux_readme_text() -> str:

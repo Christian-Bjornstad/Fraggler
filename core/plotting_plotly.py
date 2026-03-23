@@ -828,6 +828,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         }}
       }});
     }}
+    updatePeakManagerRegistration();
 
     function peakAreaForSourceChannel(peak) {{
       if (!peak) return 0.0;
@@ -1198,6 +1199,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       if (tbody) tbody.innerHTML = tableHtml;
       var tCont = document.getElementById("{div_id}_table_container");
       if (tCont) tCont.style.display = isManualRatioAssay ? "none" : ((tableHtml !== "") ? "block" : "none");
+      updatePeakManagerRegistration();
       if (isManualRatioAssay) {{
         renderFlt3CandidateTable();
       }}
@@ -1325,7 +1327,6 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
           applyChannelChoiceStyles();
         }});
       }}
-      updatePeakManagerRegistration();
       applyChannelChoiceStyles();
     }}
   }});
@@ -1597,7 +1598,7 @@ def build_interactive_assay_batch_plot_html(
             plotly_script_included = True
 
         # JS for akkurat denne editoren – synka med PeakManager
-    html_parts.append(f"""
+        html_parts.append(f"""
 <script type="text/javascript">
 (function() {{
   var fig = {fig_json};
@@ -1605,6 +1606,7 @@ def build_interactive_assay_batch_plot_html(
   var gd = document.getElementById(divId);
   if (!gd) return;
   var areaWindowBp = 5.0;
+  var primaryTraceIndex = 0;
   var assayName = {json.dumps(e.get("assay"))};
   var expectedWtBp = {json.dumps(e.get("wt_bp"))};
   var expectedMutBp = {json.dumps(e.get("mut_bp"))};
@@ -1707,8 +1709,13 @@ def build_interactive_assay_batch_plot_html(
     }}
 
     var peaks = [];
-    if (window.PeakManager) {{
-        peaks = window.PeakManager.getInitialPeaksForPlot(divId);
+    var initialPeakData = (window.PeakManager && window.PeakManager.getInitialPeakDataForPlot)
+      ? window.PeakManager.getInitialPeakDataForPlot(divId)
+      : null;
+    if (initialPeakData && Array.isArray(initialPeakData.peaks) && initialPeakData.peaks.length) {{
+      peaks = initialPeakData.peaks.slice();
+    }} else if (window.PeakManager) {{
+      peaks = window.PeakManager.getInitialPeaksForPlot(divId);
     }}
     peaks = (Array.isArray(peaks) ? peaks : []).map(normalizePeak).filter(function(p) {{
       return Number.isFinite(p.x) && Number.isFinite(p.y);
@@ -1716,7 +1723,10 @@ def build_interactive_assay_batch_plot_html(
 
     if (window.PeakManager) {{
         window.PeakManager.registerPlot(divId, {{
-            getPeaks: function() {{ return peaks; }}
+            getPeaks: function() {{ return peaks; }},
+            getPeakData: function() {{
+              return {{ peaks: peaks }};
+            }}
         }});
     }}
 

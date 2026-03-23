@@ -84,6 +84,15 @@ class TabAnalysisSettings(QWidget):
         row_out.addWidget(btn_browse_out)
         layout.addRow("Default Output Folder:", row_out)
 
+        row_excel = QHBoxLayout()
+        self.tracking_excel_path = QLineEdit()
+        self.tracking_excel_path.setPlaceholderText("Leave blank to save beside the report output")
+        btn_browse_excel = QPushButton("Browse...")
+        btn_browse_excel.clicked.connect(self._browse_excel_path)
+        row_excel.addWidget(self.tracking_excel_path, stretch=1)
+        row_excel.addWidget(btn_browse_excel)
+        layout.addRow("Tracking Excel File:", row_excel)
+
         return card
 
     def _build_run_card(self) -> QWidget:
@@ -162,6 +171,7 @@ class TabAnalysisSettings(QWidget):
 
         self.default_input.setText(batch_settings.get("base_input_dir", str(Path.home())))
         self.default_output.setText(batch_settings.get("output_base", str(Path.home())))
+        self.tracking_excel_path.setText(batch_settings.get("tracking_excel_path", ""))
 
         self.mode_combo.setCurrentText(pipeline_settings.get("mode", "all"))
         self.assay_filter.setText(pipeline_settings.get("assay_filter_substring", ""))
@@ -183,6 +193,7 @@ class TabAnalysisSettings(QWidget):
 
         batch_settings["base_input_dir"] = self.default_input.text().strip()
         batch_settings["output_base"] = self.default_output.text().strip()
+        batch_settings["tracking_excel_path"] = self.tracking_excel_path.text().strip()
         batch_settings["aggregate_by_patient"] = self.chk_agg_pat.isChecked()
         batch_settings["patient_id_regex"] = self.patient_regex.text().strip()
         batch_settings["aggregate_dit_reports"] = self.chk_agg_dit.isChecked()
@@ -210,6 +221,17 @@ class TabAnalysisSettings(QWidget):
         )
         if folder:
             line_edit.setText(folder)
+
+    def _browse_excel_path(self) -> None:
+        start_path = self.tracking_excel_path.text().strip() or self.default_output.text().strip() or str(Path.home())
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Select Tracking Excel File",
+            start_path,
+            "Excel Workbook (*.xlsx)",
+        )
+        if selected:
+            self.tracking_excel_path.setText(selected)
 
     def _sync_patient_regex_enabled(self) -> None:
         self.patient_regex.setEnabled(self.chk_agg_pat.isChecked())

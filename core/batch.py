@@ -13,6 +13,7 @@ import yaml
 from pathlib import Path
 from typing import Dict, List, Any
 
+from config import resolve_analysis_excel_output_path
 from core.log import log
 from core.runner import run_pipeline_job, run_pipeline_job_collect, run_qc_job, run_dit_job
 
@@ -425,6 +426,20 @@ def run_batch_jobs(
         
         try:
             build_dit_html_reports(all_collected_entries, agg_outdir)
+            if active_analysis == "clonality":
+                from core.analyses.clonality.tracking_excel import (
+                    CLONALITY_TRACKING_FILENAME,
+                    update_clonality_tracking_workbook,
+                )
+
+                update_clonality_tracking_workbook(
+                    resolve_analysis_excel_output_path(
+                        "clonality",
+                        agg_outdir,
+                        CLONALITY_TRACKING_FILENAME,
+                    ),
+                    all_collected_entries,
+                )
             log(f"[BATCH] Successfully built aggregated DIT reports in {agg_outdir}")
         except Exception as e:
             aggregation_failed = True

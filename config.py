@@ -85,6 +85,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "batch": {
                 "base_input_dir": str(Path.home()),
                 "output_base": str(Path.home()),
+                "tracking_excel_path": "",
                 "aggregate_by_patient": True,
                 "patient_id_regex": r"\d{2}OUM\d{5}",
                 "aggregate_dit_reports": True,
@@ -98,6 +99,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "batch": {
                 "base_input_dir": str(Path.home()),
                 "output_base": str(Path.home()),
+                "tracking_excel_path": "",
                 "aggregate_by_patient": True,
                 "patient_id_regex": r"\d{2}OUM\d{5}",
                 "aggregate_dit_reports": True,
@@ -111,6 +113,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "batch": {
                 "base_input_dir": str(Path.home()),
                 "output_base": str(Path.home()),
+                "tracking_excel_path": "",
                 "aggregate_by_patient": False,
                 "patient_id_regex": r"\d{2}OUM\d{5}",
                 "aggregate_dit_reports": False,
@@ -350,6 +353,8 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
             profile_batch["base_input_dir"] = defaults["batch"]["base_input_dir"]
         if not isinstance(profile_batch.get("output_base"), str):
             profile_batch["output_base"] = defaults["batch"]["output_base"]
+        if not isinstance(profile_batch.get("tracking_excel_path"), str):
+            profile_batch["tracking_excel_path"] = defaults["batch"].get("tracking_excel_path", "")
         if not isinstance(profile_batch.get("patient_id_regex"), str):
             profile_batch["patient_id_regex"] = defaults["batch"]["patient_id_regex"]
         if not isinstance(profile_batch.get("aggregate_by_patient"), bool):
@@ -375,6 +380,31 @@ def get_analysis_settings(analysis_id: str | None = None, settings: Dict[str, An
     )
     stored = settings.setdefault("analyses", {}).get(analysis_id, {})
     return _deep_update(analysis_defaults, stored)
+
+
+def resolve_analysis_excel_output_path(
+    analysis_id: str,
+    default_dir: Path,
+    default_filename: str,
+    settings: Dict[str, Any] | None = None,
+) -> Path:
+    """Resolve the configured Excel output path for an analysis.
+
+    Empty settings fall back to ``default_dir / default_filename``.
+    A configured directory path uses ``default_filename`` inside that directory.
+    """
+    default_path = Path(default_dir).expanduser() / default_filename
+    profile = get_analysis_settings(analysis_id, settings)
+    configured = str(profile.get("batch", {}).get("tracking_excel_path", "")).strip()
+    if not configured:
+        return default_path
+
+    configured_path = Path(configured).expanduser()
+    if configured.endswith((os.sep, "/")):
+        return configured_path / default_filename
+    if configured_path.suffix.lower() != ".xlsx":
+        return configured_path / default_filename
+    return configured_path
 
 
 def _report_settings_issue(kind: str, settings_path: Path, exc: Exception) -> str:

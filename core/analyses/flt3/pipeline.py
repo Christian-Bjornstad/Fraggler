@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import os
+import __main__
 from pathlib import Path
+import sys
 
 import numpy as np
 import pandas as pd
 
+from config import resolve_analysis_excel_output_path
 from fraggler.fraggler import (
     FsaFile,
     calculate_best_combination_of_size_standard_peaks,
@@ -40,6 +44,20 @@ MANUAL_RATIO_ASSAYS = {"FLT3-ITD", "FLT3-D835"}
 def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
     """Scan recursively for FLT3 .fsa files, excluding water/Vann files."""
     return scan_fsa_files(fsa_dir, mode=mode, recursive=True)
+
+
+def _should_use_multiprocessing() -> bool:
+    disabled = os.environ.get("FRAGGLER_DISABLE_MULTIPROCESSING", "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return False
+    if getattr(sys, "frozen", False):
+        return False
+    main_file = getattr(__main__, "__file__", "")
+    if not main_file or str(main_file).startswith("<"):
+        return False
+    if not Path(main_file).exists():
+        return False
+    return True
 
 
 def _preferred_injection_time(meta: dict) -> int:
@@ -1420,13 +1438,15 @@ def run_pipeline(
 
     raw_files = _scan_files(fsa_dir, mode=mode)
 
-    # Parallel classification
-    from multiprocessing import Pool, cpu_count
-    n_workers = max(1, cpu_count() - 1)
-    try:
-        with Pool(n_workers) as pool:
-            meta_results = pool.map(classify_fsa, raw_files)
-    except Exception:
+    if _should_use_multiprocessing() and len(raw_files) >= 2:
+        from multiprocessing import Pool, cpu_count
+        n_workers = max(1, cpu_count() - 1)
+        try:
+            with Pool(n_workers) as pool:
+                meta_results = pool.map(classify_fsa, raw_files)
+        except Exception:
+            meta_results = [classify_fsa(p) for p in raw_files]
+    else:
         meta_results = [classify_fsa(p) for p in raw_files]
     classified = [(p, m) for p, m in zip(raw_files, meta_results) if m is not None]
 
@@ -1437,16 +1457,19 @@ def run_pipeline(
     for path, meta in classified:
         groups[meta["selection_key"]].append((path, meta))
 
-    # Parallel selection (best entry per group)
-    n_workers = max(1, cpu_count() - 1)
     sorted_groups = sorted(groups.items())
     candidates_list = [c for _, c in sorted_groups]
 
-    try:
-        with Pool(n_workers) as pool:
-            results = pool.map(_select_best_entry, candidates_list)
-    except Exception as ex:
-        print_warning(f"[PARALLEL] Multiprocessing failed during FLT3 selection ({ex}), falling back to sequential.")
+    if _should_use_multiprocessing() and len(candidates_list) >= 2:
+        from multiprocessing import Pool, cpu_count
+        n_workers = max(1, cpu_count() - 1)
+        try:
+            with Pool(n_workers) as pool:
+                results = pool.map(_select_best_entry, candidates_list)
+        except Exception as ex:
+            print_warning(f"[PARALLEL] Multiprocessing failed during FLT3 selection ({ex}), falling back to sequential.")
+            results = [_select_best_entry(c) for c in candidates_list]
+    else:
         results = [_select_best_entry(c) for c in candidates_list]
 
     entries = []
@@ -1465,7 +1488,12 @@ def run_pipeline(
     _calculate_ratios(entries)
     generate_flt3_peak_report(entries, assay_dir)
     generate_flt3_bp_validation_report(entries, assay_dir)
-    update_flt3_qc_trends(assay_dir / FLT3_QC_TRENDS_FILENAME, entries)
+    tracking_excel_path = resolve_analysis_excel_output_path(
+        "flt3",
+        assay_dir,
+        FLT3_QC_TRENDS_FILENAME,
+    )
+    update_flt3_qc_trends(tracking_excel_path, entries)
 
     return finalize_pipeline_run(
         entries,

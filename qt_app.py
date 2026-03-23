@@ -1,6 +1,7 @@
 """
 Fraggler Diagnostics — Main Entry Point for PyQt6 UI
 """
+import multiprocessing
 import sys
 import os
 from pathlib import Path
@@ -103,4 +104,5 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     main()

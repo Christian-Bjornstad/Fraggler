@@ -7,7 +7,10 @@ analysis flow.
 """
 from __future__ import annotations
 
+import os
 import re
+import sys
+import __main__
 from pathlib import Path
 from collections import defaultdict
 
@@ -16,12 +19,18 @@ import pandas as pd
 
 from fraggler.fraggler import print_green, print_warning
 
+from config import resolve_analysis_excel_output_path
 from core.analyses.clonality.config import (
     ASSAY_CONFIG,
     SL_TARGET_FRAGMENTS_BP,
     SL_WINDOW_BP,
 )
 from core.analyses.clonality.classification import classify_fsa
+from core.analyses.clonality.tracking_excel import (
+    CLONALITY_TRACKING_FILENAME,
+    resolve_source_run_dir,
+    update_clonality_tracking_workbook,
+)
 from core.analysis import (
     analyse_fsa_liz,
     analyse_fsa_rox,
@@ -51,6 +60,20 @@ def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
     if fsa_files:
         print_green(f"Fant {len(fsa_files)} .fsa-filer: {[p.name for p in fsa_files]}")
     return fsa_files
+
+
+def _should_use_multiprocessing() -> bool:
+    disabled = os.environ.get("FRAGGLER_DISABLE_MULTIPROCESSING", "").strip().lower()
+    if disabled in {"1", "true", "yes", "on"}:
+        return False
+    if getattr(sys, "frozen", False):
+        return False
+    main_file = getattr(__main__, "__file__", "")
+    if not main_file or str(main_file).startswith("<"):
+        return False
+    if not Path(main_file).exists():
+        return False
+    return True
 
 
 def _analyze_single_file(fsa_path: Path) -> dict | None:
@@ -148,6 +171,8 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
 
     return {
         "fsa": fsa,
+        "file_name": fsa.file_name,
+        "source_run_dir": resolve_source_run_dir({"fsa": fsa}),
         "peaks_by_channel": peaks_by_channel,
         "trace_channels": trace_channels,
         "primary_peak_channel": primary_peak_channel,
@@ -177,17 +202,20 @@ def _analyze_files(fsa_files: list[Path]) -> tuple[list[dict], int]:
 
     Uses multiprocessing to analyze files in parallel across available CPU cores.
     """
-    from multiprocessing import Pool, cpu_count
-
-    n_workers = max(1, cpu_count() - 1)
-
-    try:
-        with Pool(n_workers) as pool:
-            results = pool.map(_analyze_single_file, fsa_files)
-    except Exception as ex:
-        # Fallback to sequential if multiprocessing fails (e.g. frozen app)
-        print_warning(f"[PARALLEL] Multiprocessing failed ({ex}), falling back to sequential.")
+    if not _should_use_multiprocessing() or len(fsa_files) < 2:
         results = [_analyze_single_file(p) for p in fsa_files]
+    else:
+        from multiprocessing import Pool, cpu_count
+
+        n_workers = max(1, cpu_count() - 1)
+
+        try:
+            with Pool(n_workers) as pool:
+                results = pool.map(_analyze_single_file, fsa_files)
+        except Exception as ex:
+            # Fallback to sequential if multiprocessing fails (e.g. frozen app)
+            print_warning(f"[PARALLEL] Multiprocessing failed ({ex}), falling back to sequential.")
+            results = [_analyze_single_file(p) for p in fsa_files]
 
     entries = [r for r in results if r is not None]
     skipped = len(fsa_files) - len(entries)
@@ -220,6 +248,13 @@ def run_pipeline(
     if not entries:
         print_warning("Ingen gyldige entries etter analyse – avslutter.")
         return [] if return_entries else None
+
+    tracking_excel_path = resolve_analysis_excel_output_path(
+        "clonality",
+        assay_dir,
+        CLONALITY_TRACKING_FILENAME,
+    )
+    update_clonality_tracking_workbook(tracking_excel_path, entries)
 
     return finalize_pipeline_run(
         entries,
