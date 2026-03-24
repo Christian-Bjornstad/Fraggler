@@ -268,6 +268,49 @@ def generate_jobs(
             
     return jobs
 
+
+def _extract_patient_ids_from_files(files: List[Path], regex_pattern: str) -> set[str]:
+    from core.utils import CONTROL_PREFIX_RE, strip_stage_prefix
+
+    try:
+        pattern = re.compile(regex_pattern) if regex_pattern else None
+    except re.error:
+        return set()
+
+    patient_ids: set[str] = set()
+    for file_path in files or []:
+        clean_name = strip_stage_prefix(Path(file_path).name)
+        if CONTROL_PREFIX_RE.match(clean_name):
+            continue
+        if not pattern:
+            return set()
+        match = pattern.search(clean_name)
+        if not match:
+            return set()
+        patient_ids.add(match.group())
+    return patient_ids
+
+
+def _can_stream_aggregated_dit_reports(jobs: List[Dict[str, Any]], patient_regex: str) -> bool:
+    """
+    Stream DIT report generation job-by-job when each pipeline/DIT job already maps
+    to exactly one unique patient ID and no patient appears in more than one job.
+    """
+    seen_ids: set[str] = set()
+    relevant_jobs = [job for job in jobs if job.get("type") in {"pipeline", "dit"}]
+    if not relevant_jobs:
+        return False
+
+    for job in relevant_jobs:
+        patient_ids = _extract_patient_ids_from_files(job.get("files", []), patient_regex)
+        if len(patient_ids) != 1:
+            return False
+        patient_id = next(iter(patient_ids))
+        if patient_id in seen_ids:
+            return False
+        seen_ids.add(patient_id)
+    return True
+
 # ============================================================
 # BATCH EXECUTION RUNNER
 # ============================================================
@@ -290,9 +333,13 @@ def run_batch_jobs(
     """
     from config import APP_SETTINGS
     from core.qc.qc_rules import QCRules
+    from core.assay_config import OUTDIR_NAME
     s_qc = APP_SETTINGS.get("qc", {})
     active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     aggregate_dit_reports = bool(aggregate_dit_reports) and active_analysis != "general"
+    analysis_batch = APP_SETTINGS.get("analyses", {}).get(active_analysis, {}).get("batch", {})
+    patient_regex = analysis_batch.get("patient_id_regex", r"\d{2}OUM\d{5}")
+    stream_aggregated_dit = aggregate_dit_reports and _can_stream_aggregated_dit_reports(jobs, patient_regex)
     sample_window = s_qc.get("sample_peak_window_bp", s_qc.get("w_sample", 3.0))
     ladder_window = s_qc.get("ladder_peak_window_bp", s_qc.get("w_ladder", 3.0))
     qc_rules = QCRules(
@@ -308,6 +355,10 @@ def run_batch_jobs(
 
     total = len(jobs)
     log(f"[BATCH] Starting batch run of {total} jobs.")
+
+    agg_outdir = output_base / OUTDIR_NAME if aggregate_dit_reports else None
+    if agg_outdir is not None:
+        agg_outdir.mkdir(exist_ok=True, parents=True)
     
     # Storage for cross-folder aggregation
     all_collected_entries = []
@@ -350,9 +401,28 @@ def run_batch_jobs(
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
                     )
-                    with data_lock:
-                        all_collected_entries.extend(entries)
-                    log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
+                    if stream_aggregated_dit and agg_outdir is not None:
+                        from core.html_reports import build_dit_html_reports
+                        build_dit_html_reports(entries, agg_outdir)
+                        if active_analysis == "clonality":
+                            from core.analyses.clonality.tracking_excel import (
+                                CLONALITY_TRACKING_FILENAME,
+                                update_clonality_tracking_workbook,
+                            )
+
+                            update_clonality_tracking_workbook(
+                                resolve_analysis_excel_output_path(
+                                    "clonality",
+                                    agg_outdir,
+                                    CLONALITY_TRACKING_FILENAME,
+                                ),
+                                entries,
+                            )
+                        log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
+                    else:
+                        with data_lock:
+                            all_collected_entries.extend(entries)
+                        log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
                 else:
                     # Normal mode
                     run_pipeline_job(
@@ -385,9 +455,28 @@ def run_batch_jobs(
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
                     )
-                    with data_lock:
-                        all_collected_entries.extend(entries)
-                    log(f"[BATCH] Collected {len(entries)} entries from {job_name} for DIT aggregation.")
+                    if stream_aggregated_dit and agg_outdir is not None:
+                        from core.html_reports import build_dit_html_reports
+                        build_dit_html_reports(entries, agg_outdir)
+                        if active_analysis == "clonality":
+                            from core.analyses.clonality.tracking_excel import (
+                                CLONALITY_TRACKING_FILENAME,
+                                update_clonality_tracking_workbook,
+                            )
+
+                            update_clonality_tracking_workbook(
+                                resolve_analysis_excel_output_path(
+                                    "clonality",
+                                    agg_outdir,
+                                    CLONALITY_TRACKING_FILENAME,
+                                ),
+                                entries,
+                            )
+                        log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
+                    else:
+                        with data_lock:
+                            all_collected_entries.extend(entries)
+                        log(f"[BATCH] Collected {len(entries)} entries from {job_name} for DIT aggregation.")
                 else:
                     run_dit_job(
                         fsa_dir=job_path,
@@ -436,12 +525,7 @@ def run_batch_jobs(
     if aggregate_dit_reports and all_collected_entries:
         log("\n[BATCH] Final step: Building aggregated DIT HTML reports...")
         
-        # The reports will be placed in base_outdir / OUTDIR_NAME (default)
-        # We'll just define a generic container for them
         from core.html_reports import build_dit_html_reports
-        from core.assay_config import OUTDIR_NAME
-        agg_outdir = output_base / OUTDIR_NAME
-        agg_outdir.mkdir(exist_ok=True, parents=True)
         
         try:
             build_dit_html_reports(all_collected_entries, agg_outdir)
@@ -464,6 +548,8 @@ def run_batch_jobs(
             aggregation_failed = True
             failed_jobs.append("DIT aggregation")
             log(f"[ERROR] Failed to build aggregated DIT reports: {e}")
+    elif aggregate_dit_reports and stream_aggregated_dit:
+        log("[BATCH] Aggregated DIT reports were streamed job-by-job to reduce memory pressure.")
 
     if aggregation_failed:
         log("[BATCH] Batch run complete with aggregation errors.")
