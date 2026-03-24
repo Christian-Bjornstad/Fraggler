@@ -188,7 +188,10 @@ class TabBatch(QWidget):
         self.threadpool = QThreadPool.globalInstance()
         self._detected_jobs = []
         self._job_states = {}
+        self._scan_request_counter = 0
+        self._active_scan_request_id = 0
         self._current_analysis_id = APP_SETTINGS.get("active_analysis", "clonality")
+        self._workflow_state = "ready"
         
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(0, 0, 0, 0)
@@ -201,6 +204,7 @@ class TabBatch(QWidget):
         self.subtitle_lbl = QLabel("")
         self.subtitle_lbl.setObjectName("PageSubtitle")
         self.subtitle_lbl.setWordWrap(True)
+        self.subtitle_lbl.setVisible(False)
         header.addWidget(self.title_lbl)
         header.addWidget(self.subtitle_lbl)
 
@@ -216,7 +220,7 @@ class TabBatch(QWidget):
         f_layout = QVBoxLayout(f_card)
         f_layout.setSpacing(12)
         
-        l_ftitle = QLabel("SAMPLES")
+        l_ftitle = QLabel("INPUT SOURCES")
         l_ftitle.setObjectName("CardTitle")
 
         row1 = QHBoxLayout()
@@ -275,31 +279,24 @@ class TabBatch(QWidget):
         f_layout.addLayout(row1)
         f_layout.addLayout(row2)
         
-        # 2. Actions & Progress
-        a_layout = QHBoxLayout()
-        a_layout.setSpacing(10)
         self.btn_scan = QPushButton("Find Jobs")
         self.btn_run = QPushButton("Run Batch")
         self.btn_run.setObjectName("PrimaryButton")
         self.btn_run.setEnabled(False)
         self.btn_open = QPushButton("Open Output")
-        
+
         self.progress = QProgressBar()
         self.progress.setValue(0)
-        
-        self.status_lbl = QLabel("Ready — review the loaded folders and click Find Jobs.")
-        self.status_lbl.setStyleSheet("color: #64748b; font-weight: 500;")
-        
-        a_layout.addWidget(self.btn_scan)
-        a_layout.addWidget(self.btn_run)
-        a_layout.addWidget(self.btn_open)
-        a_layout.addStretch()
-        
+
+        self.status_lbl = QLabel("Ready")
+        self.status_lbl.setObjectName("WorkflowStatusText")
+        self.dashboard_card = self._build_dashboard_card()
+
         # 3. Jobs Table
         t_card = QWidget()
         t_card.setObjectName("Card")
         t_layout = QVBoxLayout(t_card)
-        t_title = QLabel("DETECTED JOBS")
+        t_title = QLabel("RUN QUEUE")
         t_title.setObjectName("CardTitle")
         
         t_btns = QHBoxLayout()
@@ -343,6 +340,8 @@ class TabBatch(QWidget):
         self.btn_scan.clicked.connect(self.on_scan)
         self.btn_run.clicked.connect(self.on_run)
         self.btn_open.clicked.connect(self.on_open_output)
+        self.output_base.textChanged.connect(self._refresh_dashboard)
+        self.table.itemSelectionChanged.connect(self._refresh_dashboard)
         
         t_layout.addWidget(t_title)
         t_layout.addLayout(t_btns)
@@ -350,14 +349,13 @@ class TabBatch(QWidget):
         
         # Add to main
         main_layout.addLayout(header)
+        main_layout.addWidget(self.dashboard_card)
         main_layout.addWidget(self.general_card)
         main_layout.addWidget(f_card)
-        main_layout.addLayout(a_layout)
-        main_layout.addWidget(self.progress)
-        main_layout.addWidget(self.status_lbl)
         main_layout.addWidget(t_card, stretch=1)
 
         self.set_analysis(self._current_analysis_id, force_replace_inputs=True)
+        self._set_workflow_status("Ready", "ready")
         
     def _build_general_card(self) -> QWidget:
         card = QWidget()
@@ -366,7 +364,7 @@ class TabBatch(QWidget):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)
 
-        title = QLabel("General Analysis Runtime")
+        title = QLabel("General Workflow Controls")
         title.setStyleSheet("font-size: 16px; font-weight: 700; color: #0f172a;")
         subtitle = QLabel(
             "Choose the ladder, the trace channels to show, and which channel should be used as the primary peak view."
@@ -411,7 +409,7 @@ class TabBatch(QWidget):
         )
         layout.addLayout(selector_grid)
 
-        trace_title = QLabel("Trace Channels")
+        trace_title = QLabel("Trace Review Channels")
         trace_title.setStyleSheet("font-size: 14px; font-weight: 700; color: #0f172a;")
         trace_note = QLabel(
             "Pick one or more trace channels. The cards wrap automatically when the window gets narrower."
@@ -438,6 +436,176 @@ class TabBatch(QWidget):
         layout.addWidget(note)
 
         return card
+
+    def _build_dashboard_card(self) -> QWidget:
+        card = QWidget()
+        card.setObjectName("DashboardCard")
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(14)
+
+        header_row = QHBoxLayout()
+        header_row.setSpacing(12)
+
+        self.dashboard_title = QLabel("Workflow")
+        self.dashboard_title.setObjectName("DashboardTitle")
+        header_row.addWidget(self.dashboard_title)
+        header_row.addStretch()
+
+        self.status_badge = QLabel("READY")
+        self.status_badge.setObjectName("WorkflowStatusBadge")
+        self.status_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.status_badge.setMinimumWidth(120)
+        header_row.addWidget(self.status_badge, alignment=Qt.AlignmentFlag.AlignVCenter)
+        layout.addLayout(header_row)
+
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(10)
+        actions_row.addWidget(self.btn_scan)
+        actions_row.addWidget(self.btn_run)
+        actions_row.addWidget(self.btn_open)
+        actions_row.addStretch()
+        layout.addLayout(actions_row)
+
+        metrics_layout = QHBoxLayout()
+        metrics_layout.setSpacing(10)
+        self.metric_analysis = self._build_metric_card("Analysis")
+        self.metric_sources = self._build_metric_card("Inputs")
+        self.metric_jobs = self._build_metric_card("Queue")
+        self.metric_output = self._build_metric_card("Output")
+        for card_widget in (
+            self.metric_analysis["card"],
+            self.metric_sources["card"],
+            self.metric_jobs["card"],
+            self.metric_output["card"],
+        ):
+            metrics_layout.addWidget(card_widget, stretch=1)
+        layout.addLayout(metrics_layout)
+
+        self.queue_summary_lbl = QLabel("")
+        self.queue_summary_lbl.setObjectName("WorkflowSummaryText")
+        layout.addWidget(self.queue_summary_lbl)
+
+        status_block = QVBoxLayout()
+        status_block.setSpacing(8)
+        status_block.addWidget(self.status_lbl)
+        status_block.addWidget(self.progress)
+        layout.addLayout(status_block)
+        return card
+
+    def _build_metric_card(self, label_text: str) -> dict[str, QWidget | QLabel]:
+        card = QFrame()
+        card.setObjectName("DashboardMetricCard")
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(6)
+
+        label = QLabel(label_text)
+        label.setObjectName("DashboardMetricLabel")
+        value = QLabel("—")
+        value.setObjectName("DashboardMetricValue")
+        value.setWordWrap(True)
+        detail = QLabel("")
+        detail.setObjectName("DashboardMetricDetail")
+        detail.setWordWrap(True)
+
+        layout.addWidget(label)
+        layout.addWidget(value)
+        layout.addWidget(detail)
+        return {"card": card, "value": value, "detail": detail}
+
+    def _restyle_widget(self, widget: QWidget) -> None:
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
+        widget.update()
+
+    def _reset_queue_state(self, message: str = "Ready", state: str = "ready") -> None:
+        """Clear queued jobs so the next run must start from a fresh scan."""
+        self._active_scan_request_id = 0
+        self._detected_jobs = []
+        self._job_states = {}
+        self.table.setRowCount(0)
+        self.btn_run.setEnabled(False)
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self._set_workflow_status(message, state)
+
+    def _set_workflow_status(self, message: str, state: str) -> None:
+        self._workflow_state = state
+        self.status_lbl.setText(message)
+        self.status_lbl.setProperty("state", state)
+        self.status_badge.setText(state.replace("_", " ").upper())
+        self.status_badge.setProperty("state", state)
+        self._restyle_widget(self.status_lbl)
+        self._restyle_widget(self.status_badge)
+        self._refresh_dashboard()
+
+    def _selected_row_count(self) -> int:
+        selection_model = self.table.selectionModel()
+        if selection_model is None:
+            return 0
+        return len(selection_model.selectedRows())
+
+    def _set_metric(self, metric: dict[str, QWidget | QLabel], value: str, detail: str = "", tooltip: str = "") -> None:
+        metric["value"].setText(value)
+        metric["detail"].setText(detail)
+        target_text = tooltip or detail or value
+        metric["card"].setToolTip(target_text)
+        metric["value"].setToolTip(target_text)
+        metric["detail"].setToolTip(target_text)
+
+    def _refresh_dashboard(self) -> None:
+        analysis_name = ANALYSIS_LABELS.get(self._current_analysis_id, self._current_analysis_id.capitalize())
+        self._set_metric(
+            self.metric_analysis,
+            analysis_name,
+            "",
+            tooltip=analysis_name,
+        )
+
+        inputs_loaded = self.folder_list.count()
+        self._set_metric(
+            self.metric_sources,
+            str(inputs_loaded),
+            "",
+        )
+
+        total_jobs = len(self._detected_jobs)
+        selected_jobs = self._selected_row_count()
+        self._set_metric(
+            self.metric_jobs,
+            str(total_jobs),
+            "",
+            tooltip=f"{selected_jobs} selected for run" if total_jobs else "No queue yet.",
+        )
+
+        output_path = self._resolve_output_path_str().strip()
+        output_display = "Auto" if not output_path else Path(output_path).expanduser().name
+        output_detail = "Uses saved/default output." if not output_path else output_path
+        self._set_metric(
+            self.metric_output,
+            output_display,
+            "",
+            tooltip=output_detail,
+        )
+
+        counts = {"pending": 0, "running": 0, "success": 0, "error": 0}
+        for state in self._job_states.values():
+            if state in {"success", "done"}:
+                counts["success"] += 1
+            elif state.startswith("error"):
+                counts["error"] += 1
+            elif state == "running":
+                counts["running"] += 1
+            else:
+                counts["pending"] += 1
+
+        self.queue_summary_lbl.setText(
+            f"Pending {counts['pending']}   •   Running {counts['running']}   •   Complete {counts['success']}   •   Errors {counts['error']}"
+        )
+        self.dashboard_title.setText(f"{analysis_name} Workflow")
 
     def _build_general_selector_card(self, title: str, subtitle: str, field: QWidget) -> QWidget:
         card = QFrame()
@@ -469,20 +637,19 @@ class TabBatch(QWidget):
         should_replace_inputs = force_replace_inputs or not current_items or current_items == [previous_default]
 
         self._current_analysis_id = analysis_id
+        self._reset_queue_state("Ready", "ready")
         self.load_from_settings(replace_inputs=should_replace_inputs)
         pretty_name = ANALYSIS_LABELS.get(analysis_id, analysis_id.capitalize())
         self.title_lbl.setText(f"Run {pretty_name}")
-        self.subtitle_lbl.setText(
-            f"Saved defaults for {pretty_name.lower()} load automatically. Change them only if needed, then find and run jobs."
-        )
+        self.subtitle_lbl.setText("")
+        self.subtitle_lbl.setVisible(False)
         is_general = self._is_general_analysis()
         self.general_card.setVisible(is_general)
         self.btn_add_files.setVisible(is_general)
         self.input_label.setText("Files / Folders:" if is_general else "Samples:")
-        self.status_lbl.setText(
-            "Ready — review the selected files/folders and click Find Jobs."
-            if is_general
-            else "Ready — review the loaded folders and click Find Jobs."
+        self._set_workflow_status(
+            "Ready",
+            "ready",
         )
 
     def load_from_settings(self, replace_inputs: bool = False):
@@ -507,6 +674,7 @@ class TabBatch(QWidget):
             self._load_general_runtime_controls(pipeline_settings)
         else:
             self._general_controls_ready = False
+        self._refresh_dashboard()
 
     def _ask_dir(self, widget: QLineEdit):
         folder = QFileDialog.getExistingDirectory(self, "Select Directory", widget.text() or str(Path.home()))
@@ -632,8 +800,14 @@ class TabBatch(QWidget):
             self._add_source_item(file_name)
 
     def _remove_sources(self):
+        removed = False
         for item in self.folder_list.selectedItems():
             self.folder_list.takeItem(self.folder_list.row(item))
+            removed = True
+        if removed:
+            self._reset_queue_state("Ready", "ready")
+        else:
+            self._refresh_dashboard()
 
     def _add_source_item(self, path_text: str) -> None:
         path = Path(path_text).expanduser()
@@ -647,6 +821,7 @@ class TabBatch(QWidget):
         normalized = str(path)
         if normalized not in existing:
             self.folder_list.addItem(normalized)
+            self._reset_queue_state("Ready", "ready")
 
 
     def _general_selected_paths(self) -> list[Path]:
@@ -712,26 +887,30 @@ class TabBatch(QWidget):
         self.table.setUpdatesEnabled(True)
         self.table.verticalScrollBar().setValue(v_scroll)
         self.table.horizontalScrollBar().setValue(h_scroll)
+        self._refresh_dashboard()
+
     def on_scan(self):
         paths = self._general_selected_paths()
         if not paths:
-            self.status_lbl.setText(
-                "No files or folders selected." if self._is_general_analysis() else "No input folders selected."
+            self._set_workflow_status(
+                "No files or folders selected." if self._is_general_analysis() else "No input folders selected.",
+                "error",
             )
-            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
             return
             
         self.btn_scan.setEnabled(False)
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, 0) # Indeterminate spinner
-        self.status_lbl.setText("Finding jobs...")
-        self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
+        self._set_workflow_status("Finding jobs...", "running")
 
         from core.batch import generate_jobs
 
         batch_settings = self._profile_for().get("batch", {})
         agg_pat = bool(batch_settings.get("aggregate_by_patient", True))
         regex = batch_settings.get("patient_id_regex", r"\d{2}OUM\d{5}")
+        self._scan_request_counter += 1
+        scan_request_id = self._scan_request_counter
+        self._active_scan_request_id = scan_request_id
 
         worker = Worker(
             generate_jobs,
@@ -739,12 +918,18 @@ class TabBatch(QWidget):
             aggregate_patients=agg_pat,
             patient_regex=regex
         )
-        worker.signals.result.connect(self._on_scan_result)
-        worker.signals.error.connect(self._on_scan_error)
+        worker.signals.result.connect(
+            lambda jobs, request_id=scan_request_id: self._on_scan_result(jobs, request_id)
+        )
+        worker.signals.error.connect(
+            lambda err_tuple, request_id=scan_request_id: self._on_scan_error(err_tuple, request_id)
+        )
         
         self.threadpool.start(worker)
         
-    def _on_scan_result(self, jobs):
+    def _on_scan_result(self, jobs, request_id: int | None = None):
+        if request_id != self._active_scan_request_id:
+            return
         self._detected_jobs = jobs
         self._job_states = {j["name"]: "pending" for j in jobs}
         
@@ -752,31 +937,30 @@ class TabBatch(QWidget):
         self.progress.setValue(0)
         
         if not jobs:
-            self.status_lbl.setText(
+            self._set_workflow_status(
                 "No jobs found — check files/folders."
                 if self._is_general_analysis()
-                else "No jobs found — check input folders."
+                else "No jobs found — check input folders.",
+                "warning",
             )
-            self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
         else:
-            self.status_lbl.setText(f"Found {len(jobs)} jobs — ready to run.")
-            self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
+            self._set_workflow_status(f"Found {len(jobs)} jobs — ready to run.", "success")
             self.btn_run.setEnabled(True)
             
         self._rebuild_table()
         self.btn_scan.setEnabled(True)
         
-    def _on_scan_error(self, err_tuple):
-        self.status_lbl.setText(f"Scan error: {err_tuple[1]}")
-        self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+    def _on_scan_error(self, err_tuple, request_id: int | None = None):
+        if request_id != self._active_scan_request_id:
+            return
+        self._set_workflow_status(f"Scan error: {err_tuple[1]}", "error")
         self.progress.setRange(0, 100)
         self.progress.setValue(0)
         self.btn_scan.setEnabled(True)
         self.btn_run.setEnabled(bool(self._detected_jobs))
 
     def _on_run_error(self, err_tuple):
-        self.status_lbl.setText(f"Run error: {err_tuple[1]}")
-        self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+        self._set_workflow_status(f"Run error: {err_tuple[1]}", "error")
         self.progress.setRange(0, max(len(self._detected_jobs), 1))
         self.btn_scan.setEnabled(True)
         self.btn_run.setEnabled(True)
@@ -786,12 +970,12 @@ class TabBatch(QWidget):
         
         selected_rows = [index.row() for index in self.table.selectionModel().selectedRows()]
         if not selected_rows:
-            self.status_lbl.setText(
+            self._set_workflow_status(
                 "No files or folders selected — check rows in the table."
                 if self._is_general_analysis()
-                else "No jobs selected — check rows in the table."
+                else "No jobs selected — check rows in the table.",
+                "error",
             )
-            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
             return
             
         jobs_to_run = [self._detected_jobs[i] for i in selected_rows]
@@ -801,8 +985,7 @@ class TabBatch(QWidget):
         out_path_obj = Path(out_path_str).expanduser() if out_path_str else None
         
         if not out_path_obj or not out_path_obj.exists():
-            self.status_lbl.setText("Output folder does not exist — set it before running.")
-            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+            self._set_workflow_status("Output folder does not exist — set it before running.", "error")
             return
             
         for j in jobs_to_run:
@@ -813,9 +996,8 @@ class TabBatch(QWidget):
         self.btn_run.setEnabled(False)
         self.progress.setRange(0, len(jobs_to_run))
         self.progress.setValue(0)
-        
-        self.status_lbl.setText(f"Running {len(jobs_to_run)} jobs...")
-        self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
+
+        self._set_workflow_status(f"Running {len(jobs_to_run)} jobs...", "running")
         
         profile = self._profile_for()
         s_pipe = profile.get("pipeline", {})
@@ -853,27 +1035,22 @@ class TabBatch(QWidget):
         self._rebuild_table()
         self.progress.setValue(idx)
         if state.startswith("error"):
-            self.status_lbl.setText(f"Run error in {name} ({idx}/{total})")
-            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+            self._set_workflow_status(f"Run error in {name} ({idx}/{total})", "error")
         elif state == "success":
-            self.status_lbl.setText(f"Completed: {name} ({idx}/{total})")
-            self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
+            self._set_workflow_status(f"Completed: {name} ({idx}/{total})", "success")
         elif state == "done":
             pass
         else:
-            self.status_lbl.setText(f"Running: {name} ({idx}/{total})")
-            self.status_lbl.setStyleSheet("color: #f59e0b; font-weight: 500;")
+            self._set_workflow_status(f"Running: {name} ({idx}/{total})", "running")
         
     def _on_run_finished(self, result):
         self.progress.setRange(0, 100)
         self.progress.setValue(100)
         failed_jobs = (result or {}).get("failed_jobs", [])
         if failed_jobs:
-            self.status_lbl.setText(f"Batch finished with {len(failed_jobs)} failed job(s).")
-            self.status_lbl.setStyleSheet("color: #ef4444; font-weight: 500;")
+            self._set_workflow_status(f"Batch finished with {len(failed_jobs)} failed job(s).", "error")
         else:
-            self.status_lbl.setText("Batch complete.")
-            self.status_lbl.setStyleSheet("color: #22c55e; font-weight: 500;")
+            self._set_workflow_status("Batch complete.", "success")
         self.btn_scan.setEnabled(True)
         self.btn_run.setEnabled(True)
         

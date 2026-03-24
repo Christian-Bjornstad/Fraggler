@@ -211,8 +211,6 @@ class MainWindow(QMainWindow):
             # Refresh tabs if needed
             self.tab_run.set_analysis(new_ana)
             self.tab_ladder.set_analysis(new_ana)
-            self.tab_run._detected_jobs = []
-            self.tab_run._rebuild_table()
 
         # Update Sidebar expansion
         for g in self.groups:
@@ -225,7 +223,11 @@ class MainWindow(QMainWindow):
             
     def on_sub_tab_clicked(self, analysis_id, tab_idx):
         # Ensure we are on the right analysis
-        self._activate_analysis(analysis_id)
+        changed = self._activate_analysis(analysis_id)
+        if changed or getattr(self.tab_run, "_current_analysis_id", None) != analysis_id:
+            self.tab_run.set_analysis(analysis_id)
+        if changed or getattr(self.tab_ladder, "_current_analysis_id", None) != analysis_id:
+            self.tab_ladder.set_analysis(analysis_id)
             
         if tab_idx == 3:
             page_map = {
