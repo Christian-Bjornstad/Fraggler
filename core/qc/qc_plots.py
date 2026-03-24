@@ -293,7 +293,19 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
 
     if marker_specs:
         exp_bps = [float(m["expected_bp"]) for m in marker_specs]
-        margins = [max(float(m.get("window_bp", 0)), 8.0) for m in marker_specs]
+        actual_search_margins = {
+            str(mr.get("name") or ""): float(mr.get("search_window_bp", 0.0) or 0.0)
+            for mr in marker_results
+            if mr.get("ok")
+        }
+        margins = [
+            max(
+                float(m.get("window_bp", 0)),
+                actual_search_margins.get(str(m.get("name") or ""), 0.0),
+                8.0,
+            )
+            for m in marker_specs
+        ]
         margin = max(margins) if margins else 8.0
 
         x_min = min(x_min, min(exp_bps) - margin)

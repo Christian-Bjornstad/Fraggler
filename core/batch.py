@@ -293,10 +293,14 @@ def run_batch_jobs(
     s_qc = APP_SETTINGS.get("qc", {})
     active_analysis = APP_SETTINGS.get("active_analysis", "clonality")
     aggregate_dit_reports = bool(aggregate_dit_reports) and active_analysis != "general"
+    sample_window = s_qc.get("sample_peak_window_bp", s_qc.get("w_sample", 3.0))
+    ladder_window = s_qc.get("ladder_peak_window_bp", s_qc.get("w_ladder", 3.0))
     qc_rules = QCRules(
         min_r2_ok=s_qc.get("min_r2_ok", 0.999),
         min_r2_warn=s_qc.get("min_r2_warn", 0.995),
-        sample_peak_window_bp=s_qc.get("sample_peak_window_bp", 2.0)
+        sample_peak_window_bp=sample_window,
+        sample_peak_window_bp_fallback=s_qc.get("sample_peak_window_bp_fallback", max(float(sample_window) + 4.0, 8.0)),
+        ladder_peak_window_bp=ladder_window,
     )
     
     from concurrent.futures import ThreadPoolExecutor

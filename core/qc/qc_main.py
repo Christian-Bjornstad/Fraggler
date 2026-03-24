@@ -29,7 +29,8 @@ def main():
     # QC terskler
     parser.add_argument("--min_r2_ok", type=float, default=0.999)
     parser.add_argument("--min_r2_warn", type=float, default=0.995)
-    parser.add_argument("--sample_peak_window_bp", type=float, default=2.0)
+    parser.add_argument("--sample_peak_window_bp", type=float, default=3.0)
+    parser.add_argument("--sample_peak_window_bp_fallback", type=float, default=8.0)
     # Peak søkevindu
     parser.add_argument("--w_sample", type=float, default=3.0, help="± bp-vindu for sample-markører")
     parser.add_argument("--w_ladder", type=float, default=3.0, help="± bp-vindu for ladder-markører")
@@ -44,6 +45,7 @@ def main():
         min_r2_ok=args.min_r2_ok,
         min_r2_warn=args.min_r2_warn,
         sample_peak_window_bp=args.sample_peak_window_bp,
+        sample_peak_window_bp_fallback=args.sample_peak_window_bp_fallback,
         ladder_peak_window_bp=args.w_ladder,
     )
 

@@ -375,6 +375,13 @@ def find_peak_near_bp_with_fallback(
     fallback_height = float(fallback.get("height", 0.0) or 0.0)
     if primary_height <= 0:
         primary_height = 1.0
+    primary_near_edge = primary_delta >= max(float(window_bp) * 0.8, float(window_bp) - 0.5)
+    fallback_not_much_further = fallback_delta <= (primary_delta + 1.0)
+    if fallback_height >= (primary_height * 1.5) and (primary_near_edge or fallback_not_much_further):
+        fallback["fallback_from_window_bp"] = float(window_bp)
+        fallback["search_mode"] = "fallback"
+        return fallback
+
     if fallback_height >= (primary_height * 2.0):
         fallback["fallback_from_window_bp"] = float(window_bp)
         fallback["search_mode"] = "fallback"

@@ -7,6 +7,7 @@ import pandas as pd
 
 from config import APP_SETTINGS
 from fraggler.fraggler import print_green
+from core.analyses.clonality.tracking_dashboard import refresh_clonality_tracking_dashboard
 from core.qc.qc_markers import (
     control_id_from_filename,
     find_peak_near_bp,
@@ -70,18 +71,21 @@ PEAK_SHEET_COLUMNS = [
     "Area",
     "OK",
     "Reason",
+    "AbsDeltaBP",
 ]
 
 
 def build_clonality_qc_rules() -> QCRules:
     qc_settings = APP_SETTINGS.get("qc", {})
+    sample_window = qc_settings.get("sample_peak_window_bp", qc_settings.get("w_sample", 3.0))
+    ladder_window = qc_settings.get("ladder_peak_window_bp", qc_settings.get("w_ladder", 3.0))
     return QCRules(
         min_r2_ok=qc_settings.get("min_r2_ok", 0.999),
         min_r2_warn=qc_settings.get("min_r2_warn", 0.995),
         nk_ymax_floor=qc_settings.get("nk_ymax_floor", 250.0),
-        sample_peak_window_bp=qc_settings.get("sample_peak_window_bp", 2.0),
-        sample_peak_window_bp_fallback=qc_settings.get("sample_peak_window_bp_fallback", 4.0),
-        ladder_peak_window_bp=qc_settings.get("ladder_peak_window_bp", 2.0),
+        sample_peak_window_bp=sample_window,
+        sample_peak_window_bp_fallback=qc_settings.get("sample_peak_window_bp_fallback", max(float(sample_window) + 4.0, 8.0)),
+        ladder_peak_window_bp=ladder_window,
         min_sl_total_area=qc_settings.get("min_sl_total_area", 1e4),
     )
 
@@ -198,6 +202,7 @@ def update_clonality_tracking_workbook(
             all_patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
             all_control.to_excel(writer, sheet_name="Control_Runs", index=False)
             all_peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
+        refresh_clonality_tracking_dashboard(excel_path)
         print_green(f"Clonality tracking workbook updated in {excel_path}")
 
 
@@ -316,13 +321,16 @@ def _build_pk_peak_rows(entry: dict, rules: QCRules, base_row: dict) -> list[dic
             "Area": "",
             "OK": bool(result.get("ok", False)),
             "Reason": result.get("reason") or "",
+            "AbsDeltaBP": "",
         }
         if result.get("ok", False):
             found_bp = float(result["found_bp"])
+            delta_bp = found_bp - float(marker.get("expected_bp", np.nan))
             row["FoundBP"] = found_bp
-            row["DeltaBP"] = found_bp - float(marker.get("expected_bp", np.nan))
+            row["DeltaBP"] = delta_bp
             row["Height"] = float(result.get("height", np.nan))
             row["Area"] = float(result.get("area", np.nan))
+            row["AbsDeltaBP"] = abs(delta_bp)
         marker_rows.append(row)
 
     return marker_rows
