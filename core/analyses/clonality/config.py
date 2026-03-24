@@ -50,6 +50,7 @@ SL_WINDOW_BP = 20.0
 # ============================================================
 ASSAY_DISPLAY_ORDER = [
     "FR1", "FR2", "FR3",
+    "IKZF1", "Ktr-albumin",
     "IGK", "KDE",
     "DHJH_D", "DHJH_E",
     "TCRbA", "TCRbB", "TCRbC",
@@ -81,6 +82,20 @@ ASSAY_CONFIG = {
         "peak_channels": ["DATA2"],
         "bp_min": 60.0,
         "bp_max": 220.0,
+    },
+    "IKZF1": {
+        "dye": "ROX",
+        "trace_channels": ["DATA1"],
+        "peak_channels": ["DATA1"],
+        "bp_min": 50.0,
+        "bp_max": 400.0,
+    },
+    "Ktr-albumin": {
+        "dye": "ROX",
+        "trace_channels": ["DATA1"],
+        "peak_channels": ["DATA1"],
+        "bp_min": 50.0,
+        "bp_max": 400.0,
     },
     "TCRbA": {
         "dye": "ROX",
@@ -164,6 +179,8 @@ ASSAY_REFERENCE_RANGES: dict[str, list[tuple[float, float]]] = {
     "FR1": [(310.0, 360.0)],
     "FR2": [(250.0, 295.0)],
     "FR3": [(100.0, 170.0)],
+    "IKZF1": [(100.0, 300.0)],
+    "Ktr-albumin": [(100.0, 300.0)],
 
     "IGK": [(120.0, 300.0)],
     "KDE": [(210.0, 390.0)],
@@ -183,6 +200,8 @@ ASSAY_REFERENCE_LABEL: dict[str, str] = {
     "FR1": "FR1 (IgH): 310–360 bp (VH–JH)",
     "FR2": "FR2 (IgH): 250–295 bp (VH–JH)",
     "FR3": "FR3 (IgH): 100–170 bp (VH–JH)",
+    "IKZF1": "IKZF1 (IKAROS): 100–300 bp",
+    "Ktr-albumin": "Ktr-albumin kontroll: 100–300 bp",
 
     "IGK": "IgK: 120–160, 190–210, 260–300 bp (Vκ–Jκ)",
     "KDE": "Kde: 210–250, 270–300, 350–390 bp (Kde–involveringer)",

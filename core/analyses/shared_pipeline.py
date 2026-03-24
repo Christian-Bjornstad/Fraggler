@@ -36,15 +36,29 @@ def scan_fsa_files(
         return []
 
     iterator = fsa_dir.rglob("*.fsa") if recursive else fsa_dir.glob("*.fsa")
-    fsa_files = [
-        p for p in sorted(iterator)
-        if not is_water_file(p.name)
-    ]
+    fsa_files: list[Path] = []
+    skipped_empty = 0
+    for p in sorted(iterator):
+        if is_water_file(p.name):
+            continue
+        try:
+            if p.stat().st_size <= 0:
+                skipped_empty += 1
+                print_warning(f"[SCAN] Skipping empty .fsa file: {p.name}")
+                continue
+        except OSError as exc:
+            skipped_empty += 1
+            print_warning(f"[SCAN] Skipping unreadable .fsa file {p.name}: {exc}")
+            continue
+        fsa_files.append(p)
 
     controls_mode = mode == "controls" or include_controls_only
     if controls_mode:
         fsa_files = [p for p in fsa_files if is_control_file(p.name)]
         print_green(f"[INFO] Controls mode: {len(fsa_files)} control files selected.")
+
+    if skipped_empty:
+        print_warning(f"[SCAN] Ignored {skipped_empty} empty/unreadable .fsa file(s).")
 
     if not fsa_files:
         print_warning(f"Fant ingen .fsa-filer i {fsa_dir}.")

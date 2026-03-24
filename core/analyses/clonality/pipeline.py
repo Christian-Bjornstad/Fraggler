@@ -99,23 +99,31 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
 
     sample_channel = trace_channels[0]
 
-    if ladder == "LIZ":
-        fsa = analyse_fsa_liz(fsa_path, sample_channel)
-    else:
-        fsa = analyse_fsa_rox(fsa_path, sample_channel)
+    try:
+        if ladder == "LIZ":
+            fsa = analyse_fsa_liz(fsa_path, sample_channel)
+        else:
+            fsa = analyse_fsa_rox(fsa_path, sample_channel)
+    except Exception as ex:
+        print_warning(f"[ANALYZE] Skipping unreadable file {fsa_path.name}: {ex}")
+        return None
 
     if fsa is None:
         return None
 
     peaks_by_channel: dict[str, pd.DataFrame | None] = {}
     if assay == "SL":
-        peaks_by_channel = auto_detect_sl_peaks(
-            fsa,
-            peak_channels=peak_channels,
-            targets_bp=SL_TARGET_FRAGMENTS_BP,
-            window_bp=SL_WINDOW_BP,
-            min_height=800.0,
-        )
+        try:
+            peaks_by_channel = auto_detect_sl_peaks(
+                fsa,
+                peak_channels=peak_channels,
+                targets_bp=SL_TARGET_FRAGMENTS_BP,
+                window_bp=SL_WINDOW_BP,
+                min_height=800.0,
+            )
+        except Exception as ex:
+            print_warning(f"[SL] Klarte ikke autovalg av SL-peaks for {fsa.file_name}: {ex}")
+            peaks_by_channel = {ch: pd.DataFrame(columns=["basepairs", "peaks", "keep"]) for ch in peak_channels}
     else:
         for ch in peak_channels:
             peaks_by_channel[ch] = pd.DataFrame(columns=["basepairs", "peaks", "keep"])

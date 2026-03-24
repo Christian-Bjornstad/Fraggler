@@ -87,18 +87,33 @@ def _scan_folder_fsa_files(path: Path, folder_files: Dict[Path, List[Path]]) -> 
     if path not in folder_files:
         from core.utils import is_water_file
 
+        def _is_usable_fsa(candidate: Path) -> bool:
+            if candidate.suffix.lower() != ".fsa" or is_water_file(candidate.name):
+                return False
+            try:
+                if candidate.stat().st_size <= 0:
+                    log(f"[WARN] Skipping empty .fsa file during job scan: {candidate.name}")
+                    return False
+            except OSError as exc:
+                log(f"[WARN] Skipping unreadable .fsa file during job scan: {candidate.name} ({exc})")
+                return False
+            return True
+
         if path.is_file():
-            if path.suffix.lower() == ".fsa" and not is_water_file(path.name):
+            if _is_usable_fsa(path):
                 folder_files[path] = [path]
             else:
                 folder_files[path] = []
         elif not path.is_dir():
             folder_files[path] = []
         else:
+            raw_candidates = [f for f in sorted(path.glob("*.fsa")) if not is_water_file(f.name)]
             folder_files[path] = [
-                f for f in sorted(path.glob("*.fsa"))
-                if not is_water_file(f.name)
+                f for f in raw_candidates
+                if _is_usable_fsa(f)
             ]
+            if raw_candidates and not folder_files[path]:
+                log(f"[WARN] Folder has only empty/unreadable .fsa files: {path}")
     return folder_files[path]
 
 

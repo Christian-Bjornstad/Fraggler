@@ -328,6 +328,20 @@ def run_qc_job(
 ) -> Optional[Path]:
     """Run QC analysis and return the path to the HTML report."""
     from datetime import datetime
+    
+    def _empty_or_unreadable_fsa_summary(input_dir: Optional[Path]) -> tuple[int, int]:
+        if input_dir is None or not Path(input_dir).exists():
+            return 0, 0
+        total = 0
+        empty_or_bad = 0
+        for candidate in Path(input_dir).glob("*.fsa"):
+            total += 1
+            try:
+                if candidate.stat().st_size <= 0:
+                    empty_or_bad += 1
+            except OSError:
+                empty_or_bad += 1
+        return total, empty_or_bad
 
     tmp_input = None
     try:
@@ -354,7 +368,10 @@ def run_qc_job(
             mode="controls",
         )
         if not entries:
-            raise RuntimeError("No QC entries found (check file names).")
+            total_fsa, empty_or_bad = _empty_or_unreadable_fsa_summary(effective_in)
+            if total_fsa > 0 and empty_or_bad == total_fsa:
+                raise RuntimeError("All QC .fsa files were empty or unreadable.")
+            raise RuntimeError("No QC entries found (check file names or skipped unreadable files).")
 
         build_qc_html(entries, out_html, rules, excel_path)
         run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

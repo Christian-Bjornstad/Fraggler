@@ -11,6 +11,7 @@ import copy
 
 import numpy as np
 import pandas as pd
+from scipy import signal
 from scipy.interpolate import UnivariateSpline
 from sklearn.metrics import mean_squared_error, r2_score
 
@@ -22,6 +23,7 @@ from fraggler.fraggler import (
     generate_combinations,
     calculate_best_combination_of_size_standard_peaks,
     fit_size_standard_to_ladder,
+    baseline_arPLS,
     print_green,
     print_warning,
 )
@@ -61,6 +63,8 @@ ROX_DYEBLOB_HEIGHT_MULTIPLIER = 2.0
 ROX_DYEBLOB_EARLY_INDEX = 2000
 ROX_DYEBLOB_TIGHT_GAP = 40
 ROX_DYEBLOB_CLUSTER_GAP = 70
+ROX_BASELINE_FALLBACK_MIN_HEIGHT = 50.0
+ROX_BASELINE_FALLBACK_MIN_PEAKS = 3
 
 
 def _project_root_for(path: Path) -> Path | None:
@@ -268,6 +272,25 @@ def _clean_rox_size_standard_peaks(all_found: np.ndarray, rox_data: np.ndarray) 
         cleaned.append(int(peak))
 
     return np.asarray(cleaned, dtype=int)
+
+
+def _recover_rox_size_standard_peaks_from_baseline(fsa: FsaFile, raw_trace: np.ndarray) -> bool:
+    """Retry ROX peak detection on a baseline-corrected trace when the raw pass fails."""
+    corrected = np.maximum(np.asarray(raw_trace, dtype=float) - baseline_arPLS(raw_trace), 0.0)
+    fallback_height = max(20.0, min(float(fsa.min_size_standard_height), ROX_BASELINE_FALLBACK_MIN_HEIGHT))
+    found_peaks, _ = signal.find_peaks(
+        corrected,
+        height=fallback_height,
+        distance=fsa.min_distance_between_peaks,
+    )
+    cleaned = _clean_rox_size_standard_peaks(found_peaks, corrected)
+    if len(cleaned) < ROX_BASELINE_FALLBACK_MIN_PEAKS:
+        return False
+
+    fsa.size_standard = corrected
+    fsa.size_standard_peaks = np.asarray(cleaned, dtype=int)
+    fsa.size_standard_baseline_corrected = True
+    return True
 
 def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.ndarray] | None = None) -> FsaFile | None:
     """Fit the top smooth candidates and keep the best actual ladder fit."""
@@ -762,6 +785,15 @@ def analyse_fsa_rox(
         size_standard_channel="DATA4",
     )
     base_fsa = find_size_standard_peaks(base_fsa)
+    base_raw_rox = np.asarray(base_fsa.fsa["DATA4"], dtype=float)
+    base_cleaned = _clean_rox_size_standard_peaks(
+        np.asarray(getattr(base_fsa, "size_standard_peaks", []), dtype=int),
+        base_raw_rox,
+    )
+    if len(base_cleaned) >= ROX_BASELINE_FALLBACK_MIN_PEAKS:
+        base_fsa.size_standard_peaks = base_cleaned
+    else:
+        _recover_rox_size_standard_peaks_from_baseline(base_fsa, base_raw_rox)
     
     applied = _try_apply_saved_ladder_adjustment(base_fsa, load_ladder_adjustment(base_fsa), "ROX")
     if applied is not None:
@@ -784,8 +816,12 @@ def analyse_fsa_rox(
         all_found = getattr(fsa, "size_standard_peaks", None)
         if all_found is not None:
             cleaned = _clean_rox_size_standard_peaks(np.asarray(all_found), rox_data)
-            if len(cleaned) >= 3:
+            if len(cleaned) >= ROX_BASELINE_FALLBACK_MIN_PEAKS:
                 fsa.size_standard_peaks = np.array(cleaned)
+            elif _recover_rox_size_standard_peaks_from_baseline(fsa, rox_data):
+                print_green(f"[ROX] Baseline-corrected ladder detection used for {fsa_path.name}")
+        elif _recover_rox_size_standard_peaks_from_baseline(fsa, rox_data):
+            print_green(f"[ROX] Baseline-corrected ladder detection used for {fsa_path.name}")
 
         ss_peaks = getattr(fsa, "size_standard_peaks", None)
         if ss_peaks is None or getattr(ss_peaks, "shape", [0])[0] < 2:
