@@ -30,7 +30,8 @@ def plotly_inline_script_tag() -> str:
                 f"Bundled plotly JS not found at {_PLOTLY_JS}.  "
                 f"Please ensure assets/plotly-3.1.0.min.js exists."
             )
-        _PLOTLY_INLINE_CACHE = _PLOTLY_JS.read_text(encoding="utf-8")
+        # Use errors="replace" to avoid crashing on unexpected characters in minified JS
+        _PLOTLY_INLINE_CACHE = _PLOTLY_JS.read_text(encoding="utf-8", errors="replace")
     return f"<script>{_PLOTLY_INLINE_CACHE}</script>"
 
 

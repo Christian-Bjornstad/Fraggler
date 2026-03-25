@@ -427,7 +427,8 @@ def load_settings(
     # 1) Load from YAML if exists
     if settings_path.exists():
         try:
-            with open(settings_path, "r", encoding="utf-8") as f:
+            # Use errors="replace" to prevent crashing on non-UTF8 characters in path names or comments
+            with open(settings_path, "r", encoding="utf-8", errors="replace") as f:
                 user = yaml.safe_load(f) or {}
             settings = _deep_update(settings, user)
         except Exception as exc:

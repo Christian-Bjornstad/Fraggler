@@ -24,6 +24,9 @@ def run_pipeline(
     return_entries: bool = False,
     make_dit_reports: bool = True,
     mode: str = "all",
+    tracking_excel_path: Path | None = None,
+    update_tracking_workbook: bool = True,
+    progress_callback=None,
 ) -> list[dict] | None:
     """Delegates pipeline execution to the active analysis module."""
     mod = get_analysis_module("pipeline")
@@ -34,4 +37,7 @@ def run_pipeline(
         return_entries=return_entries,
         make_dit_reports=make_dit_reports,
         mode=mode,
+        tracking_excel_path=tracking_excel_path,
+        update_tracking_workbook=update_tracking_workbook,
+        progress_callback=progress_callback,
     )

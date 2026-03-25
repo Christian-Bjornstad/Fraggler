@@ -1430,6 +1430,9 @@ def run_pipeline(
     return_entries: bool = False,
     make_dit_reports: bool = True,
     mode: str = "all",
+    tracking_excel_path: Path | None = None,
+    update_tracking_workbook: bool = True,
+    progress_callback=None,
 ) -> list[dict] | None:
     """
     Kjor FLT3-pipeline pa alle .fsa-filer i fsa_dir.
@@ -1488,12 +1491,13 @@ def run_pipeline(
     _calculate_ratios(entries)
     generate_flt3_peak_report(entries, assay_dir)
     generate_flt3_bp_validation_report(entries, assay_dir)
-    tracking_excel_path = resolve_analysis_excel_output_path(
+    resolved_tracking_excel_path = tracking_excel_path or resolve_analysis_excel_output_path(
         "flt3",
         assay_dir,
         FLT3_QC_TRENDS_FILENAME,
     )
-    update_flt3_qc_trends(tracking_excel_path, entries)
+    if update_tracking_workbook:
+        update_flt3_qc_trends(resolved_tracking_excel_path, entries)
 
     return finalize_pipeline_run(
         entries,

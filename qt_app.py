@@ -104,5 +104,33 @@ def main():
     sys.exit(app.exec())
 
 if __name__ == "__main__":
+    # Ensure stdout/stderr use UTF-8 regardless of environment locales
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+
     multiprocessing.freeze_support()
-    main()
+    
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        err_msg = traceback.format_exc()
+        print(f"CRITICAL STARTUP ERROR:\n{err_msg}", file=sys.stderr)
+        
+        # If QApplication was already created (unlikely here but for safety)
+        # we try to show a message box.
+        app = QApplication.instance()
+        if not app:
+            app = QApplication(sys.argv)
+            
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setIcon(QMessageBox.Icon.Critical)
+        msg.setWindowTitle("Startup Error")
+        msg.setText("Fraggler Diagnostics failed to start.")
+        msg.setInformativeText(str(e))
+        msg.setDetailedText(err_msg)
+        msg.exec()
+        sys.exit(1)

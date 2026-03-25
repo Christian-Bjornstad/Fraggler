@@ -106,6 +106,25 @@ def build_filtered_input(src: Path, needle: str) -> Optional[Path]:
     return stage_files(matched)
 
 
+def _emit_progress(progress_callback, **event) -> None:
+    if progress_callback is None:
+        return
+    payload = {
+        "folder_name": "",
+        "job_name": "",
+        "phase": "",
+        "file_name": "",
+        "files_done": 0,
+        "files_total": 0,
+        "jobs_done": 0,
+        "jobs_total": 0,
+        "heartbeat_at": "",
+        "note": "",
+    }
+    payload.update(event)
+    progress_callback(payload)
+
+
 # ============================================================
 # PIPELINE JOB
 # ============================================================
@@ -229,6 +248,8 @@ def run_pipeline_job_collect(
     files: Optional[List[Path]] = None,
     *,
     chunk_files: bool = True,
+    tracking_excel_path: Path | None = None,
+    progress_callback=None,
 ) -> list:
     """
     Like run_pipeline_job but returns entries for cross-folder DIT aggregation.
@@ -257,6 +278,13 @@ def run_pipeline_job_collect(
 
             from core.pipeline import run_pipeline
             if not chunk_files:
+                _emit_progress(
+                    progress_callback,
+                    phase="stage_files",
+                    files_done=0,
+                    files_total=len(selected_files),
+                    note="staging_explicit_files",
+                )
                 tmp_input = stage_files(selected_files)
                 try:
                     entries = run_pipeline(
@@ -266,6 +294,9 @@ def run_pipeline_job_collect(
                         mode=effective_mode,
                         return_entries=True,
                         make_dit_reports=False,
+                        tracking_excel_path=tracking_excel_path,
+                        update_tracking_workbook=False,
+                        progress_callback=progress_callback,
                     )
                     return entries or []
                 finally:
@@ -273,10 +304,30 @@ def run_pipeline_job_collect(
                     tmp_input = None
 
             all_entries = []
+            total_files = len(selected_files)
             for offset in range(0, len(selected_files), CHUNK_SIZE):
                 chunk = selected_files[offset: offset + CHUNK_SIZE]
+                chunk_index = (offset // CHUNK_SIZE) + 1
+                _emit_progress(
+                    progress_callback,
+                    phase="stage_files",
+                    files_done=offset,
+                    files_total=total_files,
+                    note=f"staging_chunk_{chunk_index}",
+                )
                 tmp_input = stage_files(chunk)
                 try:
+                    def _chunk_progress(event):
+                        files_done = int(event.get("files_done", 0)) + offset
+                        _emit_progress(
+                            progress_callback,
+                            **{
+                                **event,
+                                "files_done": min(total_files, files_done),
+                                "files_total": total_files,
+                            },
+                        )
+
                     entries = run_pipeline(
                         fsa_dir=tmp_input,
                         base_outdir=base_outdir,
@@ -284,6 +335,9 @@ def run_pipeline_job_collect(
                         mode=effective_mode,
                         return_entries=True,
                         make_dit_reports=False,
+                        tracking_excel_path=tracking_excel_path,
+                        update_tracking_workbook=False,
+                        progress_callback=_chunk_progress,
                     )
                     all_entries.extend(entries or [])
                 finally:
@@ -308,6 +362,9 @@ def run_pipeline_job_collect(
             mode=effective_mode,
             return_entries=True,
             make_dit_reports=False,  # We build DIT reports ourselves
+            tracking_excel_path=tracking_excel_path,
+            update_tracking_workbook=False,
+            progress_callback=progress_callback,
         )
         return entries or []
     finally:

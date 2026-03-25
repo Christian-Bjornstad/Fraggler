@@ -111,6 +111,9 @@ def run_pipeline(
     return_entries: bool = False,
     make_dit_reports: bool = True,
     mode: str = "all",
+    tracking_excel_path: Path | None = None,
+    update_tracking_workbook: bool = True,
+    progress_callback=None,
 ) -> list[dict] | None:
     fsa_dir, assay_dir = normalize_pipeline_paths(fsa_dir, base_outdir, assay_folder_name)
 

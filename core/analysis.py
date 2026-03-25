@@ -18,6 +18,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 import json
 from fraggler.fraggler import (
     FsaFile,
+    estimate_combination_count,
     find_size_standard_peaks,
     return_maxium_allowed_distance_between_size_standard_peaks,
     generate_combinations,
@@ -65,6 +66,15 @@ ROX_DYEBLOB_TIGHT_GAP = 40
 ROX_DYEBLOB_CLUSTER_GAP = 70
 ROX_BASELINE_FALLBACK_MIN_HEIGHT = 50.0
 ROX_BASELINE_FALLBACK_MIN_PEAKS = 3
+LADDER_RESCORING_MAX_COMBINATIONS = 250
+ROX_COMBINATION_ESTIMATE_LIMIT = 10_000
+ROX_ALLOWED_EXTRA_SIZE_STANDARD_PEAKS = 2
+ROX_BEAM_WIDTH = 64
+ROX_BEAM_KEEP_FINISHED = 5
+ROX_BEAM_MIN_COMPLETION_RATIO = 0.60
+EARLY_ACCEPT_R2 = 0.99995
+EARLY_ACCEPT_MEAN_ABS_ERROR = 0.35
+EARLY_ACCEPT_MAX_ABS_ERROR = 0.90
 
 
 def _project_root_for(path: Path) -> Path | None:
@@ -161,53 +171,344 @@ def _map_step_indices(source_steps: np.ndarray, target_steps: np.ndarray) -> dic
     return mapping
 
 
+def _clone_fsa_for_ladder_trial(
+    fsa: FsaFile,
+    *,
+    strip_candidate_table: bool = True,
+) -> FsaFile:
+    """Deep-copy an FSA while temporarily removing the heavy candidate table."""
+    saved_combinations = None
+    had_combinations = False
+    if strip_candidate_table and hasattr(fsa, "best_size_standard_combinations"):
+        had_combinations = True
+        saved_combinations = getattr(fsa, "best_size_standard_combinations")
+        setattr(fsa, "best_size_standard_combinations", None)
+    try:
+        return copy.deepcopy(fsa)
+    finally:
+        if had_combinations:
+            setattr(fsa, "best_size_standard_combinations", saved_combinations)
 
 
-def _rank_size_standard_combinations(fsa: FsaFile) -> list[np.ndarray]:
-    """Return the smoothest ladder candidates, matching the original spline heuristic."""
+
+
+def _candidate_combination_arrays(
+    fsa: FsaFile,
+    *,
+    max_combinations: int = LADDER_RESCORING_MAX_COMBINATIONS,
+) -> list[np.ndarray]:
+    """Return a bounded candidate subset from the generated ladder combinations."""
     combinations = getattr(fsa, "best_size_standard_combinations", None)
     if combinations is None or getattr(combinations, "empty", True):
         return []
 
-    ranked = (
-        combinations.assign(
-            der=lambda x: [
-                UnivariateSpline(fsa.ladder_steps, y, s=0).derivative(n=2)
-                for y in x.combinations
-            ]
+    total = int(getattr(combinations, "shape", [0])[0])
+    if total <= max_combinations:
+        source = combinations["combinations"].tolist()
+    else:
+        sampled_idx = np.linspace(0, total - 1, num=max_combinations, dtype=int)
+        sampled_idx = np.unique(sampled_idx)
+        print_warning(
+            f"[LADDER] Sampling {len(sampled_idx)}/{total} ladder combinations for "
+            f"{Path(getattr(fsa, 'file', 'unknown')).name} to avoid a long stall."
         )
-        .assign(max_value=lambda x: [max(abs(y(fsa.ladder_steps))) for y in x.der])
-        .sort_values("max_value", ascending=True)
+        source = combinations.iloc[sampled_idx]["combinations"].tolist()
+
+    return [np.asarray(combo, dtype=float) for combo in source]
+
+
+def _rank_size_standard_combinations(fsa: FsaFile) -> list[np.ndarray]:
+    """Return the smoothest ladder candidates using a bounded candidate subset."""
+    ranked: list[tuple[float, np.ndarray]] = []
+    ladder_steps = np.asarray(fsa.ladder_steps, dtype=float)
+
+    for combo in _candidate_combination_arrays(fsa):
+        if combo.size != ladder_steps.size:
+            continue
+        try:
+            derivative = UnivariateSpline(ladder_steps, combo, s=0).derivative(n=2)
+            score = float(max(abs(derivative(ladder_steps))))
+        except Exception:
+            continue
+        ranked.append((score, combo))
+
+    ranked.sort(key=lambda item: item[0])
+    return [combo for _, combo in ranked[:LADDER_CANDIDATE_COUNT]]
+
+
+def _fit_score_tuple(
+    metrics: dict[str, float | int],
+    intensity_penalty: float,
+    *,
+    missing_count: int = 0,
+) -> tuple[float, float, float, float]:
+    return (
+        float(metrics.get("mean_abs_error_bp", float("inf")))
+        + float(intensity_penalty)
+        + (missing_count * PARTIAL_RESCUE_MISSING_STEP_PENALTY),
+        float(metrics.get("max_abs_error_bp", float("inf"))),
+        -float(metrics.get("r2", float("-inf"))),
+        float(intensity_penalty),
     )
-    return [
-        np.asarray(row.combinations, dtype=float)
-        for row in ranked.head(LADDER_CANDIDATE_COUNT).itertuples()
+
+
+def _is_early_accept_candidate(
+    metrics: dict[str, float | int],
+    *,
+    missing_count: int = 0,
+) -> bool:
+    return (
+        missing_count == 0
+        and float(metrics.get("r2", float("-inf"))) >= EARLY_ACCEPT_R2
+        and float(metrics.get("mean_abs_error_bp", float("inf"))) <= EARLY_ACCEPT_MEAN_ABS_ERROR
+        and float(metrics.get("max_abs_error_bp", float("inf"))) <= EARLY_ACCEPT_MAX_ABS_ERROR
+    )
+
+
+def _estimate_size_standard_combination_count(
+    fsa: FsaFile,
+    *,
+    cap: int = ROX_COMBINATION_ESTIMATE_LIMIT + 1,
+) -> int:
+    peaks = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    if peaks.size == 0:
+        return 0
+    length = int(getattr(fsa, "n_ladder_peaks", len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float))))
+    distance = float(getattr(fsa, "maxium_allowed_distance_between_size_standard_peaks", 0.0) or 0.0)
+    return estimate_combination_count(peaks, length, distance, cap=cap)
+
+
+def _should_use_bounded_rox_search(
+    fsa: FsaFile,
+    *,
+    combination_estimate: int | None = None,
+) -> tuple[bool, int]:
+    peak_count = int(len(np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)))
+    expected_count = int(len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)))
+    combination_estimate = (
+        _estimate_size_standard_combination_count(fsa)
+        if combination_estimate is None
+        else int(combination_estimate)
+    )
+    use_bounded = (
+        combination_estimate > ROX_COMBINATION_ESTIMATE_LIMIT
+        or peak_count > (expected_count + ROX_ALLOWED_EXTRA_SIZE_STANDARD_PEAKS)
+    )
+    return use_bounded, combination_estimate
+
+
+def _build_bounded_rox_candidate_specs(
+    fsa: FsaFile,
+    *,
+    beam_width: int = ROX_BEAM_WIDTH,
+    keep_finished: int = ROX_BEAM_KEEP_FINISHED,
+    allow_partial: bool = True,
+) -> list[dict[str, object]]:
+    peaks = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    expected_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    if peaks.size == 0 or expected_steps.size == 0:
+        return []
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    peak_idx = np.rint(peaks).astype(int)
+    valid_idx = np.clip(peak_idx, 0, max(len(trace) - 1, 0))
+    intensities = trace[valid_idx] if trace.size else np.ones_like(peaks, dtype=float)
+    positive_intensities = intensities[intensities > 0]
+    global_intensity = float(np.median(positive_intensities)) if positive_intensities.size else 1.0
+    global_gap = float(np.median(np.diff(peaks))) if peaks.size > 1 else 1.0
+    max_gap = float(getattr(fsa, "maxium_allowed_distance_between_size_standard_peaks", 0.0) or 0.0)
+    target_len = int(expected_steps.size)
+    min_partial_len = max(10, int(np.ceil(target_len * ROX_BEAM_MIN_COMPLETION_RATIO)))
+
+    transitions: list[list[int]] = []
+    for i in range(len(peaks)):
+        next_indices: list[int] = []
+        for j in range(i + 1, len(peaks)):
+            if (peaks[j] - peaks[i]) > max_gap:
+                break
+            next_indices.append(j)
+        transitions.append(next_indices)
+
+    states: list[tuple[float, list[int], float, float]] = []
+    for i in range(len(peaks)):
+        start_ratio = float(intensities[i]) / max(global_intensity, 1.0)
+        start_penalty = max(0.0, 0.90 - start_ratio) * 0.60
+        states.append((start_penalty, [i], global_gap, global_gap))
+    states.sort(key=lambda item: item[0])
+    states = states[:beam_width]
+
+    best_states = list(states)
+    best_depth = 1
+
+    for _depth in range(1, target_len):
+        next_states: list[tuple[float, list[int], float, float]] = []
+        for score, path_indices, mean_gap, last_gap in states:
+            last_idx = path_indices[-1]
+            remaining_needed = target_len - len(path_indices) - 1
+            for next_idx in transitions[last_idx]:
+                if (len(peaks) - (next_idx + 1)) < max(0, remaining_needed):
+                    continue
+                gap = float(peaks[next_idx] - peaks[last_idx])
+                local_target = last_gap if len(path_indices) > 1 else global_gap
+                smooth_penalty = abs(gap - local_target) / max(local_target, 1.0)
+                drift_penalty = abs(gap - mean_gap) / max(mean_gap, 1.0)
+                intensity_ratio = float(intensities[next_idx]) / max(global_intensity, 1.0)
+                intensity_penalty = max(0.0, 0.90 - intensity_ratio)
+                edge_penalty = 0.15 if gap > (max_gap * 0.90) else 0.0
+                next_score = (
+                    float(score)
+                    + (smooth_penalty * 1.10)
+                    + (drift_penalty * 0.45)
+                    + (intensity_penalty * 0.80)
+                    + edge_penalty
+                )
+                next_mean_gap = gap if len(path_indices) == 1 else ((mean_gap * (len(path_indices) - 1)) + gap) / len(path_indices)
+                next_states.append((next_score, path_indices + [next_idx], next_mean_gap, gap))
+
+        if not next_states:
+            break
+
+        next_states.sort(
+            key=lambda item: (
+                item[0],
+                -len(item[1]),
+                -float(np.sum(intensities[np.asarray(item[1], dtype=int)])),
+            )
+        )
+        states = next_states[:beam_width]
+        current_depth = len(states[0][1])
+        if current_depth >= best_depth:
+            best_depth = current_depth
+            best_states = list(states)
+        if current_depth >= target_len:
+            break
+
+    candidate_states = [
+        state for state in best_states
+        if len(state[1]) >= target_len
     ]
+    if candidate_states:
+        specs: list[dict[str, object]] = []
+        for score, path_indices, _mean_gap, _last_gap in candidate_states[:keep_finished]:
+            specs.append(
+                {
+                    "times": peaks[np.asarray(path_indices, dtype=int)],
+                    "ladder_steps": expected_steps.copy(),
+                    "beam_score": float(score),
+                    "complete": True,
+                    "bounded": True,
+                }
+            )
+        return specs
+
+    if not allow_partial:
+        return []
+
+    partial_depth = max((len(state[1]) for state in best_states), default=0)
+    if partial_depth < min_partial_len:
+        return []
+
+    partial_states = [state for state in best_states if len(state[1]) == partial_depth]
+    specs = []
+    for score, path_indices, _mean_gap, _last_gap in partial_states[:keep_finished]:
+        times = peaks[np.asarray(path_indices, dtype=int)]
+        window_size = len(path_indices)
+        max_start = max(0, target_len - window_size)
+        for start_idx in range(max_start + 1):
+            specs.append(
+                {
+                    "times": times,
+                    "ladder_steps": expected_steps[start_idx : start_idx + window_size].copy(),
+                    "beam_score": float(score),
+                    "complete": False,
+                    "bounded": True,
+                }
+            )
+    return specs
+
+
+def _select_best_bounded_ladder_fit(
+    fsa: FsaFile,
+    candidate_specs: list[dict[str, object]],
+    *,
+    rescue_mode: bool = False,
+) -> FsaFile | None:
+    if not candidate_specs:
+        return None
+
+    expected_steps = _get_expected_ladder_steps(fsa)
+    best_complete_fit = None
+    best_complete_score = None
+    best_partial_fit = None
+    best_partial_score = None
+
+    for spec in candidate_specs:
+        times = np.asarray(spec.get("times", []), dtype=float)
+        ladder_steps = np.asarray(spec.get("ladder_steps", []), dtype=float)
+        if times.size == 0 or ladder_steps.size == 0 or times.size != ladder_steps.size:
+            continue
+
+        trial = _clone_fsa_for_ladder_trial(fsa)
+        trial.expected_ladder_steps = expected_steps.copy()
+        trial.ladder_steps = ladder_steps
+        trial.n_ladder_peaks = int(ladder_steps.size)
+        trial.best_size_standard = times
+
+        try:
+            trial = fit_size_standard_to_ladder(trial)
+        except Exception:
+            continue
+        if not getattr(trial, "fitted_to_model", False):
+            continue
+
+        metrics = compute_ladder_qc_metrics(trial)
+        intensity_penalty = _candidate_intensity_penalty(trial)
+        missing_count = len(_missing_expected_ladder_steps(trial))
+        score = _fit_score_tuple(metrics, intensity_penalty, missing_count=missing_count)
+        used_bounded = bool(spec.get("bounded", False))
+        strategy = (
+            "bounded_auto_full"
+            if used_bounded and missing_count == 0
+            else "bounded_auto_partial"
+            if used_bounded
+            else "auto_full"
+            if missing_count == 0
+            else "auto_partial"
+        )
+        note = (
+            f"Bounded ROX beam search selected a {'full' if missing_count == 0 else 'partial'} ladder fit "
+            f"from explosive candidate space ({spec.get('beam_score', 0.0):.3f})."
+            if used_bounded
+            else None
+        )
+        trial = _set_ladder_fit_metadata(trial, strategy, note)
+
+        if _is_early_accept_candidate(metrics, missing_count=missing_count):
+            return trial
+        if missing_count == 0:
+            if best_complete_score is None or score < best_complete_score:
+                best_complete_fit = trial
+                best_complete_score = score
+            continue
+
+        if best_partial_score is None or score < best_partial_score:
+            best_partial_fit = trial
+            best_partial_score = score
+
+    return best_complete_fit or best_partial_fit
 
 
 def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
     metrics = compute_ladder_qc_metrics(fsa)
     intensity_penalty = _candidate_intensity_penalty(fsa)
-    return (
-        float(metrics.get("mean_abs_error_bp", float("inf"))) + float(intensity_penalty),
-        float(metrics.get("max_abs_error_bp", float("inf"))),
-        -float(metrics.get("r2", float("-inf"))),
-        float(intensity_penalty),
-    )
+    return _fit_score_tuple(metrics, intensity_penalty)
 
 
 def _rescue_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
     metrics = compute_ladder_qc_metrics(fsa)
     missing_count = len(_missing_expected_ladder_steps(fsa))
     intensity_penalty = _candidate_intensity_penalty(fsa)
-    return (
-        float(metrics.get("mean_abs_error_bp", float("inf")))
-        + (missing_count * PARTIAL_RESCUE_MISSING_STEP_PENALTY)
-        + float(intensity_penalty),
-        float(metrics.get("max_abs_error_bp", float("inf"))),
-        -float(metrics.get("r2", float("-inf"))),
-        float(intensity_penalty),
-    )
+    return _fit_score_tuple(metrics, intensity_penalty, missing_count=missing_count)
 
 
 def _candidate_intensity_penalty(fsa: FsaFile) -> float:
@@ -303,7 +604,7 @@ def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.nda
     best_score = None
 
     for combo in ranked_combinations:
-        trial = copy.deepcopy(fsa)
+        trial = _clone_fsa_for_ladder_trial(fsa)
         trial.best_size_standard = combo
         try:
             trial = fit_size_standard_to_ladder(trial)
@@ -312,12 +613,73 @@ def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.nda
         if not getattr(trial, "fitted_to_model", False):
             continue
 
-        score = _candidate_fit_score(trial)
+        metrics = compute_ladder_qc_metrics(trial)
+        intensity_penalty = _candidate_intensity_penalty(trial)
+        missing_count = len(_missing_expected_ladder_steps(trial))
+        score = _fit_score_tuple(metrics, intensity_penalty)
+        if _is_early_accept_candidate(metrics, missing_count=missing_count):
+            return trial
         if best_score is None or score < best_score:
             best_score = score
             best_fit = trial
 
     return best_fit
+
+
+def _build_rox_candidate_specs(
+    fsa: FsaFile,
+    *,
+    label: str,
+    fsa_path: Path,
+    allow_partial: bool = True,
+) -> tuple[list[dict[str, object]], bool, int]:
+    combination_estimate = 0
+    warned_bounded = False
+    for _ in range(LADDER_MAX_ITERATIONS):
+        combination_estimate = _estimate_size_standard_combination_count(fsa)
+        use_bounded, combination_estimate = _should_use_bounded_rox_search(
+            fsa,
+            combination_estimate=combination_estimate,
+        )
+        if use_bounded:
+            if not warned_bounded:
+                peak_count = int(len(np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)))
+                print_warning(
+                    f"[{label}] Using bounded ladder beam search for {fsa_path.name} "
+                    f"({peak_count} detected peaks, estimated {combination_estimate} combinations)."
+                )
+                warned_bounded = True
+            specs = _build_bounded_rox_candidate_specs(fsa, allow_partial=allow_partial)
+            return specs, True, combination_estimate
+
+        fsa = generate_combinations(fsa)
+        best = getattr(fsa, "best_size_standard_combinations", None)
+        if best is not None and best.shape[0] > 0:
+            break
+        fsa.maxium_allowed_distance_between_size_standard_peaks += 10
+
+    best = getattr(fsa, "best_size_standard_combinations", None)
+    if best is None or best.shape[0] == 0:
+        return [], False, combination_estimate
+
+    specs = [
+        {
+            "times": np.asarray(combo, dtype=float),
+            "ladder_steps": np.asarray(getattr(fsa, "ladder_steps", []), dtype=float).copy(),
+            "beam_score": 0.0,
+            "complete": True,
+            "bounded": False,
+        }
+        for combo in _rank_size_standard_combinations(fsa)
+    ]
+    return specs, False, combination_estimate
+
+
+def _should_attempt_high_end_rox_rescue(fsa: FsaFile, qc: dict[str, float | int]) -> bool:
+    """Only attempt the expensive ROX rescue when the current fit is actually incomplete."""
+    if float(qc.get("r2", float("-inf"))) >= HIGH_END_RESCUE_R2:
+        return False
+    return bool(_missing_expected_ladder_steps(fsa))
 
 
 def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
@@ -332,7 +694,7 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
         return None
 
     for skip_low in range(1, max_skip + 1):
-        trial = copy.deepcopy(fsa)
+        trial = _clone_fsa_for_ladder_trial(fsa)
         trial.expected_ladder_steps = full_steps.copy()
         trial.ladder_steps = np.asarray(full_steps[skip_low:], dtype=float)
         trial.n_ladder_peaks = trial.ladder_steps.size
@@ -344,23 +706,23 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
 
         try:
             trial = return_maxium_allowed_distance_between_size_standard_peaks(trial, multiplier=2)
-            for _ in range(LADDER_MAX_ITERATIONS):
-                trial = generate_combinations(trial)
-                best = getattr(trial, "best_size_standard_combinations", None)
-                if best is not None and best.shape[0] > 0:
-                    break
-                trial.maxium_allowed_distance_between_size_standard_peaks += 10
-
-            best = getattr(trial, "best_size_standard_combinations", None)
-            if best is None or best.shape[0] == 0:
+            candidate_specs, used_bounded, _estimate = _build_rox_candidate_specs(
+                trial,
+                label=label,
+                fsa_path=fsa_path,
+                allow_partial=True,
+            )
+            if not candidate_specs:
                 continue
 
-            selected_fit = _select_best_ladder_candidate(trial)
-            if selected_fit is not None:
-                trial = selected_fit
-            else:
+            selected_fit = _select_best_bounded_ladder_fit(trial, candidate_specs, rescue_mode=True)
+            if selected_fit is None:
+                if used_bounded:
+                    continue
                 trial = calculate_best_combination_of_size_standard_peaks(trial)
                 trial = fit_size_standard_to_ladder(trial)
+            else:
+                trial = selected_fit
 
             if not getattr(trial, "fitted_to_model", False):
                 continue
@@ -476,7 +838,7 @@ def _try_descending_low_end_completion(fsa: FsaFile, label: str, fsa_path: Path)
     if assigned_times.size < current_times.size or np.any(np.diff(assigned_times) <= 0):
         return None
 
-    trial = copy.deepcopy(fsa)
+    trial = _clone_fsa_for_ladder_trial(fsa)
     trial.expected_ladder_steps = expected.copy()
     trial.ladder_steps = np.asarray(assigned_steps, dtype=float)
     trial.best_size_standard = np.asarray(assigned_times, dtype=float)
@@ -712,15 +1074,14 @@ def analyse_fsa_liz(
             else:
                 fsa = calculate_best_combination_of_size_standard_peaks(fsa)
             if best_fallback_fsa is None:
-                import copy
-                best_fallback_fsa = copy.deepcopy(fsa) 
+                best_fallback_fsa = _clone_fsa_for_ladder_trial(fsa)
             
             try:
                 if not getattr(fsa, "fitted_to_model", False):
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
                     qc = compute_ladder_qc_metrics(fsa)
-                    if qc["r2"] >= 0.9995:
+                    if qc["r2"] >= 0.9995 and not _missing_expected_ladder_steps(fsa):
                         return _finalize_auto_fit_metadata(fsa)
                     if qc["r2"] < HIGH_END_RESCUE_R2:
                         rescued = _try_high_end_ladder_rescue(fsa, "LIZ", fsa_path)
@@ -829,25 +1190,27 @@ def analyse_fsa_rox(
 
         try:
             fsa = return_maxium_allowed_distance_between_size_standard_peaks(fsa, multiplier=2)
-            for _ in range(LADDER_MAX_ITERATIONS):
-                fsa = generate_combinations(fsa)
-                best = getattr(fsa, "best_size_standard_combinations", None)
-                if best is not None and best.shape[0] > 0:
-                    break
-                fsa.maxium_allowed_distance_between_size_standard_peaks += 10
-                
-            best = getattr(fsa, "best_size_standard_combinations", None)
-            if best is None or best.shape[0] == 0:
-                continue
+            candidate_specs, used_bounded, _estimate = _build_rox_candidate_specs(
+                fsa,
+                label="ROX",
+                fsa_path=fsa_path,
+                allow_partial=True,
+            )
+            if not candidate_specs:
+                if not used_bounded and getattr(getattr(fsa, "best_size_standard_combinations", None), "shape", [0])[0] > 0:
+                    fsa = calculate_best_combination_of_size_standard_peaks(fsa)
+                else:
+                    continue
 
-            selected_fit = _select_best_ladder_candidate(fsa)
+            selected_fit = _select_best_bounded_ladder_fit(fsa, candidate_specs, rescue_mode=False) if candidate_specs else None
             if selected_fit is not None:
                 fsa = selected_fit
-            else:
+            elif candidate_specs:
+                if used_bounded:
+                    continue
                 fsa = calculate_best_combination_of_size_standard_peaks(fsa)
             if best_fallback_fsa is None:
-                import copy
-                best_fallback_fsa = copy.deepcopy(fsa)
+                best_fallback_fsa = _clone_fsa_for_ladder_trial(fsa)
             
             try:
                 if not getattr(fsa, "fitted_to_model", False):
@@ -856,7 +1219,7 @@ def analyse_fsa_rox(
                     qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= 0.9995:
                         return _finalize_auto_fit_metadata(fsa)
-                    if qc["r2"] < HIGH_END_RESCUE_R2:
+                    if _should_attempt_high_end_rox_rescue(fsa, qc):
                         rescued = _try_high_end_ladder_rescue(fsa, "ROX", fsa_path)
                         if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
                             kept = len(getattr(rescued, "ladder_steps", []))
@@ -963,22 +1326,25 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
     """Beregner QC-metrikker for ladder-fit using actual basepair mapping."""
     ladder_size = np.array(fsa.ladder_steps, dtype=float)
     best_combination = np.array(fsa.best_size_standard, dtype=float)
-    
-    # Compute predicted basepairs from the actual basepair mapping
-    df = getattr(fsa, "sample_data_with_basepairs", None)
-    if df is not None and "basepairs" in df.columns and "time" in df.columns:
-        # Look up predicted bp for each size standard peak index
-        predicted = []
-        for idx in best_combination:
-            row = df.loc[df["time"] == int(idx)]
-            if len(row) > 0:
-                predicted.append(float(row["basepairs"].iloc[0]))
-            else:
-                # Fallback: use model prediction
-                predicted.append(float(fsa.ladder_model.predict(np.array([[idx]]))[0]))
-        predicted = np.array(predicted)
+
+    ladder_model = getattr(fsa, "ladder_model", None)
+    if ladder_model is not None:
+        predicted = np.asarray(ladder_model.predict(best_combination.reshape(-1, 1)), dtype=float).reshape(-1)
     else:
-        predicted = fsa.ladder_model.predict(best_combination.reshape(-1, 1))
+        df = getattr(fsa, "sample_data_with_basepairs", None)
+        if df is not None and "basepairs" in df.columns and "time" in df.columns:
+            lookup = (
+                df.loc[:, ["time", "basepairs"]]
+                .drop_duplicates(subset=["time"], keep="last")
+                .set_index("time")["basepairs"]
+                .to_dict()
+            )
+            predicted = np.array(
+                [float(lookup.get(int(idx), np.nan)) for idx in best_combination],
+                dtype=float,
+            )
+        else:
+            predicted = np.array([], dtype=float)
 
     if predicted is None or len(predicted) == 0:
         return {
@@ -987,6 +1353,15 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
             "max_abs_error_bp": float("inf"),
             "n_ladder_steps": 0,
             "n_size_standard_peaks": 0,
+        }
+
+    if np.any(np.isnan(predicted)):
+        return {
+            "r2": float("nan"),
+            "mean_abs_error_bp": float("inf"),
+            "max_abs_error_bp": float("inf"),
+            "n_ladder_steps": int(ladder_size.size),
+            "n_size_standard_peaks": int(best_combination.size),
         }
 
     r2 = float(r2_score(ladder_size, predicted))

@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import os
 import re
+import time
 import yaml
+import threading
 from pathlib import Path
 from typing import Dict, List, Any
+from datetime import datetime
 
 from config import resolve_analysis_excel_output_path
 from core.log import log
@@ -325,7 +328,11 @@ def run_batch_jobs(
     assay_filter: str,
     aggregate_dit_reports: bool,
     continue_on_error: bool,
-    update_callback: Any = None
+    update_callback: Any = None,
+    progress_callback: Any = None,
+    max_workers: int | None = None,
+    tracking_excel_path: Path | None = None,
+    aggregate_outdir_name: str | None = None,
 ) -> None:
     """
     Run all generated jobs.
@@ -351,12 +358,11 @@ def run_batch_jobs(
     )
     
     from concurrent.futures import ThreadPoolExecutor
-    import threading
 
     total = len(jobs)
     log(f"[BATCH] Starting batch run of {total} jobs.")
 
-    agg_outdir = output_base / OUTDIR_NAME if aggregate_dit_reports else None
+    agg_outdir = output_base / (aggregate_outdir_name or OUTDIR_NAME) if aggregate_dit_reports else None
     if agg_outdir is not None:
         agg_outdir.mkdir(exist_ok=True, parents=True)
     
@@ -369,16 +375,81 @@ def run_batch_jobs(
     # Thread safety locks
     data_lock = threading.Lock()
     callback_lock = threading.Lock()
+
+    def _emit_progress(
+        job_name: str,
+        phase: str,
+        *,
+        file_name: str = "",
+        files_done: int | None = None,
+        files_total: int | None = None,
+        jobs_done: int | None = None,
+        note: str = "",
+        folder_name: str = "",
+    ) -> None:
+        if progress_callback is None:
+            return
+        if jobs_done is None:
+            with data_lock:
+                jobs_done = len(completed_jobs) + len(failed_jobs)
+        payload = {
+            "folder_name": folder_name,
+            "job_name": job_name,
+            "phase": phase,
+            "file_name": file_name,
+            "files_done": None if files_done is None else int(files_done),
+            "files_total": None if files_total is None else int(files_total),
+            "jobs_done": int(jobs_done or 0),
+            "jobs_total": int(total),
+            "heartbeat_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "note": note,
+        }
+        with callback_lock:
+            progress_callback(payload)
+
+    def _with_heartbeat(job_name: str, phase: str, label: str, func, *args, **kwargs):
+        stop_event = threading.Event()
+        started = time.monotonic()
+        slow_job_logged = False
+
+        def _heartbeat() -> None:
+            nonlocal slow_job_logged
+            while not stop_event.wait(30.0):
+                elapsed = int(time.monotonic() - started)
+                log(f"[BATCH] Still running: {label}")
+                note = "heartbeat"
+                if elapsed >= 120:
+                    note = "slow_job"
+                    if not slow_job_logged:
+                        log(f"[BATCH] Slow job warning: {job_name} has remained in {phase} for {elapsed}s.")
+                        slow_job_logged = True
+                _emit_progress(job_name, phase, note=note)
+
+        thread = threading.Thread(target=_heartbeat, daemon=True)
+        thread.start()
+        try:
+            return func(*args, **kwargs)
+        finally:
+            stop_event.set()
+            thread.join(timeout=0.1)
     
     def process_job(i, job):
         job_name = job["name"]
         job_path = job["path"]
         job_files = job["files"]
+        job_file_total = len(job_files or [])
         
         log(f"[BATCH] Processing job {i+1}/{total}: {job_name}")
         with callback_lock:
             if update_callback:
                 update_callback(i, total, job_name, "running")
+        _emit_progress(
+            job_name,
+            "job_start",
+            files_done=0,
+            files_total=job_file_total,
+            note="job_started",
+        )
             
         try:
             # Format output params
@@ -387,12 +458,26 @@ def run_batch_jobs(
             resolved_excel = excel_name_tmpl.replace("{name}", job_name)
             
             job_type = job.get("type", "pipeline")
+
+            def _job_progress(event: dict) -> None:
+                _emit_progress(
+                    job_name,
+                    event.get("phase", "analyze"),
+                    file_name=str(event.get("file_name", "") or ""),
+                    files_done=int(event.get("files_done", 0) or 0),
+                    files_total=int(event.get("files_total", job_file_total) or job_file_total),
+                    note=str(event.get("note", "") or ""),
+                )
             
             # Execute based on job type
             if job_type == "pipeline":
                 if aggregate_dit_reports:
                     # Collect mode
-                    entries = run_pipeline_job_collect(
+                    entries = _with_heartbeat(
+                        job_name,
+                        "collect_entries",
+                        f"collecting entries for {job_name}",
+                        run_pipeline_job_collect,
                         fsa_dir=job_path,
                         base_outdir=output_base,
                         out_folder_name=resolved_out_folder,
@@ -400,18 +485,46 @@ def run_batch_jobs(
                         needle=assay_filter,
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
+                        tracking_excel_path=tracking_excel_path if active_analysis == "clonality" else None,
+                        progress_callback=_job_progress,
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        build_dit_html_reports(entries, agg_outdir)
+                        _emit_progress(
+                            job_name,
+                            "build_report",
+                            files_done=job_file_total,
+                            files_total=job_file_total,
+                            note="build_report_started",
+                        )
+                        _with_heartbeat(
+                            job_name,
+                            "build_report",
+                            f"building DIT report for {job_name}",
+                            build_dit_html_reports,
+                            entries,
+                            agg_outdir,
+                        )
                         if active_analysis == "clonality":
                             from core.analyses.clonality.tracking_excel import (
                                 CLONALITY_TRACKING_FILENAME,
                                 update_clonality_tracking_workbook,
                             )
 
-                            update_clonality_tracking_workbook(
-                                resolve_analysis_excel_output_path(
+                            _emit_progress(
+                                job_name,
+                                "write_tracking_excel",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="write_tracking_excel_started",
+                            )
+                            _with_heartbeat(
+                                job_name,
+                                "write_tracking_excel",
+                                f"updating clonality tracking workbook for {job_name}",
+                                update_clonality_tracking_workbook,
+                                tracking_excel_path
+                                or resolve_analysis_excel_output_path(
                                     "clonality",
                                     agg_outdir,
                                     CLONALITY_TRACKING_FILENAME,
@@ -425,6 +538,13 @@ def run_batch_jobs(
                         log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
                 else:
                     # Normal mode
+                    _emit_progress(
+                        job_name,
+                        "collect_entries",
+                        files_done=0,
+                        files_total=job_file_total,
+                        note="job_started",
+                    )
                     run_pipeline_job(
                         fsa_dir=job_path,
                         base_outdir=output_base,
@@ -446,7 +566,11 @@ def run_batch_jobs(
                 
             elif job_type == "dit":
                 if aggregate_dit_reports:
-                    entries = run_pipeline_job_collect(
+                    entries = _with_heartbeat(
+                        job_name,
+                        "collect_entries",
+                        f"collecting DIT entries for {job_name}",
+                        run_pipeline_job_collect,
                         fsa_dir=job_path,
                         base_outdir=output_base,
                         out_folder_name=resolved_out_folder,
@@ -454,18 +578,46 @@ def run_batch_jobs(
                         needle=assay_filter,
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
+                        tracking_excel_path=tracking_excel_path if active_analysis == "clonality" else None,
+                        progress_callback=_job_progress,
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        build_dit_html_reports(entries, agg_outdir)
+                        _emit_progress(
+                            job_name,
+                            "build_report",
+                            files_done=job_file_total,
+                            files_total=job_file_total,
+                            note="build_report_started",
+                        )
+                        _with_heartbeat(
+                            job_name,
+                            "build_report",
+                            f"building aggregated DIT report for {job_name}",
+                            build_dit_html_reports,
+                            entries,
+                            agg_outdir,
+                        )
                         if active_analysis == "clonality":
                             from core.analyses.clonality.tracking_excel import (
                                 CLONALITY_TRACKING_FILENAME,
                                 update_clonality_tracking_workbook,
                             )
 
-                            update_clonality_tracking_workbook(
-                                resolve_analysis_excel_output_path(
+                            _emit_progress(
+                                job_name,
+                                "write_tracking_excel",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="write_tracking_excel_started",
+                            )
+                            _with_heartbeat(
+                                job_name,
+                                "write_tracking_excel",
+                                f"updating clonality tracking workbook for {job_name}",
+                                update_clonality_tracking_workbook,
+                                tracking_excel_path
+                                or resolve_analysis_excel_output_path(
                                     "clonality",
                                     agg_outdir,
                                     CLONALITY_TRACKING_FILENAME,
@@ -495,6 +647,13 @@ def run_batch_jobs(
             with callback_lock:
                 if update_callback:
                     update_callback(i + 1, total, job_name, "success")
+            _emit_progress(
+                job_name,
+                "done",
+                files_done=job_file_total,
+                files_total=job_file_total,
+                note="job_complete",
+            )
                 
         except Exception as e:
             log(f"[ERROR] Job '{job_name}' failed: {e}")
@@ -503,13 +662,21 @@ def run_batch_jobs(
             with callback_lock:
                 if update_callback:
                     update_callback(i + 1, total, job_name, f"error: {e}")
+            _emit_progress(
+                job_name,
+                "failed",
+                files_done=job_file_total,
+                files_total=job_file_total,
+                note=str(e),
+            )
             if not continue_on_error:
                 log("[BATCH] Stopping batch due to error.")
                 raise  # Stop early by propagating error to executor
 
     # Perform multi-threaded patient processing
     # Max workers = 3 (modest to prevent over-subscription of child Pool processes)
-    max_patient_workers = min(3, max(1, os.cpu_count() // 2 or 1))
+    max_patient_workers = int(max_workers) if max_workers is not None else min(3, max(1, os.cpu_count() // 2 or 1))
+    max_patient_workers = max(1, max_patient_workers)
     
     try:
         with ThreadPoolExecutor(max_workers=max_patient_workers) as executor:
@@ -528,15 +695,27 @@ def run_batch_jobs(
         from core.html_reports import build_dit_html_reports
         
         try:
-            build_dit_html_reports(all_collected_entries, agg_outdir)
+            _with_heartbeat(
+                "DIT aggregation",
+                "build_report",
+                "building final aggregated DIT reports",
+                build_dit_html_reports,
+                all_collected_entries,
+                agg_outdir,
+            )
             if active_analysis == "clonality":
                 from core.analyses.clonality.tracking_excel import (
                     CLONALITY_TRACKING_FILENAME,
                     update_clonality_tracking_workbook,
                 )
 
-                update_clonality_tracking_workbook(
-                    resolve_analysis_excel_output_path(
+                _with_heartbeat(
+                    "DIT aggregation",
+                    "write_tracking_excel",
+                    "updating final clonality tracking workbook",
+                    update_clonality_tracking_workbook,
+                    tracking_excel_path
+                    or resolve_analysis_excel_output_path(
                         "clonality",
                         agg_outdir,
                         CLONALITY_TRACKING_FILENAME,

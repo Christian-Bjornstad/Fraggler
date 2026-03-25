@@ -11,8 +11,11 @@ import os
 import re
 import sys
 import __main__
+import threading
+import time
 from pathlib import Path
 from collections import defaultdict
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -60,6 +63,37 @@ def _scan_files(fsa_dir: Path, mode: str = "all") -> list[Path]:
     if fsa_files:
         print_green(f"Fant {len(fsa_files)} .fsa-filer: {[p.name for p in fsa_files]}")
     return fsa_files
+
+
+def _progress_timestamp() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _emit_progress(
+    progress_callback,
+    *,
+    phase: str,
+    file_name: str = "",
+    files_done: int = 0,
+    files_total: int = 0,
+    note: str = "",
+) -> None:
+    if progress_callback is None:
+        return
+    progress_callback(
+        {
+            "folder_name": "",
+            "job_name": "",
+            "phase": phase,
+            "file_name": file_name,
+            "files_done": int(files_done),
+            "files_total": int(files_total),
+            "jobs_done": 0,
+            "jobs_total": 0,
+            "heartbeat_at": _progress_timestamp(),
+            "note": note,
+        }
+    )
 
 
 def _should_use_multiprocessing() -> bool:
@@ -205,13 +239,70 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
     }
 
 
-def _analyze_files(fsa_files: list[Path]) -> tuple[list[dict], int]:
+def _analyze_files(
+    fsa_files: list[Path],
+    *,
+    progress_callback=None,
+) -> tuple[list[dict], int]:
     """Performs analysis (ladder fitting, peak detection) on a list of FSA files.
 
     Uses multiprocessing to analyze files in parallel across available CPU cores.
     """
-    if not _should_use_multiprocessing() or len(fsa_files) < 2:
-        results = [_analyze_single_file(p) for p in fsa_files]
+    total_files = len(fsa_files)
+    use_multiprocessing = (
+        progress_callback is None
+        and _should_use_multiprocessing()
+        and total_files >= 2
+    )
+
+    if not use_multiprocessing:
+        results = []
+        for index, path in enumerate(fsa_files, start=1):
+            _emit_progress(
+                progress_callback,
+                phase="analyze",
+                file_name=path.name,
+                files_done=index - 1,
+                files_total=total_files,
+                note="file_started",
+            )
+
+            stop_event = threading.Event()
+            file_started = time.monotonic()
+
+            def _heartbeat() -> None:
+                elapsed = 0
+                while not stop_event.wait(30.0):
+                    elapsed = int(time.monotonic() - file_started)
+                    print_warning(
+                        f"[ANALYZE] Slow file: {path.name} still running after {elapsed}s "
+                        f"({index}/{total_files})."
+                    )
+                    _emit_progress(
+                        progress_callback,
+                        phase="analyze",
+                        file_name=path.name,
+                        files_done=index - 1,
+                        files_total=total_files,
+                        note="slow_file" if elapsed >= 30 else "heartbeat",
+                    )
+
+            heartbeat_thread = threading.Thread(target=_heartbeat, daemon=True)
+            heartbeat_thread.start()
+            try:
+                results.append(_analyze_single_file(path))
+            finally:
+                stop_event.set()
+                heartbeat_thread.join(timeout=0.1)
+
+            _emit_progress(
+                progress_callback,
+                phase="analyze",
+                file_name=path.name,
+                files_done=index,
+                files_total=total_files,
+                note="file_complete",
+            )
     else:
         from multiprocessing import Pool, cpu_count
 
@@ -239,6 +330,9 @@ def run_pipeline(
     return_entries: bool = False,
     make_dit_reports: bool = True,
     mode: str = "all",
+    tracking_excel_path: Path | None = None,
+    update_tracking_workbook: bool = True,
+    progress_callback=None,
 ) -> list[dict] | None:
 
     """
@@ -252,17 +346,18 @@ def run_pipeline(
         return [] if return_entries else None
 
     # 2) Analyze
-    entries, _ = _analyze_files(fsa_files)
+    entries, _ = _analyze_files(fsa_files, progress_callback=progress_callback)
     if not entries:
         print_warning("Ingen gyldige entries etter analyse – avslutter.")
         return [] if return_entries else None
 
-    tracking_excel_path = resolve_analysis_excel_output_path(
-        "clonality",
-        assay_dir,
-        CLONALITY_TRACKING_FILENAME,
-    )
-    update_clonality_tracking_workbook(tracking_excel_path, entries)
+    if update_tracking_workbook:
+        resolved_tracking_excel_path = tracking_excel_path or resolve_analysis_excel_output_path(
+            "clonality",
+            assay_dir,
+            CLONALITY_TRACKING_FILENAME,
+        )
+        update_clonality_tracking_workbook(resolved_tracking_excel_path, entries)
 
     return finalize_pipeline_run(
         entries,

@@ -476,6 +476,49 @@ def return_maxium_allowed_distance_between_size_standard_peaks(fsa, multiplier=2
     return fsa
 
 
+def estimate_combination_count(peaks, length, distance, cap=None):
+    """
+    Count possible ordered peak paths without materializing them.
+
+    Returns the exact count unless ``cap`` is provided, in which case counting
+    stops early once the cap is reached and the capped value is returned.
+    """
+    peaks = np.asarray(peaks, dtype=float)
+    n_peaks = int(peaks.size)
+    target_len = int(length)
+    if target_len <= 0:
+        return 0
+    if n_peaks < target_len:
+        return 0
+
+    next_indices = []
+    for i in range(n_peaks):
+        valid = []
+        for j in range(i + 1, n_peaks):
+            if (peaks[j] - peaks[i]) > distance:
+                break
+            valid.append(j)
+        next_indices.append(valid)
+
+    counts = [1] * n_peaks
+    for _depth in range(2, target_len + 1):
+        next_counts = [0] * n_peaks
+        for i in range(n_peaks - 1, -1, -1):
+            total = 0
+            for j in next_indices[i]:
+                total += counts[j]
+                if cap is not None and total >= cap:
+                    total = cap
+                    break
+            next_counts[i] = total
+        counts = next_counts
+
+    total_count = sum(counts)
+    if cap is not None:
+        return min(int(total_count), int(cap))
+    return int(total_count)
+
+
 def generate_combinations(fsa):
     """
     Implementation of the depth-first search algorithm
