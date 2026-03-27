@@ -323,6 +323,18 @@ QPushButton#PrimaryButton:disabled {
     color: #88a0b1;
 }
 
+/* Curate Button (Teal Expert Action) */
+QPushButton#CurateButton {
+    background-color: #f0fdfa;
+    border: 1px solid #99f6e4;
+    color: #0d9488;
+}
+
+QPushButton#CurateButton:hover {
+    background-color: #ccfbf1;
+    border-color: #5eead4;
+}
+
 /* Inputs */
 QLineEdit, QDoubleSpinBox, QSpinBox {
     background-color: #ffffff;

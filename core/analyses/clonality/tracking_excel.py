@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
+import secrets
 from pathlib import Path
 
 import numpy as np
@@ -27,7 +31,25 @@ import threading
 CLONALITY_TRACKING_FILENAME = "Clonality_Tracking.xlsx"
 _clonality_excel_lock = threading.Lock()
 CONTROL_IDS = {"PK", "PK1", "PK2", "NK", "RK"}
-RUN_SHEET_COLUMNS = [
+TRACKING_IDENTITY_SALT_ENV = "FRAGGLER_TRACKING_IDENTITY_SALT"
+TRACKING_IDENTITY_SALT_PATH_ENV = "FRAGGLER_TRACKING_IDENTITY_SALT_PATH"
+DEFAULT_TRACKING_IDENTITY_SALT_PATH = Path.home() / ".config" / "fraggler" / "tracking_identity_salt.txt"
+PATIENT_RUN_SHEET_COLUMNS = [
+    "IdentityKey",
+    "SourceRunDir",
+    "Assay",
+    "SampleKind",
+    "RunDate",
+    "RunCode",
+    "Well",
+    "Ladder",
+    "LadderQC",
+    "LadderFitStrategy",
+    "LadderExpectedStepCount",
+    "LadderFittedStepCount",
+    "LadderR2",
+]
+CONTROL_RUN_SHEET_COLUMNS = [
     "IdentityKey",
     "File",
     "SourceRunDir",
@@ -39,7 +61,6 @@ RUN_SHEET_COLUMNS = [
     "RunDate",
     "RunCode",
     "Well",
-    "Batch",
     "Ladder",
     "LadderQC",
     "LadderFitStrategy",
@@ -137,6 +158,7 @@ def update_clonality_tracking_workbook(
     excel_path: Path,
     entries: list[dict],
     rules: QCRules | None = None,
+    refresh_dashboard: bool = True,
 ) -> None:
     excel_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -160,17 +182,21 @@ def update_clonality_tracking_workbook(
                 print_warning(f"Kunne ikke lese eksisterende {excel_path.name}, kanskje korrupt. Lager ny...")
 
             try:
-                old_patient = pd.read_excel(excel_path, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-                old_control = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_patient = pd.read_excel(excel_path, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame(columns=PATIENT_RUN_SHEET_COLUMNS)
+                old_control = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame(columns=CONTROL_RUN_SHEET_COLUMNS)
                 old_peaks = pd.read_excel(excel_path, sheet_name="PK_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
             except Exception:
-                old_patient = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-                old_control = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+                old_patient = pd.DataFrame(columns=PATIENT_RUN_SHEET_COLUMNS)
+                old_control = pd.DataFrame(columns=CONTROL_RUN_SHEET_COLUMNS)
                 old_peaks = pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
         else:
-            old_patient = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
-            old_control = pd.DataFrame(columns=RUN_SHEET_COLUMNS)
+            old_patient = pd.DataFrame(columns=PATIENT_RUN_SHEET_COLUMNS)
+            old_control = pd.DataFrame(columns=CONTROL_RUN_SHEET_COLUMNS)
             old_peaks = pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
+
+        old_patient = _normalize_patient_frame(old_patient)
+        old_control = _normalize_control_frame(old_control)
+        old_peaks = _reindex_columns(old_peaks, PEAK_SHEET_COLUMNS)
 
         if not df_patient.empty and "IdentityKey" in old_patient.columns:
             old_patient = old_patient[~old_patient["IdentityKey"].isin(df_patient["IdentityKey"])]
@@ -190,8 +216,8 @@ def update_clonality_tracking_workbook(
         if not all_peaks.empty and {"IdentityKey", "MarkerName"}.issubset(all_peaks.columns):
             all_peaks = all_peaks.drop_duplicates(subset=["IdentityKey", "MarkerName"], keep="last")
 
-        all_patient = _reindex_columns(all_patient, RUN_SHEET_COLUMNS)
-        all_control = _reindex_columns(all_control, RUN_SHEET_COLUMNS)
+        all_patient = _reindex_columns(all_patient, PATIENT_RUN_SHEET_COLUMNS)
+        all_control = _reindex_columns(all_control, CONTROL_RUN_SHEET_COLUMNS)
         all_peaks = _reindex_columns(all_peaks, PEAK_SHEET_COLUMNS)
 
         writer_kwargs = {"engine": "openpyxl"}
@@ -202,7 +228,8 @@ def update_clonality_tracking_workbook(
             all_patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
             all_control.to_excel(writer, sheet_name="Control_Runs", index=False)
             all_peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
-        refresh_clonality_tracking_dashboard(excel_path)
+        if refresh_dashboard:
+            refresh_clonality_tracking_dashboard(excel_path)
         print_green(f"Clonality tracking workbook updated in {excel_path}")
 
 
@@ -229,15 +256,14 @@ def _build_tracking_frames(entries: list[dict], rules: QCRules) -> tuple[pd.Data
         peak_rows.extend(_build_pk_peak_rows(entry, rules, base_row))
 
     return (
-        _reindex_columns(pd.DataFrame(patient_rows), RUN_SHEET_COLUMNS),
-        _reindex_columns(pd.DataFrame(control_rows), RUN_SHEET_COLUMNS),
+        _reindex_columns(pd.DataFrame(patient_rows), PATIENT_RUN_SHEET_COLUMNS),
+        _reindex_columns(pd.DataFrame(control_rows), CONTROL_RUN_SHEET_COLUMNS),
         _reindex_columns(pd.DataFrame(peak_rows), PEAK_SHEET_COLUMNS),
         pk_identity_keys,
     )
 
 
-def _build_run_row(entry: dict) -> dict:
-    fsa = entry.get("fsa")
+def build_tracking_join_fields(entry: dict) -> dict[str, str]:
     file_name = _resolve_entry_file_name(entry)
     if not file_name:
         return {}
@@ -245,25 +271,98 @@ def _build_run_row(entry: dict) -> dict:
     source_run_dir = resolve_source_run_dir(entry)
     control = control_id_from_filename(file_name)
     is_control = control in CONTROL_IDS
-    identity_key = f"{source_run_dir}::{file_name}" if source_run_dir else file_name
+    identity_key = (
+        f"{source_run_dir}::{file_name}" if is_control else _build_patient_identity_key(source_run_dir, file_name)
+    )
+    return {
+        "identity_key": identity_key,
+        "file_name": file_name,
+        "source_run_dir": source_run_dir,
+        "assay": str(entry.get("assay") or ""),
+        "sample_kind": "control" if is_control else "patient",
+        "group": str(entry.get("group") or ""),
+        "control": control if is_control else "",
+        "run_date": parse_pcr_date_from_filename(file_name) or "",
+        "run_code": parse_run_code_from_filename(file_name) or "",
+        "well": parse_well_from_filename(file_name) or "",
+        "batch": parse_batch_from_filename(file_name) or "",
+        "dit": str(entry.get("dit") or ""),
+        "ladder": str(entry.get("ladder") or ""),
+    }
+
+
+def build_tracking_join_key(
+    *,
+    identity_key: str,
+    assay: str,
+    run_code: str,
+    well: str,
+) -> str:
+    return "::".join(str(value or "").strip() for value in (identity_key, assay, well, run_code))
+
+
+def build_tracking_ladder_join_key(
+    *,
+    identity_key: str,
+    assay: str,
+    run_code: str,
+    well: str,
+    ladder: str,
+) -> str:
+    return "::".join(
+        str(value or "").strip()
+        for value in (build_tracking_join_key(identity_key=identity_key, assay=assay, run_code=run_code, well=well), ladder)
+    )
+
+
+def build_tracking_pk_join_key(
+    *,
+    identity_key: str,
+    assay: str,
+    run_code: str,
+    well: str,
+    marker_name: str,
+) -> str:
+    return "::".join(
+        str(value or "").strip()
+        for value in (
+            build_tracking_join_key(identity_key=identity_key, assay=assay, run_code=run_code, well=well),
+            marker_name,
+        )
+    )
+
+
+def build_tracking_row_key(*, artifact_kind: str, identity_key: str, marker_name: str = "") -> str:
+    identity = str(identity_key or "").strip()
+    if artifact_kind == "pk":
+        return f"pk:{identity}:{str(marker_name or '').strip()}"
+    if artifact_kind == "ladder":
+        return f"ladder:{identity}"
+    return identity
+
+
+def _build_run_row(entry: dict) -> dict:
+    join_fields = build_tracking_join_fields(entry)
+    if not join_fields:
+        return {}
     ladder_r2 = entry.get("ladder_r2")
     if ladder_r2 is None or not np.isfinite(ladder_r2):
         ladder_r2 = ""
 
     return {
-        "IdentityKey": identity_key,
-        "File": file_name,
-        "SourceRunDir": source_run_dir,
-        "DIT": entry.get("dit") or "",
-        "Assay": entry.get("assay") or "",
-        "SampleKind": "control" if is_control else "patient",
-        "Group": entry.get("group") or "",
-        "Control": control if is_control else "",
-        "RunDate": parse_pcr_date_from_filename(file_name) or "",
-        "RunCode": parse_run_code_from_filename(file_name) or "",
-        "Well": parse_well_from_filename(file_name) or "",
-        "Batch": parse_batch_from_filename(file_name) or "",
-        "Ladder": entry.get("ladder") or "",
+        "IdentityKey": join_fields["identity_key"],
+        "File": join_fields["file_name"],
+        "SourceRunDir": join_fields["source_run_dir"],
+        "DIT": join_fields["dit"],
+        "Assay": join_fields["assay"],
+        "SampleKind": join_fields["sample_kind"],
+        "Group": join_fields["group"],
+        "Control": join_fields["control"],
+        "RunDate": join_fields["run_date"],
+        "RunCode": join_fields["run_code"],
+        "Well": join_fields["well"],
+        "Batch": join_fields["batch"],
+        "Ladder": join_fields["ladder"],
         "LadderQC": entry.get("ladder_qc_status") or "",
         "LadderFitStrategy": entry.get("ladder_fit_strategy") or "",
         "LadderExpectedStepCount": int(entry.get("ladder_expected_step_count", 0) or 0),
@@ -357,3 +456,115 @@ def _resolve_entry_file_name(entry: dict) -> str:
     if original_path is not None and original_path.name:
         return original_path.name
     return strip_stage_prefix(str(getattr(fsa, "file_name", "") or entry.get("file_name") or ""))
+
+
+def sanitize_clonality_tracking_workbook(excel_path: Path, *, refresh_dashboard: bool = True) -> bool:
+    excel_path = Path(excel_path).expanduser()
+    if not excel_path.exists():
+        return False
+
+    with _clonality_excel_lock:
+        with pd.ExcelFile(excel_path, engine="openpyxl") as xls:
+            has_patient = "Patient_Runs" in xls.sheet_names
+            has_control = "Control_Runs" in xls.sheet_names
+            has_peaks = "PK_Peaks" in xls.sheet_names
+        if not any([has_patient, has_control, has_peaks]):
+            return False
+
+        patient = pd.read_excel(excel_path, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame(columns=PATIENT_RUN_SHEET_COLUMNS)
+        control = pd.read_excel(excel_path, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame(columns=CONTROL_RUN_SHEET_COLUMNS)
+        peaks = pd.read_excel(excel_path, sheet_name="PK_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame(columns=PEAK_SHEET_COLUMNS)
+
+        patient = _normalize_patient_frame(patient)
+        control = _normalize_control_frame(control)
+        peaks = _reindex_columns(peaks, PEAK_SHEET_COLUMNS)
+
+        writer_kwargs = {"engine": "openpyxl", "mode": "a", "if_sheet_exists": "replace"}
+        with pd.ExcelWriter(excel_path, **writer_kwargs) as writer:
+            patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
+            control.to_excel(writer, sheet_name="Control_Runs", index=False)
+            peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
+
+        if refresh_dashboard:
+            refresh_clonality_tracking_dashboard(excel_path)
+    return True
+
+
+def _normalize_patient_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=PATIENT_RUN_SHEET_COLUMNS)
+
+    normalized = df.copy()
+    legacy_identity = normalized.get("IdentityKey", pd.Series("", index=normalized.index)).fillna("").astype(str)
+    source_run_dir = normalized.get("SourceRunDir", pd.Series("", index=normalized.index)).fillna("").astype(str)
+    file_name = normalized.get("File", pd.Series("", index=normalized.index)).fillna("").astype(str)
+    source_run_dir = source_run_dir.where(source_run_dir.str.strip() != "", legacy_identity.map(_legacy_source_run_dir_from_identity_key))
+    file_name = file_name.where(file_name.str.strip() != "", legacy_identity.map(_legacy_file_name_from_identity_key))
+    normalized_identity: list[str] = []
+    for src, fname, legacy in zip(source_run_dir.tolist(), file_name.tolist(), legacy_identity.tolist()):
+        legacy_value = str(legacy or "").strip()
+        if legacy_value.startswith("PT-") and not str(fname or "").strip().lower().endswith(".fsa"):
+            normalized_identity.append(legacy_value)
+            continue
+        normalized_identity.append(_build_patient_identity_key(src, fname or legacy))
+    normalized["IdentityKey"] = normalized_identity
+    normalized["SourceRunDir"] = source_run_dir
+    return _reindex_columns(normalized, PATIENT_RUN_SHEET_COLUMNS)
+
+
+def _normalize_control_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=CONTROL_RUN_SHEET_COLUMNS)
+    return _reindex_columns(df.copy(), CONTROL_RUN_SHEET_COLUMNS)
+
+
+def _build_patient_identity_key(source_run_dir: str, file_name: str) -> str:
+    identity_source = f"{str(source_run_dir or '').strip()}::{str(file_name or '').strip()}"
+    if not identity_source.strip(":"):
+        identity_source = str(file_name or source_run_dir or "UNKNOWN_PATIENT")
+    digest = hmac.new(
+        _get_tracking_identity_salt().encode("utf-8"),
+        identity_source.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"PT-{digest[:24]}"
+
+
+def _get_tracking_identity_salt() -> str:
+    batch_settings = APP_SETTINGS.get("analyses", {}).get("clonality", {}).get("batch", {})
+    configured = str(batch_settings.get("tracking_identity_salt") or "").strip()
+    if configured:
+        return configured
+
+    env_salt = str(os.environ.get(TRACKING_IDENTITY_SALT_ENV, "") or "").strip()
+    if env_salt:
+        return env_salt
+
+    salt_path = str(os.environ.get(TRACKING_IDENTITY_SALT_PATH_ENV, "") or batch_settings.get("tracking_identity_salt_path") or "").strip()
+    path = Path(salt_path).expanduser() if salt_path else DEFAULT_TRACKING_IDENTITY_SALT_PATH
+    try:
+        if path.exists():
+            existing = path.read_text(encoding="utf-8").strip()
+            if existing:
+                return existing
+        path.parent.mkdir(parents=True, exist_ok=True)
+        generated = secrets.token_hex(32)
+        path.write_text(generated, encoding="utf-8")
+        return generated
+    except OSError:
+        # Last-resort fallback keeps behavior deterministic within a machine/user context.
+        return hashlib.sha256(str(path).encode("utf-8")).hexdigest()
+
+
+def _legacy_source_run_dir_from_identity_key(identity_key: str) -> str:
+    value = str(identity_key or "")
+    if "::" not in value:
+        return ""
+    return value.split("::", 1)[0].strip()
+
+
+def _legacy_file_name_from_identity_key(identity_key: str) -> str:
+    value = str(identity_key or "")
+    if "::" in value:
+        return value.split("::", 1)[1].strip()
+    return value.strip()

@@ -106,6 +106,44 @@ def build_filtered_input(src: Path, needle: str) -> Optional[Path]:
     return stage_files(matched)
 
 
+def _should_stage_explicit_files_once(fsa_dir: Optional[Path], files: List[Path], *, chunk_files: bool) -> bool:
+    """Stage a complete folder-sized explicit file set in one shot when safe."""
+    if not files:
+        return False
+    if not chunk_files:
+        return True
+
+    if fsa_dir is None:
+        return False
+
+    folder = Path(fsa_dir)
+    if not folder.is_dir():
+        return False
+
+    resolved_files = [Path(p) for p in files]
+    if any(p.parent != folder for p in resolved_files):
+        return False
+
+    from core.utils import is_water_file
+
+    folder_files = [
+        p
+        for p in sorted(folder.glob("*.fsa"))
+        if p.is_file() and not is_water_file(p.name)
+    ]
+    if len(folder_files) != len(resolved_files):
+        return False
+
+    return {p.name for p in folder_files} == {p.name for p in resolved_files}
+
+
+def _can_use_exact_source_dir(fsa_dir: Optional[Path], files: List[Path], *, chunk_files: bool) -> bool:
+    """Reuse the original folder directly when the explicit file list already matches it exactly."""
+    if not _should_stage_explicit_files_once(fsa_dir, files, chunk_files=chunk_files):
+        return False
+    return fsa_dir is not None and Path(fsa_dir).is_dir()
+
+
 def _emit_progress(progress_callback, **event) -> None:
     if progress_callback is None:
         return
@@ -136,6 +174,8 @@ def run_pipeline_job(
     scope: str,
     needle: str,
     files: Optional[List[Path]] = None,
+    *,
+    update_tracking_workbook: bool = True,
 ) -> Optional[list]:
     """
     Run pipeline on a folder or an explicit file list.
@@ -164,6 +204,7 @@ def run_pipeline_job(
                 base_outdir=base_outdir,
                 assay_folder_name=out_folder_name,
                 mode=effective_mode,
+                update_tracking_workbook=update_tracking_workbook,
             )
         finally:
             cleanup_temp(tmp_input)
@@ -191,6 +232,27 @@ def run_pipeline_job(
                 base_outdir=base_outdir,
                 assay_folder_name=out_folder_name,
                 mode=effective_mode,
+                update_tracking_workbook=update_tracking_workbook,
+            )
+        finally:
+            cleanup_temp(tmp_input)
+        return None
+
+    if _should_stage_explicit_files_once(fsa_dir, files, chunk_files=True):
+        tmp_input = None
+        try:
+            run_input = fsa_dir if _can_use_exact_source_dir(fsa_dir, files, chunk_files=True) else stage_files(files)
+            if run_input is not fsa_dir:
+                tmp_input = run_input
+            from core.pipeline import run_pipeline
+            run_pipeline(
+                fsa_dir=run_input,
+                base_outdir=base_outdir,
+                assay_folder_name=out_folder_name,
+                mode=effective_mode,
+                return_entries=True,
+                make_dit_reports=False,
+                update_tracking_workbook=update_tracking_workbook,
             )
         finally:
             cleanup_temp(tmp_input)
@@ -213,6 +275,7 @@ def run_pipeline_job(
                 mode=effective_mode,
                 return_entries=True,
                 make_dit_reports=False,
+                update_tracking_workbook=update_tracking_workbook,
             )
             collected_entries.extend(chunk_entries or [])
             ok_chunks += 1
@@ -250,6 +313,7 @@ def run_pipeline_job_collect(
     chunk_files: bool = True,
     tracking_excel_path: Path | None = None,
     progress_callback=None,
+    update_tracking_workbook: bool = False,
 ) -> list:
     """
     Like run_pipeline_job but returns entries for cross-folder DIT aggregation.
@@ -277,6 +341,34 @@ def run_pipeline_job_collect(
                     raise ValueError(f"No .fsa files matched '{needle}'.")
 
             from core.pipeline import run_pipeline
+            if _should_stage_explicit_files_once(fsa_dir, selected_files, chunk_files=chunk_files):
+                _emit_progress(
+                    progress_callback,
+                    phase="stage_files",
+                    files_done=0,
+                    files_total=len(selected_files),
+                    note="using_exact_source_dir" if _can_use_exact_source_dir(fsa_dir, selected_files, chunk_files=chunk_files) else "staging_explicit_files_once",
+                )
+                run_input = fsa_dir if _can_use_exact_source_dir(fsa_dir, selected_files, chunk_files=chunk_files) else stage_files(selected_files)
+                if run_input is not fsa_dir:
+                    tmp_input = run_input
+                try:
+                    entries = run_pipeline(
+                        fsa_dir=run_input,
+                        base_outdir=base_outdir,
+                        assay_folder_name=out_folder_name,
+                        mode=effective_mode,
+                        return_entries=True,
+                        make_dit_reports=False,
+                        tracking_excel_path=tracking_excel_path,
+                        update_tracking_workbook=update_tracking_workbook,
+                        progress_callback=progress_callback,
+                    )
+                    return entries or []
+                finally:
+                    cleanup_temp(tmp_input)
+                    tmp_input = None
+
             if not chunk_files:
                 _emit_progress(
                     progress_callback,
@@ -295,7 +387,7 @@ def run_pipeline_job_collect(
                         return_entries=True,
                         make_dit_reports=False,
                         tracking_excel_path=tracking_excel_path,
-                        update_tracking_workbook=False,
+                        update_tracking_workbook=update_tracking_workbook,
                         progress_callback=progress_callback,
                     )
                     return entries or []
@@ -336,7 +428,7 @@ def run_pipeline_job_collect(
                         return_entries=True,
                         make_dit_reports=False,
                         tracking_excel_path=tracking_excel_path,
-                        update_tracking_workbook=False,
+                        update_tracking_workbook=update_tracking_workbook,
                         progress_callback=_chunk_progress,
                     )
                     all_entries.extend(entries or [])
@@ -363,7 +455,7 @@ def run_pipeline_job_collect(
             return_entries=True,
             make_dit_reports=False,  # We build DIT reports ourselves
             tracking_excel_path=tracking_excel_path,
-            update_tracking_workbook=False,
+            update_tracking_workbook=update_tracking_workbook,
             progress_callback=progress_callback,
         )
         return entries or []
@@ -382,7 +474,12 @@ def run_qc_job(
     excel_name: str,
     rules: Any, # Use Any here to avoid top-level import of QCRules
     files: Optional[List[Path]] = None,
-) -> Optional[Path]:
+    *,
+    tracking_excel_path: Path | None = None,
+    update_tracking_workbook: bool = True,
+    return_entries: bool = False,
+    progress_callback=None,
+) -> Optional[Path] | tuple[Optional[Path], list[dict]]:
     """Run QC analysis and return the path to the HTML report."""
     from datetime import datetime
     
@@ -423,6 +520,9 @@ def run_qc_job(
             return_entries=True,
             make_dit_reports=False,
             mode="controls",
+            tracking_excel_path=tracking_excel_path,
+            update_tracking_workbook=update_tracking_workbook,
+            progress_callback=progress_callback,
         )
         if not entries:
             total_fsa, empty_or_bad = _empty_or_unreadable_fsa_summary(effective_in)
@@ -434,6 +534,8 @@ def run_qc_job(
         run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         update_excel_trends(excel_path, entries, rules, run_ts)
 
+        if return_entries:
+            return out_html, entries
         return out_html
     finally:
         cleanup_temp(tmp_input)

@@ -36,6 +36,30 @@ DASHBOARD_SHEETS = [
 ]
 
 
+def _require_cols(cols: dict[str, str], *names: str) -> dict[str, str]:
+    missing = [name for name in names if name not in cols]
+    if missing:
+        raise KeyError(f"Missing required columns: {', '.join(missing)}")
+    return {name: cols[name] for name in names}
+
+
+def _range_ref(sheet_name: str, col: str, *, start_row: int = 2, end_row: int | None = None) -> str:
+    end = end_row if end_row is not None else 1048576
+    return f"{sheet_name}!${col}${start_row}:${col}${end}"
+
+
+def _count_nonblank_formula(sheet_name: str, col: str) -> str:
+    return f'=COUNTIF({_range_ref(sheet_name, col)}, "<>")'
+
+
+def _count_review_formula(sheet_name: str, cols: dict[str, str], row_ref: str) -> str:
+    return (
+        f'=COUNTIFS({_range_ref(sheet_name, cols["LadderQC"])}, "<>", '
+        f'{_range_ref(sheet_name, cols["LadderQC"])}, "<>ok", '
+        f'{_range_ref(sheet_name, cols["Assay"])}, {row_ref})'
+    )
+
+
 def refresh_clonality_tracking_dashboard(excel_path: Path) -> None:
     if not excel_path.exists():
         return
@@ -71,26 +95,29 @@ def refresh_clonality_tracking_dashboard(excel_path: Path) -> None:
         }
     )
 
+    pk_outlier_columns = [c for c in ["IdentityKey", "Assay", "Control", "MarkerName", "ExpectedBP", "FoundBP", "DeltaBP", "AbsDeltaBP", "Height", "Reason"] if c in pk.columns]
     pk_sample_outliers = (
         pk.loc[
             (pk.get("Kind", "").astype(str).str.lower() == "sample")
             & (pd.to_numeric(pk.get("AbsDeltaBP"), errors="coerce") > 2),
-            ["Assay", "Control", "File", "MarkerName", "ExpectedBP", "FoundBP", "DeltaBP", "AbsDeltaBP", "Height", "Reason"],
+            pk_outlier_columns,
         ]
         .copy()
-        .sort_values(["AbsDeltaBP", "Assay"], ascending=[False, True])
+        .sort_values([c for c in ["AbsDeltaBP", "Assay", "IdentityKey"] if c in pk_outlier_columns], ascending=[False, True, True][: len([c for c in ["AbsDeltaBP", "Assay", "IdentityKey"] if c in pk_outlier_columns])])
         .head(50)
     )
     run_frames = [frame for frame in [patient.assign(Scope="Patient"), control.assign(Scope="Control")] if not frame.empty]
+    review_frame = pd.concat(run_frames, ignore_index=True) if run_frames else pd.DataFrame()
+    review_columns = [c for c in ["Scope", "IdentityKey", "Control", "Assay", "SourceRunDir", "RunDate", "LadderQC", "LadderFitStrategy", "LadderExpectedStepCount", "LadderFittedStepCount", "LadderR2"] if c in review_frame.columns]
     review_files = (
-        pd.concat(run_frames, ignore_index=True)
+        review_frame
         .loc[
             lambda df: df["LadderQC"].astype(str).str.strip().str.lower().ne("ok") & df["LadderQC"].astype(str).str.strip().ne(""),
-            ["Scope", "Control", "Assay", "File", "SourceRunDir", "RunDate", "LadderQC", "LadderFitStrategy", "LadderExpectedStepCount", "LadderFittedStepCount", "LadderR2"],
+            review_columns,
         ]
         .copy()
-        .sort_values(["Scope", "Assay", "RunDate", "File"])
-    ) if run_frames else pd.DataFrame(columns=["Scope", "Control", "Assay", "File", "SourceRunDir", "RunDate", "LadderQC", "LadderFitStrategy", "LadderExpectedStepCount", "LadderFittedStepCount", "LadderR2"])
+        .sort_values([c for c in ["Scope", "Assay", "RunDate", "IdentityKey"] if c in review_columns])
+    ) if run_frames else pd.DataFrame(columns=review_columns)
     if not review_files.empty:
         review_files["RunDate"] = pd.to_datetime(review_files["RunDate"], errors="coerce").dt.strftime("%Y-%m-%d")
 
@@ -155,6 +182,7 @@ def refresh_clonality_tracking_dashboard(excel_path: Path) -> None:
         len(run_days),
         len(review_files),
         len(pk_sample_outliers),
+        list(pk_sample_outliers.columns),
         assay_ws,
         control_ws,
         pk_sample_ws,
@@ -232,22 +260,24 @@ def _build_assay_summary(ws, assays: list[str], patient_cols: dict[str, str], co
     headers = ["Assay", "Files", "PatientFiles", "ControlFiles", "LadderReview", "AvgR2", "PartialFits", "ReviewRate"]
     ws.append(headers)
     assay_col = "$A2"
+    patient_req = _require_cols(patient_cols, "IdentityKey", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
+    control_req = _require_cols(control_cols, "IdentityKey", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
     for row_idx, assay in enumerate(assays, start=2):
         ws.cell(row_idx, 1, assay)
-        ws.cell(row_idx, 2, f'=COUNTIF(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},{assay_col})+COUNTIF(Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},{assay_col})')
-        ws.cell(row_idx, 3, f'=COUNTIF(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},{assay_col})')
-        ws.cell(row_idx, 4, f'=COUNTIF(Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},{assay_col})')
+        ws.cell(row_idx, 2, f'=COUNTIF({_range_ref("Patient_Runs", patient_req["Assay"])}, {assay_col})+COUNTIF({_range_ref("Control_Runs", control_req["Assay"])}, {assay_col})')
+        ws.cell(row_idx, 3, f'=COUNTIF({_range_ref("Patient_Runs", patient_req["Assay"])}, {assay_col})')
+        ws.cell(row_idx, 4, f'=COUNTIF({_range_ref("Control_Runs", control_req["Assay"])}, {assay_col})')
         ws.cell(row_idx, 5, (
-            f'=COUNTIFS(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},{assay_col},Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>",Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>ok")'
-            f'+COUNTIFS(Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},{assay_col},Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>",Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>ok")'
+            f'=COUNTIFS({_range_ref("Patient_Runs", patient_req["Assay"])}, {assay_col}, {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>", {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>ok")'
+            f'+COUNTIFS({_range_ref("Control_Runs", control_req["Assay"])}, {assay_col}, {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>", {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>ok")'
         ))
         ws.cell(row_idx, 6, (
-            f'=IFERROR((SUMIF(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},{assay_col},Patient_Runs!${patient_cols["LadderR2"]}:${patient_cols["LadderR2"]})'
-            f'+SUMIF(Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},{assay_col},Control_Runs!${control_cols["LadderR2"]}:${control_cols["LadderR2"]}))/$B{row_idx},0)'
+            f'=IFERROR((SUMIF({_range_ref("Patient_Runs", patient_req["Assay"])}, {assay_col}, {_range_ref("Patient_Runs", patient_req["LadderR2"])})'
+            f'+SUMIF({_range_ref("Control_Runs", control_req["Assay"])}, {assay_col}, {_range_ref("Control_Runs", control_req["LadderR2"])}) )/$B{row_idx},0)'
         ))
         ws.cell(row_idx, 7, (
-            f'=SUMPRODUCT(--(Patient_Runs!${patient_cols["Assay"]}$2:${patient_cols["Assay"]}${patient_last}=$A{row_idx}),--(Patient_Runs!${patient_cols["LadderFittedStepCount"]}$2:${patient_cols["LadderFittedStepCount"]}${patient_last}<Patient_Runs!${patient_cols["LadderExpectedStepCount"]}$2:${patient_cols["LadderExpectedStepCount"]}${patient_last}))'
-            f'+SUMPRODUCT(--(Control_Runs!${control_cols["Assay"]}$2:${control_cols["Assay"]}${control_last}=$A{row_idx}),--(Control_Runs!${control_cols["LadderFittedStepCount"]}$2:${control_cols["LadderFittedStepCount"]}${control_last}<Control_Runs!${control_cols["LadderExpectedStepCount"]}$2:${control_cols["LadderExpectedStepCount"]}${control_last}))'
+            f'=SUMPRODUCT(--({_range_ref("Patient_Runs", patient_req["Assay"], end_row=patient_last)}=$A{row_idx}),--({_range_ref("Patient_Runs", patient_req["LadderFittedStepCount"], end_row=patient_last)}<{_range_ref("Patient_Runs", patient_req["LadderExpectedStepCount"], end_row=patient_last)}))'
+            f'+SUMPRODUCT(--({_range_ref("Control_Runs", control_req["Assay"], end_row=control_last)}=$A{row_idx}),--({_range_ref("Control_Runs", control_req["LadderFittedStepCount"], end_row=control_last)}<{_range_ref("Control_Runs", control_req["LadderExpectedStepCount"], end_row=control_last)}))'
         ))
         ws.cell(row_idx, 8, f'=IFERROR(E{row_idx}/B{row_idx},0)')
     _style_table(ws, 1, max(len(assays) + 1, 2), 1, len(headers))
@@ -263,12 +293,13 @@ def _build_run_summary(ws, assays: list[str], patient_cols: dict[str, str], pati
     ws.sheet_properties.tabColor = "5B9BD5"
     headers = ["Assay", "Files", "ReviewFiles", "AvgR2", "PartialFits"]
     ws.append(headers)
+    patient_req = _require_cols(patient_cols, "IdentityKey", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
     for row_idx, assay in enumerate(assays, start=2):
         ws.cell(row_idx, 1, assay)
-        ws.cell(row_idx, 2, f'=COUNTIF(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},$A{row_idx})')
-        ws.cell(row_idx, 3, f'=COUNTIFS(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},$A{row_idx},Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>",Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>ok")')
-        ws.cell(row_idx, 4, f'=IFERROR(SUMIF(Patient_Runs!${patient_cols["Assay"]}:${patient_cols["Assay"]},$A{row_idx},Patient_Runs!${patient_cols["LadderR2"]}:${patient_cols["LadderR2"]})/B{row_idx},0)')
-        ws.cell(row_idx, 5, f'=SUMPRODUCT(--(Patient_Runs!${patient_cols["Assay"]}$2:${patient_cols["Assay"]}${patient_last}=$A{row_idx}),--(Patient_Runs!${patient_cols["LadderFittedStepCount"]}$2:${patient_cols["LadderFittedStepCount"]}${patient_last}<Patient_Runs!${patient_cols["LadderExpectedStepCount"]}$2:${patient_cols["LadderExpectedStepCount"]}${patient_last}))')
+        ws.cell(row_idx, 2, f'=COUNTIF({_range_ref("Patient_Runs", patient_req["Assay"])},$A{row_idx})')
+        ws.cell(row_idx, 3, f'=COUNTIFS({_range_ref("Patient_Runs", patient_req["Assay"])},$A{row_idx},{_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>", {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>ok")')
+        ws.cell(row_idx, 4, f'=IFERROR(SUMIF({_range_ref("Patient_Runs", patient_req["Assay"])},$A{row_idx},{_range_ref("Patient_Runs", patient_req["LadderR2"])})/B{row_idx},0)')
+        ws.cell(row_idx, 5, f'=SUMPRODUCT(--({_range_ref("Patient_Runs", patient_req["Assay"], end_row=patient_last)}=$A{row_idx}),--({_range_ref("Patient_Runs", patient_req["LadderFittedStepCount"], end_row=patient_last)}<{_range_ref("Patient_Runs", patient_req["LadderExpectedStepCount"], end_row=patient_last)}))')
     _style_table(ws, 1, max(len(assays) + 1, 2), 1, len(headers))
     ws.freeze_panes = "A2"
     _autofit(ws)
@@ -280,14 +311,15 @@ def _build_control_summary(ws, pairs: list[list[str]], control_cols: dict[str, s
     ws.sheet_properties.tabColor = "5B9BD5"
     headers = ["Control", "Assay", "Files", "ReviewFiles", "AvgR2", "PartialFits"]
     ws.append(headers)
+    control_req = _require_cols(control_cols, "IdentityKey", "Control", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
     for row_idx, pair in enumerate(pairs, start=2):
         control_name, assay = pair
         ws.cell(row_idx, 1, control_name)
         ws.cell(row_idx, 2, assay)
-        ws.cell(row_idx, 3, f'=COUNTIFS(Control_Runs!${control_cols["Control"]}:${control_cols["Control"]},$A{row_idx},Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},$B{row_idx})')
-        ws.cell(row_idx, 4, f'=COUNTIFS(Control_Runs!${control_cols["Control"]}:${control_cols["Control"]},$A{row_idx},Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},$B{row_idx},Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>",Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>ok")')
-        ws.cell(row_idx, 5, f'=IFERROR(SUMIFS(Control_Runs!${control_cols["LadderR2"]}:${control_cols["LadderR2"]},Control_Runs!${control_cols["Control"]}:${control_cols["Control"]},$A{row_idx},Control_Runs!${control_cols["Assay"]}:${control_cols["Assay"]},$B{row_idx})/C{row_idx},0)')
-        ws.cell(row_idx, 6, f'=SUMPRODUCT(--(Control_Runs!${control_cols["Control"]}$2:${control_cols["Control"]}${control_last}=$A{row_idx}),--(Control_Runs!${control_cols["Assay"]}$2:${control_cols["Assay"]}${control_last}=$B{row_idx}),--(Control_Runs!${control_cols["LadderFittedStepCount"]}$2:${control_cols["LadderFittedStepCount"]}${control_last}<Control_Runs!${control_cols["LadderExpectedStepCount"]}$2:${control_cols["LadderExpectedStepCount"]}${control_last}))')
+        ws.cell(row_idx, 3, f'=COUNTIFS({_range_ref("Control_Runs", control_req["Control"])},$A{row_idx},{_range_ref("Control_Runs", control_req["Assay"])},$B{row_idx})')
+        ws.cell(row_idx, 4, f'=COUNTIFS({_range_ref("Control_Runs", control_req["Control"])},$A{row_idx},{_range_ref("Control_Runs", control_req["Assay"])},$B{row_idx},{_range_ref("Control_Runs", control_req["LadderQC"])}, "<>", {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>ok")')
+        ws.cell(row_idx, 5, f'=IFERROR(SUMIFS({_range_ref("Control_Runs", control_req["LadderR2"])}, {_range_ref("Control_Runs", control_req["Control"])},$A{row_idx}, {_range_ref("Control_Runs", control_req["Assay"])},$B{row_idx})/C{row_idx},0)')
+        ws.cell(row_idx, 6, f'=SUMPRODUCT(--({_range_ref("Control_Runs", control_req["Control"], end_row=control_last)}=$A{row_idx}),--({_range_ref("Control_Runs", control_req["Assay"], end_row=control_last)}=$B{row_idx}),--({_range_ref("Control_Runs", control_req["LadderFittedStepCount"], end_row=control_last)}<{_range_ref("Control_Runs", control_req["LadderExpectedStepCount"], end_row=control_last)}))')
     _style_table(ws, 1, max(len(pairs) + 1, 2), 1, len(headers))
     ws.freeze_panes = "A2"
     _autofit(ws)
@@ -299,16 +331,18 @@ def _build_daily_trend(ws, run_days: list[str], patient_cols: dict[str, str], co
     ws.sheet_properties.tabColor = "70AD47"
     headers = ["RunDay", "Files", "ReviewFiles", "AvgR2"]
     ws.append(headers)
+    patient_req = _require_cols(patient_cols, "IdentityKey", "RunDate", "LadderQC", "LadderR2")
+    control_req = _require_cols(control_cols, "IdentityKey", "RunDate", "LadderQC", "LadderR2")
     for row_idx, run_day in enumerate(run_days, start=2):
         ws.cell(row_idx, 1, run_day)
-        ws.cell(row_idx, 2, f'=COUNTIF(Patient_Runs!${patient_cols["RunDate"]}:${patient_cols["RunDate"]},$A{row_idx})+COUNTIF(Control_Runs!${control_cols["RunDate"]}:${control_cols["RunDate"]},$A{row_idx})')
+        ws.cell(row_idx, 2, f'=COUNTIF({_range_ref("Patient_Runs", patient_req["RunDate"])},$A{row_idx})+COUNTIF({_range_ref("Control_Runs", control_req["RunDate"])},$A{row_idx})')
         ws.cell(row_idx, 3, (
-            f'=COUNTIFS(Patient_Runs!${patient_cols["RunDate"]}:${patient_cols["RunDate"]},$A{row_idx},Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>",Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>ok")'
-            f'+COUNTIFS(Control_Runs!${control_cols["RunDate"]}:${control_cols["RunDate"]},$A{row_idx},Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>",Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>ok")'
+            f'=COUNTIFS({_range_ref("Patient_Runs", patient_req["RunDate"])},$A{row_idx},{_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>", {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>ok")'
+            f'+COUNTIFS({_range_ref("Control_Runs", control_req["RunDate"])},$A{row_idx},{_range_ref("Control_Runs", control_req["LadderQC"])}, "<>", {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>ok")'
         ))
         ws.cell(row_idx, 4, (
-            f'=IFERROR((SUMIF(Patient_Runs!${patient_cols["RunDate"]}:${patient_cols["RunDate"]},$A{row_idx},Patient_Runs!${patient_cols["LadderR2"]}:${patient_cols["LadderR2"]})'
-            f'+SUMIF(Control_Runs!${control_cols["RunDate"]}:${control_cols["RunDate"]},$A{row_idx},Control_Runs!${control_cols["LadderR2"]}:${control_cols["LadderR2"]}))/B{row_idx},0)'
+            f'=IFERROR((SUMIF({_range_ref("Patient_Runs", patient_req["RunDate"])},$A{row_idx},{_range_ref("Patient_Runs", patient_req["LadderR2"])})'
+            f'+SUMIF({_range_ref("Control_Runs", control_req["RunDate"])},$A{row_idx},{_range_ref("Control_Runs", control_req["LadderR2"])}) )/B{row_idx},0)'
         ))
     _style_table(ws, 1, max(len(run_days) + 1, 2), 1, len(headers))
     ws.freeze_panes = "A2"
@@ -321,14 +355,15 @@ def _build_pk_summary(ws, assays: list[str], pk_cols: dict[str, str], pk_last: i
     ws.sheet_properties.tabColor = "ED7D31" if kind == "sample" else "C55A11"
     headers = ["Assay", "MarkerRows", "MeanAbsDeltaBP", "MaxAbsDeltaBP", "Over2bp", "Over5bp", "AvgHeight"]
     ws.append(headers)
+    pk_req = _require_cols(pk_cols, "IdentityKey", "Assay", "Kind", "AbsDeltaBP", "Height")
     for row_idx, assay in enumerate(assays, start=2):
         ws.cell(row_idx, 1, assay)
-        ws.cell(row_idx, 2, f'=COUNTIFS(PK_Peaks!${pk_cols["Assay"]}:${pk_cols["Assay"]},$A{row_idx},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"{kind}")')
-        ws.cell(row_idx, 3, f'=IFERROR(AVERAGEIFS(PK_Peaks!${pk_cols["AbsDeltaBP"]}:${pk_cols["AbsDeltaBP"]},PK_Peaks!${pk_cols["Assay"]}:${pk_cols["Assay"]},$A{row_idx},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"{kind}"),0)')
-        ws.cell(row_idx, 4, f'=IFERROR(MAXIFS(PK_Peaks!${pk_cols["AbsDeltaBP"]}:${pk_cols["AbsDeltaBP"]},PK_Peaks!${pk_cols["Assay"]}:${pk_cols["Assay"]},$A{row_idx},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"{kind}"),0)')
-        ws.cell(row_idx, 5, f'=SUMPRODUCT(--(PK_Peaks!${pk_cols["Assay"]}$2:${pk_cols["Assay"]}${pk_last}=$A{row_idx}),--(PK_Peaks!${pk_cols["Kind"]}$2:${pk_cols["Kind"]}${pk_last}="{kind}"),--(PK_Peaks!${pk_cols["AbsDeltaBP"]}$2:${pk_cols["AbsDeltaBP"]}${pk_last}>2))')
-        ws.cell(row_idx, 6, f'=SUMPRODUCT(--(PK_Peaks!${pk_cols["Assay"]}$2:${pk_cols["Assay"]}${pk_last}=$A{row_idx}),--(PK_Peaks!${pk_cols["Kind"]}$2:${pk_cols["Kind"]}${pk_last}="{kind}"),--(PK_Peaks!${pk_cols["AbsDeltaBP"]}$2:${pk_cols["AbsDeltaBP"]}${pk_last}>5))')
-        ws.cell(row_idx, 7, f'=IFERROR(AVERAGEIFS(PK_Peaks!${pk_cols["Height"]}:${pk_cols["Height"]},PK_Peaks!${pk_cols["Assay"]}:${pk_cols["Assay"]},$A{row_idx},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"{kind}"),0)')
+        ws.cell(row_idx, 2, f'=COUNTIFS({_range_ref("PK_Peaks", pk_req["Assay"])},$A{row_idx},{_range_ref("PK_Peaks", pk_req["Kind"])}, "{kind}")')
+        ws.cell(row_idx, 3, f'=IFERROR(AVERAGEIFS({_range_ref("PK_Peaks", pk_req["AbsDeltaBP"])}, {_range_ref("PK_Peaks", pk_req["Assay"])},$A{row_idx}, {_range_ref("PK_Peaks", pk_req["Kind"])}, "{kind}"),0)')
+        ws.cell(row_idx, 4, f'=IFERROR(MAXIFS({_range_ref("PK_Peaks", pk_req["AbsDeltaBP"])}, {_range_ref("PK_Peaks", pk_req["Assay"])},$A{row_idx}, {_range_ref("PK_Peaks", pk_req["Kind"])}, "{kind}"),0)')
+        ws.cell(row_idx, 5, f'=SUMPRODUCT(--({_range_ref("PK_Peaks", pk_req["Assay"], end_row=pk_last)}=$A{row_idx}),--({_range_ref("PK_Peaks", pk_req["Kind"], end_row=pk_last)}="{kind}"),--({_range_ref("PK_Peaks", pk_req["AbsDeltaBP"], end_row=pk_last)}>2))')
+        ws.cell(row_idx, 6, f'=SUMPRODUCT(--({_range_ref("PK_Peaks", pk_req["Assay"], end_row=pk_last)}=$A{row_idx}),--({_range_ref("PK_Peaks", pk_req["Kind"], end_row=pk_last)}="{kind}"),--({_range_ref("PK_Peaks", pk_req["AbsDeltaBP"], end_row=pk_last)}>5))')
+        ws.cell(row_idx, 7, f'=IFERROR(AVERAGEIFS({_range_ref("PK_Peaks", pk_req["Height"])}, {_range_ref("PK_Peaks", pk_req["Assay"])},$A{row_idx}, {_range_ref("PK_Peaks", pk_req["Kind"])}, "{kind}"),0)')
     ws["A1"] = "Assay"
     _style_table(ws, 1, max(len(assays) + 1, 2), 1, len(headers))
     ws.freeze_panes = "A2"
@@ -367,7 +402,7 @@ def _add_card(ws, cell: str, label: str, formula: str, fill: PatternFill) -> Non
     value_cell.border = BOX_BORDER
 
 
-def _build_dashboard(ws, assay_count: int, run_day_count: int, review_count: int, outlier_count: int, assay_ws, control_ws, pk_sample_ws, pk_ladder_ws, daily_ws) -> None:
+def _build_dashboard(ws, assay_count: int, run_day_count: int, review_count: int, outlier_count: int, outlier_headers: list[str], assay_ws, control_ws, pk_sample_ws, pk_ladder_ws, daily_ws) -> None:
     ws.sheet_properties.tabColor = "2F75B5"
     ws.sheet_view.showGridLines = False
     ws.freeze_panes = "A9"
@@ -387,14 +422,17 @@ def _build_dashboard(ws, assay_count: int, run_day_count: int, review_count: int
     ws["A4"].font = BOLD
     ws["B4"] = "Excel stores formulas in English internally; Norwegian Excel localizes them when opened."
 
-    _add_card(ws, "A6", "Tracked Runs", '=COUNTIF(Patient_Runs!$B:$B,"<>File")+COUNTIF(Control_Runs!$B:$B,"<>File")', CARD_BLUE)
+    _add_card(ws, "A6", "Tracked Runs", '=COUNTIF(Patient_Runs!$A:$A,"<>")+COUNTIF(Control_Runs!$A:$A,"<>")', CARD_BLUE)
     _add_card(ws, "B6", "Unique Assays", f"={assay_count}", CARD_TEAL)
-    _add_card(ws, "C6", "Review Files", '=COUNTIFS(Patient_Runs!$N:$N,"<>",Patient_Runs!$N:$N,"<>ok")+COUNTIFS(Control_Runs!$N:$N,"<>",Control_Runs!$N:$N,"<>ok")', CARD_RED)
-    _add_card(ws, "D6", "Ladder OK Rate", '=IFERROR((COUNTIF(Patient_Runs!$N:$N,"ok")+COUNTIF(Control_Runs!$N:$N,"ok"))/(COUNTIF(Patient_Runs!$B:$B,"<>File")+COUNTIF(Control_Runs!$B:$B,"<>File")),0)', CARD_GOLD)
-    _add_card(ws, "E6", "PK Marker Rows", '=COUNTIF(PK_Peaks!$K:$K,"<>MarkerName")', CARD_BLUE)
-    _add_card(ws, "F6", "PK Sample Mean |delta|", '=IFERROR(AVERAGEIFS(PK_Peaks!$X:$X,PK_Peaks!$L:$L,"sample"),0)', CARD_ORANGE)
-    _add_card(ws, "G6", "PK Sample >2 bp", '=COUNTIFS(PK_Peaks!$L:$L,"sample",PK_Peaks!$X:$X,">2")', CARD_RED)
-    _add_card(ws, "H6", "PK Ladder Mean |delta|", '=IFERROR(AVERAGEIFS(PK_Peaks!$X:$X,PK_Peaks!$L:$L,"ladder"),0)', CARD_TEAL)
+    patient_cols = _col_map(ws.parent["Patient_Runs"])
+    control_cols = _col_map(ws.parent["Control_Runs"])
+    pk_cols = _col_map(ws.parent["PK_Peaks"])
+    _add_card(ws, "C6", "Review Files", f'=COUNTIFS(Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>",Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"<>ok")+COUNTIFS(Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>",Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"<>ok")', CARD_RED)
+    _add_card(ws, "D6", "Ladder OK Rate", f'=IFERROR((COUNTIF(Patient_Runs!${patient_cols["LadderQC"]}:${patient_cols["LadderQC"]},"ok")+COUNTIF(Control_Runs!${control_cols["LadderQC"]}:${control_cols["LadderQC"]},"ok"))/(COUNTIF(Patient_Runs!$A:$A,"<>")+COUNTIF(Control_Runs!$A:$A,"<>")),0)', CARD_GOLD)
+    _add_card(ws, "E6", "PK Marker Rows", f'=COUNTIF(PK_Peaks!${pk_cols["MarkerName"]}:${pk_cols["MarkerName"]},"<>")', CARD_BLUE)
+    _add_card(ws, "F6", "PK Sample Mean |delta|", f'=IFERROR(AVERAGEIFS(PK_Peaks!${pk_cols["AbsDeltaBP"]}:${pk_cols["AbsDeltaBP"]},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"sample"),0)', CARD_ORANGE)
+    _add_card(ws, "G6", "PK Sample >2 bp", f'=COUNTIFS(PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"sample",PK_Peaks!${pk_cols["AbsDeltaBP"]}:${pk_cols["AbsDeltaBP"]},">2")', CARD_RED)
+    _add_card(ws, "H6", "PK Ladder Mean |delta|", f'=IFERROR(AVERAGEIFS(PK_Peaks!${pk_cols["AbsDeltaBP"]}:${pk_cols["AbsDeltaBP"]},PK_Peaks!${pk_cols["Kind"]}:${pk_cols["Kind"]},"ladder"),0)', CARD_TEAL)
     ws["D7"].number_format = "0.0%"
     ws["F7"].number_format = '0.00 "bp"'
     ws["H7"].number_format = '0.00 "bp"'
@@ -404,10 +442,12 @@ def _build_dashboard(ws, assay_count: int, run_day_count: int, review_count: int
     overview_headers = ["Scope", "Runs", "Ladder OK", "Review Required", "OK Rate", "Avg R2", "Partial Fits"]
     for idx, header in enumerate(overview_headers, start=1):
         ws.cell(10, idx, header)
+    patient_req = _require_cols(patient_cols, "IdentityKey", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
+    control_req = _require_cols(control_cols, "IdentityKey", "Assay", "LadderQC", "LadderR2", "LadderExpectedStepCount", "LadderFittedStepCount")
     overview_rows = [
-        ("All", '=COUNTIF(Patient_Runs!$B:$B,"<>File")+COUNTIF(Control_Runs!$B:$B,"<>File")', '=COUNTIF(Patient_Runs!$N:$N,"ok")+COUNTIF(Control_Runs!$N:$N,"ok")', '=COUNTIFS(Patient_Runs!$N:$N,"<>",Patient_Runs!$N:$N,"<>ok")+COUNTIFS(Control_Runs!$N:$N,"<>",Control_Runs!$N:$N,"<>ok")', '=IFERROR(C11/B11,0)', '=IFERROR((SUM(Patient_Runs!$R:$R)+SUM(Control_Runs!$R:$R))/B11,0)', '=SUMPRODUCT(--(Patient_Runs!$Q$2:$Q$1048576<Patient_Runs!$P$2:$P$1048576))+SUMPRODUCT(--(Control_Runs!$Q$2:$Q$1048576<Control_Runs!$P$2:$P$1048576))'),
-        ("Patient", '=COUNTIF(Patient_Runs!$B:$B,"<>File")', '=COUNTIF(Patient_Runs!$N:$N,"ok")', '=COUNTIFS(Patient_Runs!$N:$N,"<>",Patient_Runs!$N:$N,"<>ok")', '=IFERROR(C12/B12,0)', '=IFERROR(SUM(Patient_Runs!$R:$R)/B12,0)', '=SUMPRODUCT(--(Patient_Runs!$Q$2:$Q$1048576<Patient_Runs!$P$2:$P$1048576))'),
-        ("Control", '=COUNTIF(Control_Runs!$B:$B,"<>File")', '=COUNTIF(Control_Runs!$N:$N,"ok")', '=COUNTIFS(Control_Runs!$N:$N,"<>",Control_Runs!$N:$N,"<>ok")', '=IFERROR(C13/B13,0)', '=IFERROR(SUM(Control_Runs!$R:$R)/B13,0)', '=SUMPRODUCT(--(Control_Runs!$Q$2:$Q$1048576<Control_Runs!$P$2:$P$1048576))'),
+        ("All", '=COUNTIF(Patient_Runs!$A:$A,"<>")+COUNTIF(Control_Runs!$A:$A,"<>")', f'=COUNTIF({_range_ref("Patient_Runs", patient_req["LadderQC"])}, "ok")+COUNTIF({_range_ref("Control_Runs", control_req["LadderQC"])}, "ok")', f'=COUNTIFS({_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>", {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>ok")+COUNTIFS({_range_ref("Control_Runs", control_req["LadderQC"])}, "<>", {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>ok")', '=IFERROR(C11/B11,0)', f'=IFERROR((SUM({_range_ref("Patient_Runs", patient_req["LadderR2"])} )+SUM({_range_ref("Control_Runs", control_req["LadderR2"])}))/B11,0)', f'=SUMPRODUCT(--({_range_ref("Patient_Runs", patient_req["LadderFittedStepCount"], end_row=1048576)}<{_range_ref("Patient_Runs", patient_req["LadderExpectedStepCount"], end_row=1048576)}))+SUMPRODUCT(--({_range_ref("Control_Runs", control_req["LadderFittedStepCount"], end_row=1048576)}<{_range_ref("Control_Runs", control_req["LadderExpectedStepCount"], end_row=1048576)}))'),
+        ("Patient", '=COUNTIF(Patient_Runs!$A:$A,"<>")', f'=COUNTIF({_range_ref("Patient_Runs", patient_req["LadderQC"])}, "ok")', f'=COUNTIFS({_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>", {_range_ref("Patient_Runs", patient_req["LadderQC"])}, "<>ok")', '=IFERROR(C12/B12,0)', f'=IFERROR(SUM({_range_ref("Patient_Runs", patient_req["LadderR2"])})/B12,0)', f'=SUMPRODUCT(--({_range_ref("Patient_Runs", patient_req["LadderFittedStepCount"], end_row=1048576)}<{_range_ref("Patient_Runs", patient_req["LadderExpectedStepCount"], end_row=1048576)}))'),
+        ("Control", '=COUNTIF(Control_Runs!$A:$A,"<>")', f'=COUNTIF({_range_ref("Control_Runs", control_req["LadderQC"])}, "ok")', f'=COUNTIFS({_range_ref("Control_Runs", control_req["LadderQC"])}, "<>", {_range_ref("Control_Runs", control_req["LadderQC"])}, "<>ok")', '=IFERROR(C13/B13,0)', f'=IFERROR(SUM({_range_ref("Control_Runs", control_req["LadderR2"])})/B13,0)', f'=SUMPRODUCT(--({_range_ref("Control_Runs", control_req["LadderFittedStepCount"], end_row=1048576)}<{_range_ref("Control_Runs", control_req["LadderExpectedStepCount"], end_row=1048576)}))'),
     ]
     for row_idx, row in enumerate(overview_rows, start=11):
         for col_idx, value in enumerate(row, start=1):
@@ -450,13 +490,12 @@ def _build_dashboard(ws, assay_count: int, run_day_count: int, review_count: int
 
     ws["J16"] = "Top PK Outliers"
     ws["J16"].font = Font(size=13, bold=True)
-    outlier_headers = ["Assay", "Control", "File", "MarkerName", "ExpectedBP", "FoundBP", "DeltaBP", "AbsDeltaBP", "Height", "Reason"]
     for idx, header in enumerate(outlier_headers, start=10):
         ws.cell(17, idx, header)
     for offset in range(1, min(outlier_count, 8) + 1):
         src = offset + 2
         dst = 17 + offset
-        for col_idx, col_letter in enumerate(("A", "B", "C", "D", "E", "F", "G", "H", "I", "J"), start=10):
+        for col_idx, col_letter in enumerate(tuple(get_column_letter(i) for i in range(1, len(outlier_headers) + 1)), start=10):
             ws.cell(dst, col_idx, f"='PK_Outliers'!{col_letter}{src}")
     _style_table(ws, 17, 17 + max(min(outlier_count, 8), 1), 10, 19)
 

@@ -333,7 +333,9 @@ def run_batch_jobs(
     max_workers: int | None = None,
     tracking_excel_path: Path | None = None,
     aggregate_outdir_name: str | None = None,
-) -> None:
+    defer_tracking_workbook_refresh: bool = False,
+    defer_dit_html_reports: bool | None = None,
+) -> dict[str, Any]:
     """
     Run all generated jobs.
     Reads QC parameters from APP_SETTINGS and uses explicit per-analysis batch flags.
@@ -347,6 +349,7 @@ def run_batch_jobs(
     analysis_batch = APP_SETTINGS.get("analyses", {}).get(active_analysis, {}).get("batch", {})
     patient_regex = analysis_batch.get("patient_id_regex", r"\d{2}OUM\d{5}")
     stream_aggregated_dit = aggregate_dit_reports and _can_stream_aggregated_dit_reports(jobs, patient_regex)
+    defer_dit_html_reports = defer_tracking_workbook_refresh if defer_dit_html_reports is None else bool(defer_dit_html_reports)
     sample_window = s_qc.get("sample_peak_window_bp", s_qc.get("w_sample", 3.0))
     ladder_window = s_qc.get("ladder_peak_window_bp", s_qc.get("w_ladder", 3.0))
     qc_rules = QCRules(
@@ -367,7 +370,8 @@ def run_batch_jobs(
         agg_outdir.mkdir(exist_ok=True, parents=True)
     
     # Storage for cross-folder aggregation
-    all_collected_entries = []
+    all_collected_entries_by_job: dict[int, list[Any]] = {}
+    deferred_tracking_entries_by_job: dict[int, list[Any]] | None = {} if defer_tracking_workbook_refresh else None
     failed_jobs = []
     completed_jobs = []
     aggregation_failed = False
@@ -375,6 +379,35 @@ def run_batch_jobs(
     # Thread safety locks
     data_lock = threading.Lock()
     callback_lock = threading.Lock()
+
+    def _extend_entries(
+        bucket: dict[int, list[Any]] | None,
+        job_index: int,
+        entries: list[Any],
+    ) -> None:
+        if bucket is None or not entries:
+            return
+        bucket.setdefault(job_index, []).extend(entries)
+
+    def _materialize_entries(bucket: dict[int, list[Any]] | None) -> list[Any]:
+        if not bucket:
+            return []
+        ordered: list[Any] = []
+        for job_index in sorted(bucket):
+            ordered.extend(bucket[job_index])
+        return sorted(ordered, key=_entry_sort_key)
+
+    def _entry_sort_key(entry: Any) -> tuple[str, str, str, str]:
+        if not isinstance(entry, dict):
+            return ("", "", "", "")
+        fsa = entry.get("fsa")
+        file_name = str(getattr(fsa, "file_name", "") or entry.get("File") or "")
+        return (
+            str(entry.get("dit") or entry.get("IdentityKey") or ""),
+            file_name,
+            str(entry.get("MarkerName") or ""),
+            str(entry.get("Assay") or entry.get("assay") or ""),
+        )
 
     def _emit_progress(
         job_name: str,
@@ -438,6 +471,8 @@ def run_batch_jobs(
         job_path = job["path"]
         job_files = job["files"]
         job_file_total = len(job_files or [])
+        started = time.monotonic()
+        job_status = "success"
         
         log(f"[BATCH] Processing job {i+1}/{total}: {job_name}")
         with callback_lock:
@@ -490,51 +525,72 @@ def run_batch_jobs(
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        _emit_progress(
-                            job_name,
-                            "build_report",
-                            files_done=job_file_total,
-                            files_total=job_file_total,
-                            note="build_report_started",
-                        )
-                        _with_heartbeat(
-                            job_name,
-                            "build_report",
-                            f"building DIT report for {job_name}",
-                            build_dit_html_reports,
-                            entries,
-                            agg_outdir,
-                        )
+                        if defer_dit_html_reports:
+                            with data_lock:
+                                _extend_entries(all_collected_entries_by_job, i, entries)
+                            _emit_progress(
+                                job_name,
+                                "build_report",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="build_report_deferred",
+                            )
+                        else:
+                            _emit_progress(
+                                job_name,
+                                "build_report",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="build_report_started",
+                            )
+                            _with_heartbeat(
+                                job_name,
+                                "build_report",
+                                f"building DIT report for {job_name}",
+                                build_dit_html_reports,
+                                entries,
+                                agg_outdir,
+                            )
                         if active_analysis == "clonality":
                             from core.analyses.clonality.tracking_excel import (
                                 CLONALITY_TRACKING_FILENAME,
                                 update_clonality_tracking_workbook,
                             )
 
-                            _emit_progress(
-                                job_name,
-                                "write_tracking_excel",
-                                files_done=job_file_total,
-                                files_total=job_file_total,
-                                note="write_tracking_excel_started",
-                            )
-                            _with_heartbeat(
-                                job_name,
-                                "write_tracking_excel",
-                                f"updating clonality tracking workbook for {job_name}",
-                                update_clonality_tracking_workbook,
-                                tracking_excel_path
-                                or resolve_analysis_excel_output_path(
-                                    "clonality",
-                                    agg_outdir,
-                                    CLONALITY_TRACKING_FILENAME,
-                                ),
-                                entries,
-                            )
-                        log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
+                            if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
+                                with data_lock:
+                                    _extend_entries(deferred_tracking_entries_by_job, i, entries)
+                            elif not defer_dit_html_reports:
+                                _emit_progress(
+                                    job_name,
+                                    "write_tracking_excel",
+                                    files_done=job_file_total,
+                                    files_total=job_file_total,
+                                    note="write_tracking_excel_started",
+                                )
+                                with data_lock:
+                                    _with_heartbeat(
+                                        job_name,
+                                        "write_tracking_excel",
+                                        f"updating clonality tracking workbook for {job_name}",
+                                        update_clonality_tracking_workbook,
+                                        tracking_excel_path
+                                        or resolve_analysis_excel_output_path(
+                                            "clonality",
+                                            agg_outdir,
+                                            CLONALITY_TRACKING_FILENAME,
+                                            ),
+                                        entries,
+                                    )
+                        if defer_dit_html_reports:
+                            log(f"[BATCH] Deferred aggregated DIT report for {job_name} with {len(entries)} entries.")
+                        else:
+                            log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
                     else:
                         with data_lock:
-                            all_collected_entries.extend(entries)
+                            _extend_entries(all_collected_entries_by_job, i, entries)
+                            if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
+                                _extend_entries(deferred_tracking_entries_by_job, i, entries)
                         log(f"[BATCH] Collected {len(entries)} entries from {job_name}.")
                 else:
                     # Normal mode
@@ -555,14 +611,66 @@ def run_batch_jobs(
                     )
             
             elif job_type == "qc":
-                run_qc_job(
-                    fsa_dir=job_path,
-                    base_outdir=output_base,
-                    out_html_name=resolved_html,
-                    excel_name=resolved_excel,
-                    rules=qc_rules,
-                    files=job_files
-                )
+                qc_entries: list[dict[str, Any]] = []
+                if active_analysis == "clonality" and aggregate_dit_reports:
+                    _, qc_entries = _with_heartbeat(
+                        job_name,
+                        "collect_entries",
+                        f"collecting QC entries for {job_name}",
+                        run_qc_job,
+                        fsa_dir=job_path,
+                        base_outdir=output_base,
+                        out_html_name=resolved_html,
+                        excel_name=resolved_excel,
+                        rules=qc_rules,
+                        files=job_files,
+                        tracking_excel_path=tracking_excel_path,
+                        update_tracking_workbook=False,
+                        return_entries=True,
+                        progress_callback=_job_progress,
+                    )
+                    if qc_entries:
+                        if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
+                            with data_lock:
+                                _extend_entries(deferred_tracking_entries_by_job, i, qc_entries)
+                            log(f"[BATCH] Deferred {len(qc_entries)} tracking entries from QC job {job_name}.")
+                        else:
+                            from core.analyses.clonality.tracking_excel import (
+                                CLONALITY_TRACKING_FILENAME,
+                                update_clonality_tracking_workbook,
+                            )
+
+                            _emit_progress(
+                                job_name,
+                                "write_tracking_excel",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="write_tracking_excel_started",
+                            )
+                            with data_lock:
+                                _with_heartbeat(
+                                    job_name,
+                                    "write_tracking_excel",
+                                    f"updating clonality tracking workbook for {job_name}",
+                                    update_clonality_tracking_workbook,
+                                    tracking_excel_path
+                                    or resolve_analysis_excel_output_path(
+                                        "clonality",
+                                        output_base,
+                                        CLONALITY_TRACKING_FILENAME,
+                                    ),
+                                    qc_entries,
+                                )
+                        log(f"[BATCH] Collected {len(qc_entries)} tracking entries from QC job {job_name}.")
+                else:
+                    run_qc_job(
+                        fsa_dir=job_path,
+                        base_outdir=output_base,
+                        out_html_name=resolved_html,
+                        excel_name=resolved_excel,
+                        rules=qc_rules,
+                        files=job_files,
+                    )
                 
             elif job_type == "dit":
                 if aggregate_dit_reports:
@@ -583,51 +691,72 @@ def run_batch_jobs(
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        _emit_progress(
-                            job_name,
-                            "build_report",
-                            files_done=job_file_total,
-                            files_total=job_file_total,
-                            note="build_report_started",
-                        )
-                        _with_heartbeat(
-                            job_name,
-                            "build_report",
-                            f"building aggregated DIT report for {job_name}",
-                            build_dit_html_reports,
-                            entries,
-                            agg_outdir,
-                        )
+                        if defer_dit_html_reports:
+                            with data_lock:
+                                _extend_entries(all_collected_entries_by_job, i, entries)
+                            _emit_progress(
+                                job_name,
+                                "build_report",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="build_report_deferred",
+                            )
+                        else:
+                            _emit_progress(
+                                job_name,
+                                "build_report",
+                                files_done=job_file_total,
+                                files_total=job_file_total,
+                                note="build_report_started",
+                            )
+                            _with_heartbeat(
+                                job_name,
+                                "build_report",
+                                f"building aggregated DIT report for {job_name}",
+                                build_dit_html_reports,
+                                entries,
+                                agg_outdir,
+                            )
                         if active_analysis == "clonality":
                             from core.analyses.clonality.tracking_excel import (
                                 CLONALITY_TRACKING_FILENAME,
                                 update_clonality_tracking_workbook,
                             )
 
-                            _emit_progress(
-                                job_name,
-                                "write_tracking_excel",
-                                files_done=job_file_total,
-                                files_total=job_file_total,
-                                note="write_tracking_excel_started",
-                            )
-                            _with_heartbeat(
-                                job_name,
-                                "write_tracking_excel",
-                                f"updating clonality tracking workbook for {job_name}",
-                                update_clonality_tracking_workbook,
-                                tracking_excel_path
-                                or resolve_analysis_excel_output_path(
-                                    "clonality",
-                                    agg_outdir,
-                                    CLONALITY_TRACKING_FILENAME,
-                                ),
-                                entries,
-                            )
-                        log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
+                            if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
+                                with data_lock:
+                                    _extend_entries(deferred_tracking_entries_by_job, i, entries)
+                            elif not defer_dit_html_reports:
+                                _emit_progress(
+                                    job_name,
+                                    "write_tracking_excel",
+                                    files_done=job_file_total,
+                                    files_total=job_file_total,
+                                    note="write_tracking_excel_started",
+                                )
+                                with data_lock:
+                                    _with_heartbeat(
+                                        job_name,
+                                        "write_tracking_excel",
+                                        f"updating clonality tracking workbook for {job_name}",
+                                        update_clonality_tracking_workbook,
+                                        tracking_excel_path
+                                        or resolve_analysis_excel_output_path(
+                                            "clonality",
+                                            agg_outdir,
+                                            CLONALITY_TRACKING_FILENAME,
+                                        ),
+                                        entries,
+                                    )
+                        if defer_dit_html_reports:
+                            log(f"[BATCH] Deferred aggregated DIT report for {job_name} with {len(entries)} entries.")
+                        else:
+                            log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
                     else:
                         with data_lock:
-                            all_collected_entries.extend(entries)
+                            _extend_entries(all_collected_entries_by_job, i, entries)
+                            if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
+                                _extend_entries(deferred_tracking_entries_by_job, i, entries)
                         log(f"[BATCH] Collected {len(entries)} entries from {job_name} for DIT aggregation.")
                 else:
                     run_dit_job(
@@ -654,9 +783,11 @@ def run_batch_jobs(
                 files_total=job_file_total,
                 note="job_complete",
             )
+            job_status = "success"
                 
         except Exception as e:
             log(f"[ERROR] Job '{job_name}' failed: {e}")
+            job_status = "failed"
             with data_lock:
                 failed_jobs.append(job_name)
             with callback_lock:
@@ -672,6 +803,8 @@ def run_batch_jobs(
             if not continue_on_error:
                 log("[BATCH] Stopping batch due to error.")
                 raise  # Stop early by propagating error to executor
+        finally:
+            log(f"[BATCH] Job {job_name} finished in {time.monotonic() - started:.1f}s ({job_status}).")
 
     # Perform multi-threaded patient processing
     # Max workers = 3 (modest to prevent over-subscription of child Pool processes)
@@ -680,8 +813,18 @@ def run_batch_jobs(
     
     try:
         with ThreadPoolExecutor(max_workers=max_patient_workers) as executor:
-            # We must map with indices to pass to process_job
-            executor.map(lambda x: process_job(*x), enumerate(jobs))
+            futures = [
+                executor.submit(process_job, i, job)
+                for i, job in enumerate(jobs)
+            ]
+            from concurrent.futures import as_completed
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as ex:
+                    if not continue_on_error:
+                        raise
+                    log(f"[BATCH] Worker future failed: {ex}")
     except Exception as ex:
         if not continue_on_error:
             log(f"[BATCH] Batch execution halted after error: {ex}")
@@ -689,21 +832,25 @@ def run_batch_jobs(
             log(f"[BATCH] Batch execution completed with some errors.")
                 
     # --- CROSS-FOLDER DIT AGGREGATION ---
-    if aggregate_dit_reports and all_collected_entries:
+    all_collected_entries = _materialize_entries(all_collected_entries_by_job)
+    deferred_tracking_entries = _materialize_entries(deferred_tracking_entries_by_job)
+
+    if aggregate_dit_reports and all_collected_entries and not defer_dit_html_reports:
         log("\n[BATCH] Final step: Building aggregated DIT HTML reports...")
         
         from core.html_reports import build_dit_html_reports
         
         try:
-            _with_heartbeat(
-                "DIT aggregation",
-                "build_report",
-                "building final aggregated DIT reports",
-                build_dit_html_reports,
-                all_collected_entries,
-                agg_outdir,
-            )
-            if active_analysis == "clonality":
+            if (not stream_aggregated_dit) or defer_dit_html_reports:
+                _with_heartbeat(
+                    "DIT aggregation",
+                    "build_report",
+                    "building final aggregated DIT reports",
+                    build_dit_html_reports,
+                    all_collected_entries,
+                    agg_outdir,
+                )
+            if active_analysis == "clonality" and not defer_tracking_workbook_refresh:
                 from core.analyses.clonality.tracking_excel import (
                     CLONALITY_TRACKING_FILENAME,
                     update_clonality_tracking_workbook,
@@ -727,6 +874,8 @@ def run_batch_jobs(
             aggregation_failed = True
             failed_jobs.append("DIT aggregation")
             log(f"[ERROR] Failed to build aggregated DIT reports: {e}")
+    elif aggregate_dit_reports and all_collected_entries and defer_dit_html_reports:
+        log("[BATCH] Skipped aggregated DIT HTML report generation; entries were retained for deferred handling.")
     elif aggregate_dit_reports and stream_aggregated_dit:
         log("[BATCH] Aggregated DIT reports were streamed job-by-job to reduce memory pressure.")
 
@@ -740,4 +889,5 @@ def run_batch_jobs(
         "total_jobs": total,
         "completed_jobs": completed_jobs,
         "failed_jobs": failed_jobs,
+        "collected_entries": deferred_tracking_entries if defer_tracking_workbook_refresh else all_collected_entries,
     }

@@ -4,11 +4,14 @@ import argparse
 import copy
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import pickle
 import re
+import time
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -51,14 +54,26 @@ def discover_top_level_run_folders(input_root: Path, month: str | None = None) -
     return sorted(folders, key=lambda p: p.name)
 
 
+def _resolve_folder_workers(folder_workers: int | None, eligible_count: int) -> int:
+    if eligible_count <= 1:
+        return 1
+    if folder_workers is not None:
+        return max(1, min(folder_workers, eligible_count))
+    cpu_count = os.cpu_count() or 1
+    return max(1, min(2, eligible_count, cpu_count))
+
+
 def run_clonality_backfill(
     input_root: Path = DEFAULT_INPUT_ROOT,
     month: str | None = None,
     output_base: Path = DEFAULT_OUTPUT_BASE,
     tracking_excel_path: Path = DEFAULT_TRACKING_EXCEL,
     state_file: Path = DEFAULT_STATE_FILE,
-    max_workers: int = 1,
+    max_workers: int | None = None,
+    folder_workers: int | None = None,
     retry_failed: bool = False,
+    defer_tracking_refresh: bool = True,
+    collected_entries_callback: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     input_root = Path(input_root).expanduser()
     output_base = Path(output_base).expanduser()
@@ -66,14 +81,13 @@ def run_clonality_backfill(
     state_file = Path(state_file).expanduser()
     tracking_excel_path.parent.mkdir(parents=True, exist_ok=True)
     state_file.parent.mkdir(parents=True, exist_ok=True)
+    setup_started = time.monotonic()
 
     settings_backup = copy.deepcopy(APP_SETTINGS)
     APP_SETTINGS["active_analysis"] = "clonality"
     analysis_batch = APP_SETTINGS.setdefault("analyses", {}).setdefault("clonality", {}).setdefault("batch", {})
     patient_regex = analysis_batch.get("patient_id_regex", r"\d{2}OUM\d{5}")
     pipeline_settings = APP_SETTINGS.setdefault("analyses", {}).setdefault("clonality", {}).setdefault("pipeline", {})
-    previous_disable_mp = os.environ.get("FRAGGLER_DISABLE_MULTIPROCESSING")
-    os.environ["FRAGGLER_DISABLE_MULTIPROCESSING"] = "1"
 
     try:
         folders = discover_top_level_run_folders(input_root, month=month)
@@ -96,29 +110,127 @@ def run_clonality_backfill(
         log(
             f"[BACKFILL] Starting clonality backfill for {month or 'all'} with "
             f"{total_folders} top-level folders, tracking workbook {tracking_excel_path}, "
-            f"max_workers={max(1, int(max_workers))}."
+            f"max_workers={max_workers if max_workers is not None else 'auto'}, "
+            f"folder_workers={folder_workers if folder_workers is not None else 'auto'}, "
+            f"defer_tracking_refresh={defer_tracking_refresh}."
         )
+        log(f"[BACKFILL] Setup completed in {time.monotonic() - setup_started:.1f}s.")
 
-        for index, folder in enumerate(folders, start=1):
+        spill_root = state_file.parent / f"{state_file.stem}_tracking_spills"
+        pending_tracking_spills: dict[str, list[Path]] = _discover_pending_tracking_spills(spill_root)
+        folder_order = {folder.name: index for index, folder in enumerate(folders, start=1)}
+        month_groups: dict[str, list[Path]] = {}
+        for folder in folders:
+            month_groups.setdefault(_month_key(folder.name), []).append(folder)
+
+        def _spill_tracking_entries(month_key: str, folder_name: str, entries: list[dict[str, Any]]) -> Path:
+            month_dir = spill_root / month_key
+            month_dir.mkdir(parents=True, exist_ok=True)
+            spill_path = month_dir / f"{folder_name}.pkl"
+            spill_path.write_bytes(
+                pickle.dumps(
+                    {
+                        "folder_name": folder_name,
+                        "entries": entries,
+                    },
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
+            )
+            with state_lock:
+                pending_tracking_spills.setdefault(month_key, []).append(spill_path)
+            log(
+                f"[BACKFILL] Spilled {len(entries)} deferred tracking entries for {folder_name} "
+                f"to {spill_path}."
+            )
+            return spill_path
+
+        def _cleanup_spill_paths(spill_paths: list[Path]) -> None:
+            for spill_path in spill_paths:
+                try:
+                    spill_path.unlink()
+                except FileNotFoundError:
+                    pass
+                except Exception as exc:
+                    log(f"[BACKFILL] Could not remove spill file {spill_path}: {exc}")
+            for month_dir in sorted({path.parent for path in spill_paths}, key=lambda path: str(path), reverse=True):
+                try:
+                    month_dir.rmdir()
+                except OSError:
+                    pass
+            try:
+                spill_root.rmdir()
+            except OSError:
+                pass
+
+        def _flush_tracking_month(month_key: str) -> None:
+            if not defer_tracking_refresh:
+                return
+            spill_paths = sorted(pending_tracking_spills.get(month_key) or [])
+            if not spill_paths:
+                return
+            from core.analyses.clonality.tracking_excel import update_clonality_tracking_workbook
+
+            started = time.monotonic()
+            combined_entries: list[dict[str, Any]] = []
+            loaded_paths: list[Path] = []
+            for spill_path in spill_paths:
+                if not spill_path.exists():
+                    continue
+                try:
+                    payload = pickle.loads(spill_path.read_bytes())
+                except Exception as exc:
+                    log(f"[BACKFILL] Could not load tracking spill {spill_path}: {exc}")
+                    continue
+                entries = list((payload or {}).get("entries") or [])
+                combined_entries.extend(entries)
+                loaded_paths.append(spill_path)
+
+            if not combined_entries:
+                pending_tracking_spills[month_key] = []
+                _cleanup_spill_paths(loaded_paths)
+                return
+
+            update_clonality_tracking_workbook(
+                tracking_excel_path,
+                combined_entries,
+                refresh_dashboard=False,
+            )
+
+            elapsed = time.monotonic() - started
+            log(
+                f"[BACKFILL] Refreshed tracking workbook for {month_key} "
+                f"with {len(combined_entries)} entries in {elapsed:.1f}s."
+            )
+            pending_tracking_spills[month_key] = [spill_path for spill_path in spill_paths if spill_path not in loaded_paths]
+            _cleanup_spill_paths(loaded_paths)
+
+        def _execute_folder(
+            folder: Path,
+            month_key: str,
+            folder_index: int,
+            use_isolated_tracking_path: bool,
+            batch_max_workers: int | None,
+        ) -> dict[str, Any]:
             folder_name = folder.name
             item = state["folders"][folder_name]
-            month_key = _month_key(folder_name)
-            touched_months.add(month_key)
-
-            if item["status"] == "done":
-                log(f"[BACKFILL] Skipping completed folder {folder_name} ({index}/{total_folders}).")
-                continue
-            if item["status"] == "failed" and not retry_failed:
-                log(f"[BACKFILL] Skipping failed folder {folder_name} ({index}/{total_folders}); use retry_failed to rerun.")
-                continue
-
             log(
-                f"[BACKFILL] Folder {index}/{total_folders} start: {folder_name} | "
+                f"[BACKFILL] Folder {folder_index}/{total_folders} start: {folder_name} | "
                 f"files={item['file_count']} patients={item['patient_count']} qc_files={item['qc_file_count']}"
             )
+            folder_started = time.monotonic()
             with state_lock:
                 _mark_folder_running(item, output_base, month_key, folder_name, tracking_excel_path)
                 _save_state(state_file, state)
+
+            outcome: dict[str, Any] = {
+                "folder_name": folder_name,
+                "month_key": month_key,
+                "status": "failed",
+                "completed_jobs": [],
+                "failed_jobs": [],
+                "collected_entries": [],
+                "error": "",
+            }
 
             try:
                 jobs = generate_jobs([folder], aggregate_patients=True, patient_regex=patient_regex)
@@ -126,6 +238,11 @@ def run_clonality_backfill(
                     raise RuntimeError("No jobs generated for folder.")
 
                 folder_output_base = Path(item["output_base"])
+                folder_tracking_path = tracking_excel_path
+                if use_isolated_tracking_path:
+                    folder_tracking_path = folder_output_base / "_tracking" / tracking_excel_path.name
+                    folder_tracking_path.parent.mkdir(parents=True, exist_ok=True)
+
                 def _progress_callback(event: dict[str, Any]) -> None:
                     payload = dict(event)
                     payload["folder_name"] = folder_name
@@ -144,12 +261,17 @@ def run_clonality_backfill(
                     continue_on_error=True,
                     update_callback=None,
                     progress_callback=_progress_callback,
-                    max_workers=max_workers,
-                    tracking_excel_path=tracking_excel_path,
+                    max_workers=batch_max_workers,
+                    tracking_excel_path=folder_tracking_path,
                     aggregate_outdir_name=BACKFILL_REPORT_DIRNAME,
+                    defer_tracking_workbook_refresh=defer_tracking_refresh,
+                    defer_dit_html_reports=False,
                 )
                 failed_jobs = list((result or {}).get("failed_jobs", []))
                 completed_jobs = list((result or {}).get("completed_jobs", []))
+                collected_entries = list((result or {}).get("collected_entries") or [])
+                if defer_tracking_refresh and collected_entries:
+                    _spill_tracking_entries(month_key, folder_name, collected_entries)
 
                 with state_lock:
                     item["completed_jobs"] = completed_jobs
@@ -160,25 +282,29 @@ def run_clonality_backfill(
                     item["last_finished_at"] = item["updated_at"]
                     item["owner_pid"] = 0
                     item["job_progress"] = {}
-
                     if failed_jobs:
                         item["status"] = "failed"
                         item["error"] = f"Failed jobs: {', '.join(failed_jobs)}"
                         item["current_phase"] = "failed"
-                        failed_this_run += 1
-                        log(
-                            f"[BACKFILL] Folder failed: {folder_name} | failed_jobs={len(failed_jobs)} "
-                            f"| cumulative_done={done_this_run} cumulative_failed={failed_this_run}"
-                        )
                     else:
                         item["status"] = "done"
                         item["error"] = ""
                         item["current_phase"] = "done"
-                        done_this_run += 1
-                        log(
-                            f"[BACKFILL] Folder complete: {folder_name} | reports={len(completed_jobs)} "
-                            f"| cumulative_done={done_this_run} cumulative_failed={failed_this_run}"
-                        )
+                    _save_state(state_file, state)
+
+                outcome.update(
+                    {
+                        "status": "failed" if failed_jobs else "done",
+                        "completed_jobs": completed_jobs,
+                        "failed_jobs": failed_jobs,
+                        "collected_entries": collected_entries,
+                        "error": f"Failed jobs: {', '.join(failed_jobs)}" if failed_jobs else "",
+                    }
+                )
+                if failed_jobs:
+                    log(f"[BACKFILL] Folder failed: {folder_name} | failed_jobs={len(failed_jobs)}")
+                else:
+                    log(f"[BACKFILL] Folder complete: {folder_name} | reports={len(completed_jobs)}")
             except Exception as exc:
                 with state_lock:
                     item["status"] = "failed"
@@ -190,17 +316,84 @@ def run_clonality_backfill(
                     item["last_note"] = str(exc)
                     item["owner_pid"] = 0
                     item["job_progress"] = {}
-                    failed_this_run += 1
-                log(
-                    f"[BACKFILL] Folder failed with exception: {folder_name} | {exc} "
-                    f"| cumulative_done={done_this_run} cumulative_failed={failed_this_run}"
-                )
-            finally:
-                with state_lock:
                     _save_state(state_file, state)
+                outcome.update({"failed_jobs": [str(exc)], "error": str(exc)})
+                log(f"[BACKFILL] Folder failed with exception: {folder_name} | {exc}")
+            finally:
+                log(f"[BACKFILL] Folder {folder_name} completed in {time.monotonic() - folder_started:.1f}s.")
+            return outcome
+
+        def _eligible_folders_for_month(month_folders: list[Path]) -> list[Path]:
+            eligible: list[Path] = []
+            for folder in month_folders:
+                item = state["folders"][folder.name]
+                folder_index = folder_order[folder.name]
+                if item["status"] == "done":
+                    log(f"[BACKFILL] Skipping completed folder {folder.name} ({folder_index}/{total_folders}).")
+                    continue
+                if item["status"] == "failed" and not retry_failed:
+                    log(
+                        f"[BACKFILL] Skipping failed folder {folder.name} ({folder_index}/{total_folders}); "
+                        "use retry_failed to rerun."
+                    )
+                    continue
+                eligible.append(folder)
+            return eligible
+
+        for month_key in sorted(month_groups):
+            month_folders = month_groups[month_key]
+            touched_months.add(month_key)
+            eligible_folders = _eligible_folders_for_month(month_folders)
+            if not eligible_folders:
+                if defer_tracking_refresh:
+                    _flush_tracking_month(month_key)
+                _write_month_summary(state, tracking_excel_path, state_file.parent, month_key)
+                continue
+
+            outer_workers = 1 if not defer_tracking_refresh else _resolve_folder_workers(folder_workers, len(eligible_folders))
+            use_isolated_tracking_path = defer_tracking_refresh and outer_workers > 1
+            batch_max_workers = 1 if outer_workers > 1 else max_workers
+            if outer_workers > 1:
+                with ThreadPoolExecutor(max_workers=outer_workers) as executor:
+                    futures = [
+                        executor.submit(
+                            _execute_folder,
+                            folder,
+                            month_key,
+                            folder_order[folder.name],
+                            use_isolated_tracking_path,
+                            batch_max_workers,
+                        )
+                        for folder in eligible_folders
+                    ]
+                    for future in as_completed(futures):
+                        outcome = future.result()
+                        if collected_entries_callback is not None and outcome["collected_entries"]:
+                            collected_entries_callback(outcome["folder_name"], outcome["collected_entries"])
+                        if outcome["status"] == "done":
+                            done_this_run += 1
+                        else:
+                            failed_this_run += 1
+            else:
+                for folder in eligible_folders:
+                    outcome = _execute_folder(folder, month_key, folder_order[folder.name], False, batch_max_workers)
+                    if collected_entries_callback is not None and outcome["collected_entries"]:
+                        collected_entries_callback(outcome["folder_name"], outcome["collected_entries"])
+                    if outcome["status"] == "done":
+                        done_this_run += 1
+                    else:
+                        failed_this_run += 1
+
+            if defer_tracking_refresh:
+                _flush_tracking_month(month_key)
 
         for month_key in sorted(touched_months):
             _write_month_summary(state, tracking_excel_path, state_file.parent, month_key)
+
+        if defer_tracking_refresh and tracking_excel_path.exists():
+            from core.analyses.clonality.tracking_dashboard import refresh_clonality_tracking_dashboard
+
+            refresh_clonality_tracking_dashboard(tracking_excel_path)
 
         log(
             f"[BACKFILL] Finished {month or 'all'} | done={done_this_run} failed={failed_this_run} "
@@ -208,10 +401,6 @@ def run_clonality_backfill(
         )
         return state
     finally:
-        if previous_disable_mp is None:
-            os.environ.pop("FRAGGLER_DISABLE_MULTIPROCESSING", None)
-        else:
-            os.environ["FRAGGLER_DISABLE_MULTIPROCESSING"] = previous_disable_mp
         APP_SETTINGS.clear()
         APP_SETTINGS.update(settings_backup)
 
@@ -242,9 +431,22 @@ def _load_state(
     return state
 
 
+def _discover_pending_tracking_spills(spill_root: Path) -> dict[str, list[Path]]:
+    pending: dict[str, list[Path]] = {}
+    if not spill_root.exists():
+        return pending
+    for month_dir in sorted(path for path in spill_root.iterdir() if path.is_dir()):
+        spill_paths = sorted(path for path in month_dir.glob("*.pkl") if path.is_file())
+        if spill_paths:
+            pending[month_dir.name] = spill_paths
+    return pending
+
+
 def _save_state(state_file: Path, state: dict[str, Any]) -> None:
     state["updated_at"] = _timestamp()
-    tmp_file = state_file.with_name(f"{state_file.name}.tmp")
+    tmp_file = state_file.with_name(
+        f"{state_file.name}.tmp.{os.getpid()}.{threading.get_ident()}"
+    )
     tmp_file.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
     tmp_file.replace(state_file)
 
@@ -578,8 +780,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output-base", type=Path, default=DEFAULT_OUTPUT_BASE)
     parser.add_argument("--tracking-excel-path", type=Path, default=DEFAULT_TRACKING_EXCEL)
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE_FILE)
-    parser.add_argument("--max-workers", type=int, default=1)
+    parser.add_argument("--max-workers", type=int, default=None)
+    parser.add_argument("--folder-workers", type=int, default=None, help="Parallel top-level folders to run inside each month.")
     parser.add_argument("--retry-failed", action="store_true")
+    parser.add_argument("--refresh-each-folder", action="store_true", help="Refresh the tracking workbook/dashboard after every folder instead of deferring to month boundaries.")
     return parser
 
 
@@ -594,7 +798,9 @@ def main(argv: list[str] | None = None) -> int:
         tracking_excel_path=args.tracking_excel_path,
         state_file=args.state_file,
         max_workers=args.max_workers,
+        folder_workers=args.folder_workers,
         retry_failed=args.retry_failed,
+        defer_tracking_refresh=not args.refresh_each_folder,
     )
     return 0
 

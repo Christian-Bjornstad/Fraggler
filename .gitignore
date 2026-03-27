@@ -30,6 +30,9 @@ fraggler_offline_linux/
 fraggler_offline_linux
 TEST_REPORTS/
 TEST_REPORTS_RERUN/
+validation_outputs/
+.pytest_cache/
+release_artifacts/
 
 # Notes
 Notes.txt

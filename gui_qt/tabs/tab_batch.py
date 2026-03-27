@@ -282,8 +282,10 @@ class TabBatch(QWidget):
         self.btn_scan = QPushButton("Find Jobs")
         self.btn_run = QPushButton("Run Batch")
         self.btn_run.setObjectName("PrimaryButton")
-        self.btn_run.setEnabled(False)
         self.btn_open = QPushButton("Open Output")
+        self.btn_curate = QPushButton("Curate Gold Labels")
+        self.btn_curate.setObjectName("CurateButton")
+        self.btn_curate.setToolTip("Launch the interactive Gold Label Annotator for expert curation.")
 
         self.progress = QProgressBar()
         self.progress.setValue(0)
@@ -340,6 +342,7 @@ class TabBatch(QWidget):
         self.btn_scan.clicked.connect(self.on_scan)
         self.btn_run.clicked.connect(self.on_run)
         self.btn_open.clicked.connect(self.on_open_output)
+        self.btn_curate.clicked.connect(self.on_curate)
         self.output_base.textChanged.connect(self._refresh_dashboard)
         self.table.itemSelectionChanged.connect(self._refresh_dashboard)
         
@@ -465,6 +468,7 @@ class TabBatch(QWidget):
         actions_row.addWidget(self.btn_scan)
         actions_row.addWidget(self.btn_run)
         actions_row.addWidget(self.btn_open)
+        actions_row.addWidget(self.btn_curate)
         actions_row.addStretch()
         layout.addLayout(actions_row)
 
@@ -606,6 +610,9 @@ class TabBatch(QWidget):
             f"Pending {counts['pending']}   •   Running {counts['running']}   •   Complete {counts['success']}   •   Errors {counts['error']}"
         )
         self.dashboard_title.setText(f"{analysis_name} Workflow")
+        
+        # Only show Curate button for Clonality
+        self.btn_curate.setVisible(self._current_analysis_id == "clonality")
 
     def _build_general_selector_card(self, title: str, subtitle: str, field: QWidget) -> QWidget:
         card = QFrame()
@@ -1081,3 +1088,39 @@ class TabBatch(QWidget):
                 return str(first_item.parent)
             return str(first_item)
         return ""
+    def on_curate(self):
+        """Launch the Gold Label Annotator with the current context."""
+        # 1. Resolve Data Dir (First input source)
+        data_dir = ""
+        if self.folder_list.count() > 0:
+            data_dir = self.folder_list.item(0).text().strip()
+            
+        # 2. Resolve Candidates Dir (In the output base)
+        out_base = self._resolve_output_path_str()
+        candidates_dir = str(Path(out_base) / "candidate_artifacts") if out_base else ""
+        
+        # 3. Resolve Script Path
+        # qt_app.py is at root. gui_qt/tabs/tab_batch.py is 2 levels deep.
+        bundle_dir = Path(__file__).parent.parent.parent
+        script_path = bundle_dir / "scripts" / "run_gold_label_annotator.py"
+        
+        if not script_path.exists():
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "Annotator Not Found", f"Could not find annotator at {script_path}")
+            return
+
+        # 4. Launch via Subprocess using use current python
+        python_exe = sys.executable
+        cmd = [python_exe, str(script_path)]
+        if data_dir:
+            cmd.extend(["--data-dir", data_dir])
+        if out_base:
+             cmd.extend(["--candidates-dir", candidates_dir])
+             
+        try:
+            subprocess.Popen(cmd)
+            self._set_workflow_status("Launched Expert Annotator", "success")
+        except Exception as e:
+            from PyQt6.QtWidgets import QMessageBox
+            QMessageBox.critical(self, "Launch Error", f"Failed to launch annotator: {e}")
+            self._set_workflow_status("Annotator launch failed", "error")

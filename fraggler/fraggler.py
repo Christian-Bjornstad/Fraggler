@@ -519,13 +519,19 @@ def estimate_combination_count(peaks, length, distance, cap=None):
     return int(total_count)
 
 
-def generate_combinations(fsa):
+def generate_combinations(fsa, max_combinations=100000):
     """
     Implementation of the depth-first search algorithm
     """
     a = fsa.size_standard_peaks
     length = fsa.n_ladder_peaks
     distance = fsa.maxium_allowed_distance_between_size_standard_peaks
+    
+    est = estimate_combination_count(a, length, distance, cap=max_combinations + 1)
+    if est > max_combinations:
+        fsa.best_size_standard_combinations = pd.DataFrame({"combinations": []})
+        return fsa
+
     memo = {}
 
     def dfs(start, path_len, path):

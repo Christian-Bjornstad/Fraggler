@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import copy
+import time
 
 import numpy as np
 import pandas as pd
@@ -58,6 +59,24 @@ SEVERE_WEAK_PEAK_PENALTY = 0.30
 DESCENDING_RECOVERY_R2_FLOOR = 0.9985
 DESCENDING_RECOVERY_MAX_ABS_ERROR = 3.0
 DESCENDING_RECOVERY_MEAN_ABS_ERROR = 1.6
+ASCENDING_RECOVERY_R2_FLOOR = 0.9985
+ASCENDING_RECOVERY_MAX_ABS_ERROR = 3.0
+ASCENDING_RECOVERY_MEAN_ABS_ERROR = 1.6
+ASCENDING_RECOVERY_MIN_INTENSITY = 300.0
+GENERAL_COMPLETION_R2_FLOOR = 0.9985
+GENERAL_COMPLETION_MAX_ABS_ERROR = 3.0
+GENERAL_COMPLETION_MEAN_ABS_ERROR = 1.8
+GENERAL_COMPLETION_MIN_INTENSITY = 300.0
+CORE_COMPLETION_MIN_ASSIGNED = 12
+
+
+def _log_ladder_timing(label: str, phase: str, fsa_path: Path, elapsed_seconds: float, **details: object) -> None:
+    detail_text = ""
+    if details:
+        detail_text = " | " + ", ".join(f"{key}={value}" for key, value in details.items())
+    print_green(
+        f"[{label}][TIMING] {phase} for {fsa_path.name} took {elapsed_seconds:.3f}s{detail_text}"
+    )
 DESCENDING_RECOVERY_MIN_INTENSITY = 350.0
 PARTIAL_RESCUE_MISSING_STEP_PENALTY = 0.50
 ROX_DYEBLOB_HEIGHT_MULTIPLIER = 2.0
@@ -75,6 +94,25 @@ ROX_BEAM_MIN_COMPLETION_RATIO = 0.60
 EARLY_ACCEPT_R2 = 0.99995
 EARLY_ACCEPT_MEAN_ABS_ERROR = 0.35
 EARLY_ACCEPT_MAX_ABS_ERROR = 0.90
+ROX_PREFERRED_TIME_MIN = 1500.0
+ROX_PREFERRED_TIME_MAX = 4000.0
+ROX_PREFERRED_TIME_MARGIN = 75.0
+ROX_HARD_FILTER_TIME_MIN = 1450.0
+ROX_HARD_FILTER_TIME_MAX = 4050.0
+ROX_APEX_SNAP_RADIUS = 6
+ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT = 250.0
+ROX_PREFERRED_SUPPLEMENT_DISTANCE = 15
+ROX_PROFILE_TIME_WEIGHT = 0.10
+ROX_PROFILE_LOW_INTENSITY_WEIGHT = 0.04
+ROX_PROFILE_SEVERE_WEAK_PENALTY = 0.08
+ROX_PROFILE_SEVERE_WEAK_INTENSITY = 80.0
+ROX_BEAM_EXPECTED_GAP_WEIGHT = 0.60
+ROX_EDGE_MISSING_STEP_PENALTY = 0.85
+ROX_NEAR_EDGE_MISSING_STEP_PENALTY = 0.60
+ROX_MIDDLE_MISSING_STEP_PENALTY = 0.35
+ROX_TAIL_EXPANSION_STEPS = 5
+ROX_TAIL_GAP_MULTIPLIER = 3.10
+ROX_PARTIAL_ALIGNMENT_VARIANTS = 8
 
 
 def _project_root_for(path: Path) -> Path | None:
@@ -123,6 +161,17 @@ def _missing_expected_ladder_steps(fsa: FsaFile) -> list[float]:
     expected = _get_expected_ladder_steps(fsa)
     current = np.asarray(getattr(fsa, "ladder_steps", expected), dtype=float)
     missing = [float(bp) for bp in expected if not np.any(np.isclose(current, bp, atol=1e-6))]
+    return missing
+
+
+def _count_missing_low_end_steps(fsa: FsaFile) -> int:
+    expected = _get_expected_ladder_steps(fsa)
+    current = np.asarray(getattr(fsa, "ladder_steps", expected), dtype=float)
+    missing = 0
+    for bp in expected:
+        if np.any(np.isclose(current, bp, atol=1e-6)):
+            break
+        missing += 1
     return missing
 
 
@@ -176,18 +225,30 @@ def _clone_fsa_for_ladder_trial(
     *,
     strip_candidate_table: bool = True,
 ) -> FsaFile:
-    """Deep-copy an FSA while temporarily removing the heavy candidate table."""
-    saved_combinations = None
-    had_combinations = False
-    if strip_candidate_table and hasattr(fsa, "best_size_standard_combinations"):
-        had_combinations = True
-        saved_combinations = getattr(fsa, "best_size_standard_combinations")
-        setattr(fsa, "best_size_standard_combinations", None)
-    try:
-        return copy.deepcopy(fsa)
-    finally:
-        if had_combinations:
-            setattr(fsa, "best_size_standard_combinations", saved_combinations)
+    """Clone only ladder-mutable state while reusing heavy trace payloads."""
+    trial = copy.copy(fsa)
+
+    for attr_name in (
+        "ladder_steps",
+        "expected_ladder_steps",
+        "size_standard_peaks",
+        "best_size_standard",
+        "ladder_missing_expected_steps",
+    ):
+        value = getattr(fsa, attr_name, None)
+        if isinstance(value, np.ndarray):
+            setattr(trial, attr_name, value.copy())
+        elif isinstance(value, list):
+            setattr(trial, attr_name, list(value))
+
+    if hasattr(fsa, "best_size_standard_combinations"):
+        combinations = getattr(fsa, "best_size_standard_combinations")
+        if strip_candidate_table:
+            setattr(trial, "best_size_standard_combinations", None)
+        elif isinstance(combinations, pd.DataFrame):
+            setattr(trial, "best_size_standard_combinations", combinations.copy(deep=False))
+
+    return trial
 
 
 
@@ -240,12 +301,12 @@ def _fit_score_tuple(
     metrics: dict[str, float | int],
     intensity_penalty: float,
     *,
-    missing_count: int = 0,
+    missing_penalty: float = 0.0,
 ) -> tuple[float, float, float, float]:
     return (
         float(metrics.get("mean_abs_error_bp", float("inf")))
         + float(intensity_penalty)
-        + (missing_count * PARTIAL_RESCUE_MISSING_STEP_PENALTY),
+        + float(missing_penalty),
         float(metrics.get("max_abs_error_bp", float("inf"))),
         -float(metrics.get("r2", float("-inf"))),
         float(intensity_penalty),
@@ -263,6 +324,32 @@ def _is_early_accept_candidate(
         and float(metrics.get("mean_abs_error_bp", float("inf"))) <= EARLY_ACCEPT_MEAN_ABS_ERROR
         and float(metrics.get("max_abs_error_bp", float("inf"))) <= EARLY_ACCEPT_MAX_ABS_ERROR
     )
+
+
+def _missing_step_penalty(fsa: FsaFile) -> float:
+    missing_steps = _missing_expected_ladder_steps(fsa)
+    if not missing_steps:
+        return 0.0
+
+    ladder_name = str(getattr(fsa, "ladder", "") or "").upper()
+    expected = _get_expected_ladder_steps(fsa)
+    if "ROX" not in ladder_name or expected.size == 0:
+        return len(missing_steps) * PARTIAL_RESCUE_MISSING_STEP_PENALTY
+
+    penalty = 0.0
+    for missing_bp in missing_steps:
+        idx_matches = np.where(np.isclose(expected, missing_bp, atol=1e-6))[0]
+        if idx_matches.size == 0:
+            penalty += PARTIAL_RESCUE_MISSING_STEP_PENALTY
+            continue
+        idx = int(idx_matches[0])
+        if idx <= 1 or idx >= (len(expected) - 3):
+            penalty += ROX_EDGE_MISSING_STEP_PENALTY
+        elif idx <= 3 or idx >= (len(expected) - 5):
+            penalty += ROX_NEAR_EDGE_MISSING_STEP_PENALTY
+        else:
+            penalty += ROX_MIDDLE_MISSING_STEP_PENALTY
+    return penalty
 
 
 def _estimate_size_standard_combination_count(
@@ -317,22 +404,15 @@ def _build_bounded_rox_candidate_specs(
     global_intensity = float(np.median(positive_intensities)) if positive_intensities.size else 1.0
     global_gap = float(np.median(np.diff(peaks))) if peaks.size > 1 else 1.0
     max_gap = float(getattr(fsa, "maxium_allowed_distance_between_size_standard_peaks", 0.0) or 0.0)
+    expected_bp_gaps = np.diff(expected_steps) if expected_steps.size > 1 else np.array([], dtype=float)
     target_len = int(expected_steps.size)
     min_partial_len = max(10, int(np.ceil(target_len * ROX_BEAM_MIN_COMPLETION_RATIO)))
-
-    transitions: list[list[int]] = []
-    for i in range(len(peaks)):
-        next_indices: list[int] = []
-        for j in range(i + 1, len(peaks)):
-            if (peaks[j] - peaks[i]) > max_gap:
-                break
-            next_indices.append(j)
-        transitions.append(next_indices)
 
     states: list[tuple[float, list[int], float, float]] = []
     for i in range(len(peaks)):
         start_ratio = float(intensities[i]) / max(global_intensity, 1.0)
         start_penalty = max(0.0, 0.90 - start_ratio) * 0.60
+        start_penalty += _rox_peak_time_penalty(float(peaks[i])) * 0.90
         states.append((start_penalty, [i], global_gap, global_gap))
     states.sort(key=lambda item: item[0])
     states = states[:beam_width]
@@ -345,21 +425,44 @@ def _build_bounded_rox_candidate_specs(
         for score, path_indices, mean_gap, last_gap in states:
             last_idx = path_indices[-1]
             remaining_needed = target_len - len(path_indices) - 1
-            for next_idx in transitions[last_idx]:
+            adaptive_gap_limit = max_gap
+            is_tail_expansion = len(path_indices) >= max(1, target_len - ROX_TAIL_EXPANSION_STEPS - 1)
+            if is_tail_expansion:
+                adaptive_gap_limit = max(
+                    adaptive_gap_limit,
+                    float(last_gap) * ROX_TAIL_GAP_MULTIPLIER,
+                    global_gap * ROX_TAIL_GAP_MULTIPLIER,
+                )
+            for next_idx in range(last_idx + 1, len(peaks)):
+                if adaptive_gap_limit > 0 and (peaks[next_idx] - peaks[last_idx]) > adaptive_gap_limit:
+                    break
                 if (len(peaks) - (next_idx + 1)) < max(0, remaining_needed):
                     continue
                 gap = float(peaks[next_idx] - peaks[last_idx])
                 local_target = last_gap if len(path_indices) > 1 else global_gap
-                smooth_penalty = abs(gap - local_target) / max(local_target, 1.0)
-                drift_penalty = abs(gap - mean_gap) / max(mean_gap, 1.0)
+                late_relaxation = 0.35 if is_tail_expansion else 1.0
+                smooth_penalty = (abs(gap - local_target) / max(local_target, 1.0)) * late_relaxation
+                drift_penalty = (abs(gap - mean_gap) / max(mean_gap, 1.0)) * late_relaxation
                 intensity_ratio = float(intensities[next_idx]) / max(global_intensity, 1.0)
                 intensity_penalty = max(0.0, 0.90 - intensity_ratio)
-                edge_penalty = 0.15 if gap > (max_gap * 0.90) else 0.0
+                edge_penalty = (0.05 if is_tail_expansion else 0.15) if gap > (max_gap * 0.90) else 0.0
+                time_penalty = _rox_peak_time_penalty(float(peaks[next_idx])) * 0.90
+                expected_gap_penalty = 0.0
+                gap_position = len(path_indices) - 1
+                if 0 <= gap_position < len(expected_bp_gaps):
+                    expected_gap = float(expected_bp_gaps[gap_position])
+                    if gap_position > 0:
+                        previous_expected_gap = float(expected_bp_gaps[gap_position - 1])
+                        expected_ratio = expected_gap / max(previous_expected_gap, 1.0)
+                        observed_ratio = gap / max(last_gap, 1.0)
+                        expected_gap_penalty = abs(observed_ratio - expected_ratio) * late_relaxation
                 next_score = (
                     float(score)
                     + (smooth_penalty * 1.10)
                     + (drift_penalty * 0.45)
                     + (intensity_penalty * 0.80)
+                    + (expected_gap_penalty * ROX_BEAM_EXPECTED_GAP_WEIGHT)
+                    + time_penalty
                     + edge_penalty
                 )
                 next_mean_gap = gap if len(path_indices) == 1 else ((mean_gap * (len(path_indices) - 1)) + gap) / len(path_indices)
@@ -412,19 +515,105 @@ def _build_bounded_rox_candidate_specs(
     specs = []
     for score, path_indices, _mean_gap, _last_gap in partial_states[:keep_finished]:
         times = peaks[np.asarray(path_indices, dtype=int)]
-        window_size = len(path_indices)
-        max_start = max(0, target_len - window_size)
-        for start_idx in range(max_start + 1):
+        for ladder_steps in _build_partial_rox_step_assignments(
+            expected_steps,
+            times,
+            max_variants=ROX_PARTIAL_ALIGNMENT_VARIANTS,
+        ):
             specs.append(
                 {
                     "times": times,
-                    "ladder_steps": expected_steps[start_idx : start_idx + window_size].copy(),
+                    "ladder_steps": ladder_steps,
                     "beam_score": float(score),
                     "complete": False,
                     "bounded": True,
                 }
             )
     return specs
+
+
+def _round_to_monotonic_indices(position_values: np.ndarray, *, size: int) -> np.ndarray:
+    positions = np.asarray(position_values, dtype=float)
+    if positions.size == 0:
+        return np.array([], dtype=int)
+
+    rounded = np.rint(positions).astype(int)
+    min_allowed = np.arange(positions.size, dtype=int)
+    max_allowed = size - (positions.size - np.arange(positions.size, dtype=int))
+    rounded = np.clip(rounded, min_allowed, max_allowed)
+
+    for idx in range(1, rounded.size):
+        rounded[idx] = max(rounded[idx], rounded[idx - 1] + 1)
+    for idx in range(rounded.size - 2, -1, -1):
+        rounded[idx] = min(rounded[idx], rounded[idx + 1] - 1)
+        rounded[idx] = max(rounded[idx], idx)
+    return rounded
+
+
+def _build_partial_rox_step_assignments(
+    expected_steps: np.ndarray,
+    observed_times: np.ndarray,
+    *,
+    max_variants: int = ROX_PARTIAL_ALIGNMENT_VARIANTS,
+) -> list[np.ndarray]:
+    expected = np.asarray(expected_steps, dtype=float)
+    times = np.asarray(observed_times, dtype=float)
+    target_len = expected.size
+    observed_len = times.size
+    if observed_len == 0 or target_len == 0 or observed_len > target_len:
+        return []
+    if observed_len == target_len:
+        return [expected.copy()]
+
+    assignments: list[np.ndarray] = []
+    seen: set[tuple[int, ...]] = set()
+
+    def add_indices(indices: np.ndarray) -> None:
+        key = tuple(int(value) for value in np.asarray(indices, dtype=int))
+        if len(key) != observed_len or any(b <= a for a, b in zip(key, key[1:])):
+            return
+        if key in seen:
+            return
+        seen.add(key)
+        assignments.append(expected[np.asarray(key, dtype=int)].copy())
+
+    # Baseline contiguous windows remain useful for truly truncated ladders.
+    max_start = max(0, target_len - observed_len)
+    for start_idx in range(max_start + 1):
+        add_indices(np.arange(start_idx, start_idx + observed_len, dtype=int))
+
+    # Add sparse assignments that span wider ROX ranges so partial paths can
+    # keep valid low-end and high-end peaks without forcing a contiguous bp window.
+    span_pairs = [
+        (0, target_len - 1),
+        (0, max(observed_len - 1, target_len - 2)),
+        (1, target_len - 1),
+        (1, max(observed_len, target_len - 2)),
+    ]
+    if observed_len > 1 and times[-1] > times[0]:
+        obs_norm = (times - times[0]) / max(times[-1] - times[0], 1.0)
+    else:
+        obs_norm = np.linspace(0.0, 1.0, observed_len)
+
+    for start_idx, end_idx in span_pairs:
+        start_idx = max(0, int(start_idx))
+        end_idx = min(target_len - 1, int(end_idx))
+        if end_idx - start_idx + 1 < observed_len:
+            continue
+
+        span_steps = expected[start_idx : end_idx + 1]
+        if span_steps.size == observed_len:
+            add_indices(np.arange(start_idx, end_idx + 1, dtype=int))
+            continue
+
+        if span_steps[-1] > span_steps[0]:
+            step_norm = (span_steps - span_steps[0]) / max(span_steps[-1] - span_steps[0], 1.0)
+        else:
+            step_norm = np.linspace(0.0, 1.0, span_steps.size)
+        approx_positions = np.interp(obs_norm, step_norm, np.arange(start_idx, end_idx + 1, dtype=float))
+        add_indices(_round_to_monotonic_indices(approx_positions, size=target_len))
+
+    return assignments[:max_variants]
 
 
 def _select_best_bounded_ladder_fit(
@@ -441,8 +630,12 @@ def _select_best_bounded_ladder_fit(
     best_complete_score = None
     best_partial_fit = None
     best_partial_score = None
+    evaluated_specs = 0
+    matched_specs = 0
+    search_start = time.perf_counter()
 
     for spec in candidate_specs:
+        evaluated_specs += 1
         times = np.asarray(spec.get("times", []), dtype=float)
         ladder_steps = np.asarray(spec.get("ladder_steps", []), dtype=float)
         if times.size == 0 or ladder_steps.size == 0 or times.size != ladder_steps.size:
@@ -460,21 +653,19 @@ def _select_best_bounded_ladder_fit(
             continue
         if not getattr(trial, "fitted_to_model", False):
             continue
+        matched_specs += 1
 
         metrics = compute_ladder_qc_metrics(trial)
         intensity_penalty = _candidate_intensity_penalty(trial)
+        profile_penalty = _candidate_rox_profile_penalty(trial)
         missing_count = len(_missing_expected_ladder_steps(trial))
-        score = _fit_score_tuple(metrics, intensity_penalty, missing_count=missing_count)
-        used_bounded = bool(spec.get("bounded", False))
-        strategy = (
-            "bounded_auto_full"
-            if used_bounded and missing_count == 0
-            else "bounded_auto_partial"
-            if used_bounded
-            else "auto_full"
-            if missing_count == 0
-            else "auto_partial"
+        score = _fit_score_tuple(
+            metrics,
+            intensity_penalty + profile_penalty,
+            missing_penalty=_missing_step_penalty(trial),
         )
+        used_bounded = bool(spec.get("bounded", False))
+        strategy = "auto_full" if missing_count == 0 else "auto_partial"
         note = (
             f"Bounded ROX beam search selected a {'full' if missing_count == 0 else 'partial'} ladder fit "
             f"from explosive candidate space ({spec.get('beam_score', 0.0):.3f})."
@@ -484,6 +675,16 @@ def _select_best_bounded_ladder_fit(
         trial = _set_ladder_fit_metadata(trial, strategy, note)
 
         if _is_early_accept_candidate(metrics, missing_count=missing_count):
+            _log_ladder_timing(
+                "ROX" if not rescue_mode else "ROX-RESCUE",
+                "bounded candidate selection",
+                Path(str(getattr(fsa, "file", "unknown.fsa"))),
+                time.perf_counter() - search_start,
+                candidates=evaluated_specs,
+                fitted=matched_specs,
+                complete=missing_count == 0,
+                rescue=rescue_mode,
+            )
             return trial
         if missing_count == 0:
             if best_complete_score is None or score < best_complete_score:
@@ -495,20 +696,31 @@ def _select_best_bounded_ladder_fit(
             best_partial_fit = trial
             best_partial_score = score
 
-    return best_complete_fit or best_partial_fit
+    selected = best_complete_fit or best_partial_fit
+    if selected is not None:
+        _log_ladder_timing(
+            "ROX" if not rescue_mode else "ROX-RESCUE",
+            "bounded candidate selection",
+            Path(str(getattr(fsa, "file", "unknown.fsa"))),
+            time.perf_counter() - search_start,
+            candidates=evaluated_specs,
+            fitted=matched_specs,
+            complete=best_complete_fit is not None,
+            rescue=rescue_mode,
+        )
+    return selected
 
 
 def _candidate_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
     metrics = compute_ladder_qc_metrics(fsa)
-    intensity_penalty = _candidate_intensity_penalty(fsa)
-    return _fit_score_tuple(metrics, intensity_penalty)
+    intensity_penalty = _candidate_intensity_penalty(fsa) + _candidate_rox_profile_penalty(fsa)
+    return _fit_score_tuple(metrics, intensity_penalty, missing_penalty=_missing_step_penalty(fsa))
 
 
 def _rescue_fit_score(fsa: FsaFile) -> tuple[float, float, float, float]:
     metrics = compute_ladder_qc_metrics(fsa)
-    missing_count = len(_missing_expected_ladder_steps(fsa))
-    intensity_penalty = _candidate_intensity_penalty(fsa)
-    return _fit_score_tuple(metrics, intensity_penalty, missing_count=missing_count)
+    intensity_penalty = _candidate_intensity_penalty(fsa) + _candidate_rox_profile_penalty(fsa)
+    return _fit_score_tuple(metrics, intensity_penalty, missing_penalty=_missing_step_penalty(fsa))
 
 
 def _candidate_intensity_penalty(fsa: FsaFile) -> float:
@@ -575,6 +787,174 @@ def _clean_rox_size_standard_peaks(all_found: np.ndarray, rox_data: np.ndarray) 
     return np.asarray(cleaned, dtype=int)
 
 
+def _snap_peak_times_to_local_apexes(
+    peak_times: np.ndarray,
+    trace: np.ndarray,
+    *,
+    radius: int = ROX_APEX_SNAP_RADIUS,
+) -> np.ndarray:
+    """Snap candidate times to the nearest local apex in a small neighborhood."""
+    peaks = np.asarray(peak_times, dtype=float)
+    signal_trace = np.asarray(trace, dtype=float)
+    if peaks.size == 0 or signal_trace.size == 0:
+        return peaks
+
+    snapped: list[float] = []
+    max_index = signal_trace.size - 1
+    for time_value in peaks:
+        idx = int(np.clip(np.rint(time_value), 0, max_index))
+        lo = max(0, idx - radius)
+        hi = min(signal_trace.size, idx + radius + 1)
+        window = signal_trace[lo:hi]
+        if window.size == 0:
+            snapped.append(float(idx))
+            continue
+        apex_value = float(np.max(window))
+        apex_indices = np.flatnonzero(window == apex_value) + lo
+        if apex_indices.size == 0:
+            snapped.append(float(idx))
+            continue
+        best_idx = int(apex_indices[np.argmin(np.abs(apex_indices - idx))])
+        snapped.append(float(best_idx))
+
+    if not snapped:
+        return np.array([], dtype=float)
+
+    snapped_array = np.asarray(sorted(set(snapped)), dtype=float)
+    return snapped_array
+
+
+def _prepare_rox_size_standard_peaks(
+    peak_times: np.ndarray,
+    trace: np.ndarray,
+    *,
+    expected_count: int,
+) -> np.ndarray:
+    """Snap ROX peaks to apices and hard-trim to the human-good region when safe."""
+    snapped = _snap_peak_times_to_local_apexes(peak_times, trace)
+    if snapped.size == 0:
+        return snapped
+
+    preferred_mask = (
+        (snapped >= ROX_HARD_FILTER_TIME_MIN)
+        & (snapped <= ROX_HARD_FILTER_TIME_MAX)
+    )
+    preferred = snapped[preferred_mask]
+    if preferred.size < max(1, int(expected_count)):
+        lo = int(max(0, np.floor(ROX_HARD_FILTER_TIME_MIN)))
+        hi = int(min(np.asarray(trace, dtype=float).size, np.ceil(ROX_HARD_FILTER_TIME_MAX) + 1))
+        if hi > lo:
+            supplemental_peaks, _ = signal.find_peaks(
+                np.asarray(trace, dtype=float)[lo:hi],
+                height=ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT,
+                distance=ROX_PREFERRED_SUPPLEMENT_DISTANCE,
+            )
+            if supplemental_peaks.size > 0:
+                merged = np.concatenate([snapped, supplemental_peaks.astype(float) + float(lo)])
+                snapped = _snap_peak_times_to_local_apexes(merged, trace)
+                preferred_mask = (
+                    (snapped >= ROX_HARD_FILTER_TIME_MIN)
+                    & (snapped <= ROX_HARD_FILTER_TIME_MAX)
+                )
+                preferred = snapped[preferred_mask]
+    if preferred.size >= max(1, int(expected_count)):
+        return preferred
+    return snapped
+
+
+def _supplement_rox_preferred_region_peaks(
+    peak_times: np.ndarray,
+    trace: np.ndarray,
+    *,
+    expected_count: int,
+    min_distance: float,
+) -> np.ndarray:
+    """Recover moderate ROX peaks in the reviewed time window before later artifacts crowd them out."""
+    peaks = np.asarray(peak_times, dtype=float)
+    signal_trace = np.asarray(trace, dtype=float)
+    if signal_trace.size == 0:
+        return peaks
+
+    preferred_mask = (
+        (peaks >= ROX_HARD_FILTER_TIME_MIN)
+        & (peaks <= ROX_HARD_FILTER_TIME_MAX)
+    )
+    if np.count_nonzero(preferred_mask) >= max(1, int(expected_count)):
+        return peaks
+
+    lo = int(max(0, np.floor(ROX_HARD_FILTER_TIME_MIN)))
+    hi = int(min(signal_trace.size, np.ceil(ROX_HARD_FILTER_TIME_MAX) + 1))
+    if hi <= lo:
+        return peaks
+
+    supplemental_peaks, props = signal.find_peaks(
+        signal_trace[lo:hi],
+        height=ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT,
+        distance=max(1, int(round(float(min_distance)))),
+    )
+    if supplemental_peaks.size == 0:
+        return peaks
+
+    supplemental = supplemental_peaks.astype(float) + float(lo)
+    if peaks.size == 0:
+        return supplemental
+
+    merged = list(peaks.tolist())
+    for candidate in supplemental.tolist():
+        if any(abs(float(existing) - float(candidate)) <= max(2.0, float(min_distance) * 0.35) for existing in merged):
+            continue
+        merged.append(float(candidate))
+    if not merged:
+        return np.array([], dtype=float)
+    return np.asarray(sorted(merged), dtype=float)
+
+
+def _rox_peak_time_penalty(time_value: float) -> float:
+    if time_value < ROX_PREFERRED_TIME_MIN:
+        return max(0.0, (ROX_PREFERRED_TIME_MIN - time_value) / 300.0)
+    if time_value > ROX_PREFERRED_TIME_MAX:
+        return max(0.0, (time_value - ROX_PREFERRED_TIME_MAX) / 300.0)
+    if time_value < (ROX_PREFERRED_TIME_MIN + ROX_PREFERRED_TIME_MARGIN):
+        return ((ROX_PREFERRED_TIME_MIN + ROX_PREFERRED_TIME_MARGIN) - time_value) / 900.0
+    if time_value > (ROX_PREFERRED_TIME_MAX - ROX_PREFERRED_TIME_MARGIN):
+        return (time_value - (ROX_PREFERRED_TIME_MAX - ROX_PREFERRED_TIME_MARGIN)) / 900.0
+    return 0.0
+
+
+def _candidate_rox_profile_penalty(fsa: FsaFile) -> float:
+    best = getattr(fsa, "best_size_standard", None)
+    if best is None:
+        return 0.0
+    ladder_name = str(getattr(fsa, "ladder", "") or "").upper()
+    if "ROX" not in ladder_name:
+        return 0.0
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0:
+        return 0.0
+
+    peak_times = np.asarray(best, dtype=float)
+    peak_idx = np.rint(peak_times).astype(int)
+    valid = (peak_idx >= 0) & (peak_idx < trace.size)
+    if not np.any(valid):
+        return 0.0
+
+    peak_times = peak_times[valid]
+    intensities = trace[peak_idx[valid]]
+    if intensities.size == 0:
+        return 0.0
+
+    time_penalty = sum(_rox_peak_time_penalty(float(time_value)) for time_value in peak_times)
+    low_intensity = np.clip((250.0 - intensities) / 250.0, a_min=0.0, a_max=None)
+    severe_weak = int(np.sum(intensities < ROX_PROFILE_SEVERE_WEAK_INTENSITY))
+
+    return (
+        float(time_penalty) * ROX_PROFILE_TIME_WEIGHT
+        + float(np.sum(low_intensity)) * ROX_PROFILE_LOW_INTENSITY_WEIGHT
+        + (severe_weak * ROX_PROFILE_SEVERE_WEAK_PENALTY)
+    )
+
+
 def _recover_rox_size_standard_peaks_from_baseline(fsa: FsaFile, raw_trace: np.ndarray) -> bool:
     """Retry ROX peak detection on a baseline-corrected trace when the raw pass fails."""
     corrected = np.maximum(np.asarray(raw_trace, dtype=float) - baseline_arPLS(raw_trace), 0.0)
@@ -584,12 +964,24 @@ def _recover_rox_size_standard_peaks_from_baseline(fsa: FsaFile, raw_trace: np.n
         height=fallback_height,
         distance=fsa.min_distance_between_peaks,
     )
-    cleaned = _clean_rox_size_standard_peaks(found_peaks, corrected)
+    supplemented = _supplement_rox_preferred_region_peaks(
+        np.asarray(found_peaks, dtype=float),
+        corrected,
+        expected_count=int(len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float))),
+        min_distance=float(getattr(fsa, "min_distance_between_peaks", 1.0) or 1.0),
+    )
+    cleaned = _clean_rox_size_standard_peaks(np.asarray(supplemented, dtype=int), corrected)
     if len(cleaned) < ROX_BASELINE_FALLBACK_MIN_PEAKS:
         return False
 
+    expected_count = int(len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)))
+    prepared = _prepare_rox_size_standard_peaks(
+        np.asarray(cleaned, dtype=float),
+        corrected,
+        expected_count=expected_count,
+    )
     fsa.size_standard = corrected
-    fsa.size_standard_peaks = np.asarray(cleaned, dtype=int)
+    fsa.size_standard_peaks = np.asarray(prepared, dtype=float)
     fsa.size_standard_baseline_corrected = True
     return True
 
@@ -615,8 +1007,13 @@ def _select_best_ladder_candidate(fsa: FsaFile, ranked_combinations: list[np.nda
 
         metrics = compute_ladder_qc_metrics(trial)
         intensity_penalty = _candidate_intensity_penalty(trial)
+        profile_penalty = _candidate_rox_profile_penalty(trial)
         missing_count = len(_missing_expected_ladder_steps(trial))
-        score = _fit_score_tuple(metrics, intensity_penalty)
+        score = _fit_score_tuple(
+            metrics,
+            intensity_penalty + profile_penalty,
+            missing_penalty=_missing_step_penalty(trial),
+        )
         if _is_early_accept_candidate(metrics, missing_count=missing_count):
             return trial
         if best_score is None or score < best_score:
@@ -642,6 +1039,7 @@ def _build_rox_candidate_specs(
             combination_estimate=combination_estimate,
         )
         if use_bounded:
+            bounded_start = time.perf_counter()
             if not warned_bounded:
                 peak_count = int(len(np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)))
                 print_warning(
@@ -650,6 +1048,16 @@ def _build_rox_candidate_specs(
                 )
                 warned_bounded = True
             specs = _build_bounded_rox_candidate_specs(fsa, allow_partial=allow_partial)
+            _log_ladder_timing(
+                label,
+                "bounded ladder search",
+                fsa_path,
+                time.perf_counter() - bounded_start,
+                peaks=int(len(np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float))),
+                estimate=combination_estimate,
+                specs=len(specs),
+                partial=allow_partial,
+            )
             return specs, True, combination_estimate
 
         fsa = generate_combinations(fsa)
@@ -676,13 +1084,14 @@ def _build_rox_candidate_specs(
 
 
 def _should_attempt_high_end_rox_rescue(fsa: FsaFile, qc: dict[str, float | int]) -> bool:
-    """Only attempt the expensive ROX rescue when the current fit is actually incomplete."""
+    """Only attempt the expensive high-end rescue when the current fit is incomplete."""
     if float(qc.get("r2", float("-inf"))) >= HIGH_END_RESCUE_R2:
         return False
     return bool(_missing_expected_ladder_steps(fsa))
 
 
 def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    rescue_start = time.perf_counter()
     full_steps = _get_expected_ladder_steps(fsa)
     if full_steps.size < 12:
         return None
@@ -692,8 +1101,13 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
     max_skip = min(6, max(0, int(full_steps.size) - 8))
     if max_skip < 1:
         return None
+    low_end_missing = _count_missing_low_end_steps(fsa)
+    max_skip = min(max_skip, max(1, low_end_missing + 1))
+    attempted_skips = 0
+    bounded_attempts = 0
 
     for skip_low in range(1, max_skip + 1):
+        attempted_skips += 1
         trial = _clone_fsa_for_ladder_trial(fsa)
         trial.expected_ladder_steps = full_steps.copy()
         trial.ladder_steps = np.asarray(full_steps[skip_low:], dtype=float)
@@ -712,6 +1126,8 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
                 fsa_path=fsa_path,
                 allow_partial=True,
             )
+            if used_bounded:
+                bounded_attempts += 1
             if not candidate_specs:
                 continue
 
@@ -727,10 +1143,13 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
             if not getattr(trial, "fitted_to_model", False):
                 continue
 
+            metrics = compute_ladder_qc_metrics(trial)
             score = _rescue_fit_score(trial)
             if best_score is None or score < best_score:
                 best_fit = trial
                 best_score = score
+            if _is_early_accept_candidate(metrics, missing_count=len(_missing_expected_ladder_steps(trial))):
+                break
         except Exception:
             continue
 
@@ -742,6 +1161,16 @@ def _try_high_end_ladder_rescue(fsa: FsaFile, label: str, fsa_path: Path) -> Fsa
             "high_end_rescue",
             f"High-end rescue used the stable top {kept}/{total} ladder steps because the lower ROX region was unreliable.",
         )
+    _log_ladder_timing(
+        label,
+        "high-end rescue",
+        fsa_path,
+        time.perf_counter() - rescue_start,
+        skip_trials=attempted_skips,
+        low_end_missing=low_end_missing,
+        bounded_trials=bounded_attempts,
+        rescued=best_fit is not None,
+    )
     return best_fit
 
 
@@ -874,6 +1303,461 @@ def _try_descending_low_end_completion(fsa: FsaFile, label: str, fsa_path: Path)
             f"({added_text} bp)."
         )
 
+    return _set_ladder_fit_metadata(trial, "high_end_rescue", note)
+
+
+def _try_ascending_high_end_completion(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    expected = _get_expected_ladder_steps(fsa)
+    current_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    current_times = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+    candidate_times = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    ladder_model = getattr(fsa, "ladder_model", None)
+
+    if (
+        expected.size == 0
+        or current_steps.size == 0
+        or current_times.size != current_steps.size
+        or candidate_times.size == 0
+        or ladder_model is None
+    ):
+        return None
+
+    full_times = np.full(expected.size, np.nan, dtype=float)
+    step_map = _map_step_indices(current_steps, expected)
+    for current_idx, full_idx in step_map.items():
+        full_times[full_idx] = current_times[current_idx]
+
+    missing_indices = [idx for idx, value in enumerate(full_times) if np.isnan(value)]
+    if not missing_indices:
+        return None
+
+    highest_present = max((idx for idx, value in enumerate(full_times) if not np.isnan(value)), default=-1)
+    high_end_missing = [idx for idx in missing_indices if idx > highest_present]
+    if not high_end_missing:
+        return None
+
+    xs = np.arange(trace.size, dtype=float)
+    predicted_bp = np.asarray(ladder_model.predict(xs.reshape(-1, 1)), dtype=float)
+    anchor_intensities = trace[np.rint(current_times).astype(int)]
+    median_anchor_intensity = float(np.median(anchor_intensities)) if anchor_intensities.size else 0.0
+    used_times = {round(float(t), 6) for t in current_times}
+    added_steps: list[float] = []
+
+    for step_idx in high_end_missing:
+        lower_indices = [idx for idx in range(step_idx - 1, -1, -1) if not np.isnan(full_times[idx])]
+        if not lower_indices:
+            continue
+
+        prev_idx = lower_indices[0]
+        prev_time = float(full_times[prev_idx])
+        target_bp = float(expected[step_idx])
+        target_time = int(np.argmin(np.abs(predicted_bp - target_bp)))
+        gap_from_prev = max(18.0, abs(target_time - prev_time))
+        search_radius = min(140.0, max(35.0, gap_from_prev * 0.8))
+        lo = max(prev_time + 1.0, target_time - search_radius)
+        hi = min(float(trace.size - 1), target_time + search_radius)
+        if hi <= lo:
+            continue
+
+        candidates_in_window: list[tuple[float, float]] = []
+        for candidate_time in candidate_times:
+            candidate_time = float(candidate_time)
+            if round(candidate_time, 6) in used_times:
+                continue
+            if not (lo <= candidate_time <= hi):
+                continue
+            intensity = float(trace[int(round(candidate_time))])
+            candidates_in_window.append((candidate_time, intensity))
+
+        if not candidates_in_window:
+            continue
+
+        def candidate_score(item: tuple[float, float]) -> tuple[float, float, float]:
+            candidate_time, intensity = item
+            distance_penalty = abs(candidate_time - target_time)
+            if median_anchor_intensity > 0:
+                relative_intensity = intensity / median_anchor_intensity
+            else:
+                relative_intensity = 1.0
+            weak_penalty = max(0.0, 0.30 - relative_intensity)
+            return (
+                distance_penalty,
+                weak_penalty,
+                -intensity,
+            )
+
+        chosen_time, chosen_intensity = min(candidates_in_window, key=candidate_score)
+        if chosen_intensity < ASCENDING_RECOVERY_MIN_INTENSITY:
+            continue
+
+        full_times[step_idx] = chosen_time
+        used_times.add(round(chosen_time, 6))
+        added_steps.append(target_bp)
+
+    if not added_steps:
+        return None
+
+    assigned_mask = ~np.isnan(full_times)
+    assigned_times = full_times[assigned_mask]
+    assigned_steps = expected[assigned_mask]
+    if assigned_times.size < current_times.size or np.any(np.diff(assigned_times) <= 0):
+        return None
+
+    trial = _clone_fsa_for_ladder_trial(fsa)
+    trial.expected_ladder_steps = expected.copy()
+    trial.ladder_steps = np.asarray(assigned_steps, dtype=float)
+    trial.best_size_standard = np.asarray(assigned_times, dtype=float)
+    trial.n_ladder_peaks = trial.ladder_steps.size
+
+    try:
+        trial = fit_size_standard_to_ladder(trial)
+        if not getattr(trial, "fitted_to_model", False):
+            return None
+        qc = compute_ladder_qc_metrics(trial)
+    except Exception:
+        return None
+
+    if (
+        qc["r2"] < ASCENDING_RECOVERY_R2_FLOOR
+        or qc["max_abs_error_bp"] > ASCENDING_RECOVERY_MAX_ABS_ERROR
+        or qc["mean_abs_error_bp"] > ASCENDING_RECOVERY_MEAN_ABS_ERROR
+    ):
+        return None
+
+    note = (
+        f"Ascending high-end completion recovered upper ladder steps "
+        f"({', '.join(f'{bp:.0f}' for bp in added_steps)} bp)."
+    )
+    return _set_ladder_fit_metadata(trial, "high_end_rescue", note)
+
+
+def _candidate_time_window_for_missing_step(
+    full_times: np.ndarray,
+    step_idx: int,
+    target_time: float,
+    trace_size: int,
+) -> tuple[float, float]:
+    lower_time = None
+    upper_time = None
+    for idx in range(step_idx - 1, -1, -1):
+        if not np.isnan(full_times[idx]):
+            lower_time = float(full_times[idx])
+            break
+    for idx in range(step_idx + 1, len(full_times)):
+        if not np.isnan(full_times[idx]):
+            upper_time = float(full_times[idx])
+            break
+
+    if lower_time is not None and upper_time is not None:
+        left_gap = max(24.0, target_time - lower_time)
+        right_gap = max(24.0, upper_time - target_time)
+        lo = max(lower_time + 1.0, target_time - (left_gap * 0.85))
+        hi = min(upper_time - 1.0, target_time + (right_gap * 0.85))
+    elif lower_time is not None:
+        gap = max(35.0, target_time - lower_time)
+        lo = max(lower_time + 1.0, target_time - (gap * 0.60))
+        hi = min(float(trace_size - 1), target_time + min(150.0, gap * 0.90))
+    elif upper_time is not None:
+        gap = max(35.0, upper_time - target_time)
+        lo = max(0.0, target_time - min(150.0, gap * 0.90))
+        hi = min(upper_time - 1.0, target_time + (gap * 0.60))
+    else:
+        lo = max(0.0, target_time - 120.0)
+        hi = min(float(trace_size - 1), target_time + 120.0)
+    return lo, hi
+
+
+def _estimate_missing_step_time_from_assigned(
+    expected_steps: np.ndarray,
+    full_times: np.ndarray,
+    step_idx: int,
+    fallback_time: float,
+) -> float:
+    assigned = [
+        (idx, float(expected_steps[idx]), float(full_times[idx]))
+        for idx in range(len(expected_steps))
+        if not np.isnan(full_times[idx])
+    ]
+    if len(assigned) < 2:
+        return float(fallback_time)
+
+    lower = [item for item in assigned if item[0] < step_idx]
+    upper = [item for item in assigned if item[0] > step_idx]
+    target_bp = float(expected_steps[step_idx])
+
+    if lower and upper:
+        left_idx, left_bp, left_time = lower[-1]
+        right_idx, right_bp, right_time = upper[0]
+        if right_bp > left_bp and right_time > left_time:
+            ratio = (target_bp - left_bp) / max(right_bp - left_bp, 1.0)
+            return float(left_time + (ratio * (right_time - left_time)))
+
+    if len(lower) >= 2:
+        left0 = lower[-2]
+        left1 = lower[-1]
+        bp_delta = left1[1] - left0[1]
+        time_delta = left1[2] - left0[2]
+        if bp_delta > 0 and time_delta > 0:
+            slope = time_delta / bp_delta
+            return float(left1[2] + ((target_bp - left1[1]) * slope))
+
+    if len(upper) >= 2:
+        right0 = upper[0]
+        right1 = upper[1]
+        bp_delta = right1[1] - right0[1]
+        time_delta = right1[2] - right0[2]
+        if bp_delta > 0 and time_delta > 0:
+            slope = time_delta / bp_delta
+            return float(right0[2] - ((right0[1] - target_bp) * slope))
+
+    return float(fallback_time)
+
+
+def _try_complete_missing_steps_by_prediction(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    expected = _get_expected_ladder_steps(fsa)
+    current_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    current_times = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+    candidate_times = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    ladder_model = getattr(fsa, "ladder_model", None)
+
+    if (
+        expected.size == 0
+        or current_steps.size == 0
+        or current_times.size != current_steps.size
+        or candidate_times.size == 0
+        or ladder_model is None
+        or trace.size == 0
+    ):
+        return None
+
+    full_times = np.full(expected.size, np.nan, dtype=float)
+    step_map = _map_step_indices(current_steps, expected)
+    for current_idx, full_idx in step_map.items():
+        full_times[full_idx] = current_times[current_idx]
+
+    missing_indices = [idx for idx, value in enumerate(full_times) if np.isnan(value)]
+    if not missing_indices:
+        return None
+
+    xs = np.arange(trace.size, dtype=float)
+    predicted_bp = np.asarray(ladder_model.predict(xs.reshape(-1, 1)), dtype=float)
+    anchor_intensities = trace[np.rint(current_times).astype(int)]
+    median_anchor_intensity = float(np.median(anchor_intensities)) if anchor_intensities.size else 0.0
+    used_times = {round(float(t), 6) for t in current_times}
+    added_steps: list[float] = []
+
+    for step_idx in missing_indices:
+        target_bp = float(expected[step_idx])
+        fallback_time = float(int(np.argmin(np.abs(predicted_bp - target_bp))))
+        target_time = _estimate_missing_step_time_from_assigned(
+            expected,
+            full_times,
+            step_idx,
+            fallback_time,
+        )
+        lo, hi = _candidate_time_window_for_missing_step(full_times, step_idx, target_time, trace.size)
+        if hi <= lo:
+            continue
+
+        candidates_in_window: list[tuple[float, float]] = []
+        for candidate_time in candidate_times:
+            candidate_time = float(candidate_time)
+            if round(candidate_time, 6) in used_times:
+                continue
+            if not (lo <= candidate_time <= hi):
+                continue
+            intensity = float(trace[int(round(candidate_time))])
+            candidates_in_window.append((candidate_time, intensity))
+
+        if not candidates_in_window:
+            continue
+
+        def candidate_score(item: tuple[float, float]) -> tuple[float, float, float]:
+            candidate_time, intensity = item
+            distance_penalty = abs(candidate_time - target_time)
+            if median_anchor_intensity > 0:
+                relative_intensity = intensity / median_anchor_intensity
+            else:
+                relative_intensity = 1.0
+            weak_penalty = max(0.0, 0.28 - relative_intensity)
+            return (
+                distance_penalty,
+                weak_penalty,
+                -intensity,
+            )
+
+        chosen_time, chosen_intensity = min(candidates_in_window, key=candidate_score)
+        if chosen_intensity < GENERAL_COMPLETION_MIN_INTENSITY:
+            continue
+
+        full_times[step_idx] = chosen_time
+        used_times.add(round(chosen_time, 6))
+        added_steps.append(target_bp)
+
+    if not added_steps:
+        return None
+
+    assigned_mask = ~np.isnan(full_times)
+    assigned_times = full_times[assigned_mask]
+    assigned_steps = expected[assigned_mask]
+    if assigned_times.size < current_times.size or np.any(np.diff(assigned_times) <= 0):
+        return None
+
+    trial = _clone_fsa_for_ladder_trial(fsa)
+    trial.expected_ladder_steps = expected.copy()
+    trial.ladder_steps = np.asarray(assigned_steps, dtype=float)
+    trial.best_size_standard = np.asarray(assigned_times, dtype=float)
+    trial.n_ladder_peaks = trial.ladder_steps.size
+
+    try:
+        trial = fit_size_standard_to_ladder(trial)
+        if not getattr(trial, "fitted_to_model", False):
+            return None
+        qc = compute_ladder_qc_metrics(trial)
+    except Exception:
+        return None
+
+    if (
+        qc["r2"] < GENERAL_COMPLETION_R2_FLOOR
+        or qc["max_abs_error_bp"] > GENERAL_COMPLETION_MAX_ABS_ERROR
+        or qc["mean_abs_error_bp"] > GENERAL_COMPLETION_MEAN_ABS_ERROR
+    ):
+        return None
+
+    note = (
+        f"Predicted-step completion recovered missing ladder steps "
+        f"({', '.join(f'{bp:.0f}' for bp in added_steps)} bp)."
+    )
+    return _set_ladder_fit_metadata(trial, "high_end_rescue", note)
+
+
+def _try_core_anchored_step_completion(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    expected = _get_expected_ladder_steps(fsa)
+    current_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    current_times = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+    if current_steps.size < CORE_COMPLETION_MIN_ASSIGNED or current_times.size != current_steps.size:
+        return None
+
+    full_times = np.full(expected.size, np.nan, dtype=float)
+    step_map = _map_step_indices(current_steps, expected)
+    for current_idx, full_idx in step_map.items():
+        full_times[full_idx] = current_times[current_idx]
+
+    assigned_indices = [idx for idx, value in enumerate(full_times) if not np.isnan(value)]
+    if len(assigned_indices) < CORE_COMPLETION_MIN_ASSIGNED:
+        return None
+
+    # Anchor around the longest assigned contiguous run and then grow outward.
+    runs: list[list[int]] = []
+    current_run: list[int] = []
+    for idx in assigned_indices:
+        if not current_run or idx == current_run[-1] + 1:
+            current_run.append(idx)
+        else:
+            runs.append(current_run)
+            current_run = [idx]
+    if current_run:
+        runs.append(current_run)
+    if not runs:
+        return None
+
+    core_run = max(runs, key=len)
+    core_start = core_run[0]
+    core_end = core_run[-1]
+    if len(core_run) < 8:
+        return None
+
+    candidate_times = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    ladder_model = getattr(fsa, "ladder_model", None)
+    if candidate_times.size == 0 or trace.size == 0 or ladder_model is None:
+        return None
+
+    xs = np.arange(trace.size, dtype=float)
+    predicted_bp = np.asarray(ladder_model.predict(xs.reshape(-1, 1)), dtype=float)
+    anchor_intensities = trace[np.rint(current_times).astype(int)]
+    median_anchor_intensity = float(np.median(anchor_intensities)) if anchor_intensities.size else 0.0
+    used_times = {round(float(t), 6) for t in current_times}
+    added_steps: list[float] = []
+
+    expansion_order = list(range(core_start - 1, -1, -1)) + list(range(core_end + 1, len(expected)))
+    for step_idx in expansion_order:
+        if not np.isnan(full_times[step_idx]):
+            continue
+        target_bp = float(expected[step_idx])
+        fallback_time = float(int(np.argmin(np.abs(predicted_bp - target_bp))))
+        target_time = _estimate_missing_step_time_from_assigned(expected, full_times, step_idx, fallback_time)
+        lo, hi = _candidate_time_window_for_missing_step(full_times, step_idx, target_time, trace.size)
+        if hi <= lo:
+            continue
+
+        candidates_in_window: list[tuple[float, float]] = []
+        for candidate_time in candidate_times:
+            candidate_time = float(candidate_time)
+            if round(candidate_time, 6) in used_times:
+                continue
+            if not (lo <= candidate_time <= hi):
+                continue
+            intensity = float(trace[int(round(candidate_time))])
+            candidates_in_window.append((candidate_time, intensity))
+
+        if not candidates_in_window:
+            continue
+
+        def candidate_score(item: tuple[float, float]) -> tuple[float, float, float]:
+            candidate_time, intensity = item
+            distance_penalty = abs(candidate_time - target_time)
+            if median_anchor_intensity > 0:
+                relative_intensity = intensity / median_anchor_intensity
+            else:
+                relative_intensity = 1.0
+            weak_penalty = max(0.0, 0.30 - relative_intensity)
+            return (distance_penalty, weak_penalty, -intensity)
+
+        chosen_time, chosen_intensity = min(candidates_in_window, key=candidate_score)
+        if chosen_intensity < GENERAL_COMPLETION_MIN_INTENSITY:
+            continue
+
+        full_times[step_idx] = chosen_time
+        used_times.add(round(chosen_time, 6))
+        added_steps.append(target_bp)
+
+    if not added_steps:
+        return None
+
+    assigned_mask = ~np.isnan(full_times)
+    assigned_times = full_times[assigned_mask]
+    assigned_steps = expected[assigned_mask]
+    if assigned_times.size < current_times.size or np.any(np.diff(assigned_times) <= 0):
+        return None
+
+    trial = _clone_fsa_for_ladder_trial(fsa)
+    trial.expected_ladder_steps = expected.copy()
+    trial.ladder_steps = np.asarray(assigned_steps, dtype=float)
+    trial.best_size_standard = np.asarray(assigned_times, dtype=float)
+    trial.n_ladder_peaks = trial.ladder_steps.size
+
+    try:
+        trial = fit_size_standard_to_ladder(trial)
+        if not getattr(trial, "fitted_to_model", False):
+            return None
+        qc = compute_ladder_qc_metrics(trial)
+    except Exception:
+        return None
+
+    if (
+        qc["r2"] < GENERAL_COMPLETION_R2_FLOOR
+        or qc["max_abs_error_bp"] > GENERAL_COMPLETION_MAX_ABS_ERROR
+        or qc["mean_abs_error_bp"] > GENERAL_COMPLETION_MEAN_ABS_ERROR
+    ):
+        return None
+
+    note = (
+        f"Core-anchored completion recovered missing ladder steps "
+        f"({', '.join(f'{bp:.0f}' for bp in added_steps)} bp)."
+    )
     return _set_ladder_fit_metadata(trial, "high_end_rescue", note)
 
 
@@ -1083,7 +1967,7 @@ def analyse_fsa_liz(
                     qc = compute_ladder_qc_metrics(fsa)
                     if qc["r2"] >= 0.9995 and not _missing_expected_ladder_steps(fsa):
                         return _finalize_auto_fit_metadata(fsa)
-                    if qc["r2"] < HIGH_END_RESCUE_R2:
+                    if _should_attempt_high_end_rox_rescue(fsa, qc):
                         rescued = _try_high_end_ladder_rescue(fsa, "LIZ", fsa_path)
                         if rescued is not None and _rescue_fit_score(rescued) < _rescue_fit_score(fsa):
                             kept = len(getattr(rescued, "ladder_steps", []))
@@ -1147,12 +2031,23 @@ def analyse_fsa_rox(
     )
     base_fsa = find_size_standard_peaks(base_fsa)
     base_raw_rox = np.asarray(base_fsa.fsa["DATA4"], dtype=float)
+    base_found = np.asarray(getattr(base_fsa, "size_standard_peaks", []), dtype=float)
+    base_supplemented = _supplement_rox_preferred_region_peaks(
+        base_found,
+        base_raw_rox,
+        expected_count=int(len(np.asarray(getattr(base_fsa, "ladder_steps", []), dtype=float))),
+        min_distance=float(getattr(base_fsa, "min_distance_between_peaks", 1.0) or 1.0),
+    )
     base_cleaned = _clean_rox_size_standard_peaks(
-        np.asarray(getattr(base_fsa, "size_standard_peaks", []), dtype=int),
+        np.asarray(base_supplemented, dtype=int),
         base_raw_rox,
     )
     if len(base_cleaned) >= ROX_BASELINE_FALLBACK_MIN_PEAKS:
-        base_fsa.size_standard_peaks = base_cleaned
+        base_fsa.size_standard_peaks = _prepare_rox_size_standard_peaks(
+            np.asarray(base_cleaned, dtype=float),
+            base_raw_rox,
+            expected_count=int(len(np.asarray(getattr(base_fsa, "ladder_steps", []), dtype=float))),
+        )
     else:
         _recover_rox_size_standard_peaks_from_baseline(base_fsa, base_raw_rox)
     
@@ -1176,9 +2071,19 @@ def analyse_fsa_rox(
 
         all_found = getattr(fsa, "size_standard_peaks", None)
         if all_found is not None:
-            cleaned = _clean_rox_size_standard_peaks(np.asarray(all_found), rox_data)
+            supplemented = _supplement_rox_preferred_region_peaks(
+                np.asarray(all_found, dtype=float),
+                rox_data,
+                expected_count=int(len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float))),
+                min_distance=float(getattr(fsa, "min_distance_between_peaks", 1.0) or 1.0),
+            )
+            cleaned = _clean_rox_size_standard_peaks(np.asarray(supplemented, dtype=int), rox_data)
             if len(cleaned) >= ROX_BASELINE_FALLBACK_MIN_PEAKS:
-                fsa.size_standard_peaks = np.array(cleaned)
+                fsa.size_standard_peaks = _prepare_rox_size_standard_peaks(
+                    np.asarray(cleaned, dtype=float),
+                    rox_data,
+                    expected_count=int(len(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float))),
+                )
             elif _recover_rox_size_standard_peaks_from_baseline(fsa, rox_data):
                 print_green(f"[ROX] Baseline-corrected ladder detection used for {fsa_path.name}")
         elif _recover_rox_size_standard_peaks_from_baseline(fsa, rox_data):
@@ -1250,6 +2155,36 @@ def analyse_fsa_rox(
                                         )
                                     fsa = completed
                                     qc = compute_ladder_qc_metrics(fsa)
+                    high_completed = _try_ascending_high_end_completion(fsa, "ROX", fsa_path)
+                    if high_completed is not None:
+                        current_score = _rescue_fit_score(fsa)
+                        completed_score = _rescue_fit_score(high_completed)
+                        current_steps = len(getattr(fsa, "ladder_steps", []))
+                        completed_steps = len(getattr(high_completed, "ladder_steps", []))
+                        if completed_steps > current_steps or (
+                            completed_steps == current_steps and completed_score < current_score
+                        ):
+                            fsa = high_completed
+                    general_completed = _try_complete_missing_steps_by_prediction(fsa, "ROX", fsa_path)
+                    if general_completed is not None:
+                        current_score = _rescue_fit_score(fsa)
+                        completed_score = _rescue_fit_score(general_completed)
+                        current_steps = len(getattr(fsa, "ladder_steps", []))
+                        completed_steps = len(getattr(general_completed, "ladder_steps", []))
+                        if completed_steps > current_steps or (
+                            completed_steps == current_steps and completed_score < current_score
+                        ):
+                            fsa = general_completed
+                    core_completed = _try_core_anchored_step_completion(fsa, "ROX", fsa_path)
+                    if core_completed is not None:
+                        current_score = _rescue_fit_score(fsa)
+                        completed_score = _rescue_fit_score(core_completed)
+                        current_steps = len(getattr(fsa, "ladder_steps", []))
+                        completed_steps = len(getattr(core_completed, "ladder_steps", []))
+                        if completed_steps > current_steps or (
+                            completed_steps == current_steps and completed_score < current_score
+                        ):
+                            fsa = core_completed
                     return _finalize_auto_fit_metadata(fsa)
             except ValueError:
                 pass
