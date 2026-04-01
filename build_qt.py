@@ -126,6 +126,24 @@ def _write_text(path: Path, text: str) -> None:
     path.write_text(text, encoding="utf-8")
 
 
+def _remove_path(path: Path) -> None:
+    if path.is_dir():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _prepare_build_dirs() -> None:
+    # Clear platform-specific outputs up front so PyInstaller does not trip
+    # over stale bundles from a previous Linux/macOS build in the same repo.
+    for path in [
+        DIST_DIR / APP_NAME,
+        DIST_DIR / f"{APP_NAME}.app",
+        PROJECT_ROOT / "build" / APP_NAME,
+    ]:
+        _remove_path(path)
+
+
 def _zip_path(src: Path, zip_path: Path, root_name: str | None = None) -> Path:
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
@@ -133,12 +151,22 @@ def _zip_path(src: Path, zip_path: Path, root_name: str | None = None) -> Path:
             for file_path in sorted(src.rglob("*")):
                 if file_path.is_dir():
                     continue
+                if file_path.name.startswith("._") or file_path.name == ".DS_Store":
+                    continue
                 rel = file_path.relative_to(src)
                 arcname = Path(root_name or src.name) / rel
                 zf.write(file_path, arcname.as_posix())
         else:
             zf.write(src, (root_name or src.name))
     return zip_path
+
+
+def _remove_macos_metadata_files(root: Path) -> None:
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if path.name.startswith("._") or path.name == ".DS_Store":
+            path.unlink(missing_ok=True)
 
 
 def _post_build_mac() -> None:
@@ -199,6 +227,7 @@ def _post_build_linux() -> None:
     source_dir = DIST_DIR / APP_NAME
     release_dir = _stage_release_dir("Fraggler_Linux")
     shutil.copytree(source_dir, release_dir, dirs_exist_ok=True)
+    _remove_macos_metadata_files(release_dir)
 
     if LEGACY_LINUX_GUIDE.exists():
         shutil.copy2(LEGACY_LINUX_GUIDE, release_dir / "LINUX_GUIDE.md")
@@ -231,6 +260,7 @@ def _post_build_generic_desktop() -> None:
 
 def build_app() -> None:
     print(f"Building Fraggler Diagnostics desktop app for {sys.platform}...")
+    _prepare_build_dirs()
     PyInstaller.__main__.run(_build_pyinstaller_args())
 
     RELEASE_DIR.mkdir(parents=True, exist_ok=True)

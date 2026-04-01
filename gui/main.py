@@ -13,7 +13,7 @@ from pathlib import Path
 import panel as pn
 
 _CSS_PATH = Path(__file__).resolve().parent.parent / "assets" / "app.css"
-_APP_CSS = _CSS_PATH.read_text(encoding="utf-8") if _CSS_PATH.exists() else ""
+_APP_CSS = _CSS_PATH.read_text(encoding="utf-8", errors="replace") if _CSS_PATH.exists() else ""
 
 def build_app() -> pn.Column:
     """Build the full application as a pn.Column (templateless)."""

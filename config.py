@@ -90,6 +90,21 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
                 "patient_id_regex": r"\d{2}OUM\d{5}",
                 "aggregate_dit_reports": True,
             },
+            "archive_runner": {
+                "year_label": "2025",
+                "input_root": str(Path.home()),
+                "output_root": str(Path.home()),
+                "run_name": "",
+                "last_run_root": "",
+                "combined_workbook_path": "",
+                "last_selected_run_root": "",
+                "max_workers": 1,
+                "folder_workers": 1,
+                "resume_existing": False,
+                "include_sl": False,
+                "refresh_each_folder": False,
+                "cleanup_staging_root": False,
+            },
             "pipeline": {
                 "mode": "all",
                 "assay_filter_substring": "",
@@ -216,10 +231,12 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
     for analysis_id, analysis_defaults in DEFAULT_SETTINGS.get("analyses", {}).items():
         profile = analyses.setdefault(analysis_id, {})
         profile_batch = profile.setdefault("batch", {})
+        profile_archive = profile.setdefault("archive_runner", {})
         profile_pipeline = profile.setdefault("pipeline", {})
 
         default_batch = analysis_defaults.get("batch", {})
         default_pipeline = analysis_defaults.get("pipeline", {})
+        default_archive_runner = analysis_defaults.get("archive_runner", {})
 
         if not profile_batch.get("base_input_dir") or profile_batch.get("base_input_dir") == default_batch.get("base_input_dir"):
             profile_batch["base_input_dir"] = batch.get("base_input_dir", default_batch.get("base_input_dir", str(Path.home())))
@@ -241,6 +258,34 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
         ):
             profile_batch["aggregate_dit_reports"] = batch.get("aggregate_dit_reports", default_batch.get("aggregate_dit_reports", True))
 
+        default_archive = analysis_defaults.get("archive_runner", {})
+        if not profile_archive.get("year_label"):
+            profile_archive["year_label"] = default_archive.get("year_label", "2025")
+        if not profile_archive.get("input_root") or profile_archive.get("input_root") == default_archive.get("input_root"):
+            profile_archive["input_root"] = str(Path.home())
+        if not profile_archive.get("output_root") or profile_archive.get("output_root") == default_archive.get("output_root"):
+            profile_archive["output_root"] = str(Path.home())
+        if profile_archive.get("run_name") is None:
+            profile_archive["run_name"] = ""
+        if profile_archive.get("last_run_root") is None:
+            profile_archive["last_run_root"] = ""
+        if profile_archive.get("combined_workbook_path") is None:
+            profile_archive["combined_workbook_path"] = ""
+        if profile_archive.get("last_selected_run_root") is None:
+            profile_archive["last_selected_run_root"] = ""
+        if not isinstance(profile_archive.get("max_workers"), int):
+            profile_archive["max_workers"] = default_archive.get("max_workers", 1)
+        if not isinstance(profile_archive.get("folder_workers"), int):
+            profile_archive["folder_workers"] = default_archive.get("folder_workers", 1)
+        if not isinstance(profile_archive.get("resume_existing"), bool):
+            profile_archive["resume_existing"] = default_archive.get("resume_existing", False)
+        if not isinstance(profile_archive.get("include_sl"), bool):
+            profile_archive["include_sl"] = default_archive.get("include_sl", False)
+        if not isinstance(profile_archive.get("refresh_each_folder"), bool):
+            profile_archive["refresh_each_folder"] = default_archive.get("refresh_each_folder", False)
+        if not isinstance(profile_archive.get("cleanup_staging_root"), bool):
+            profile_archive["cleanup_staging_root"] = default_archive.get("cleanup_staging_root", False)
+
         if not profile_pipeline.get("mode") or profile_pipeline.get("mode") == default_pipeline.get("mode"):
             profile_pipeline["mode"] = pipeline.get("mode", default_pipeline.get("mode", "all"))
         if not profile_pipeline.get("assay_filter_substring"):
@@ -252,6 +297,28 @@ def _migrate_legacy_settings(settings: Dict[str, Any]) -> Dict[str, Any]:
             profile_pipeline.setdefault("primary_peak_channel", default_pipeline.get("primary_peak_channel", GENERAL_DEFAULT_PRIMARY_CHANNEL))
             profile_pipeline.setdefault("bp_min", default_pipeline.get("bp_min", GENERAL_DEFAULT_BP_MIN))
             profile_pipeline.setdefault("bp_max", default_pipeline.get("bp_max", GENERAL_DEFAULT_BP_MAX))
+        if analysis_id == "clonality":
+            archive_runner = profile.setdefault("archive_runner", {})
+            if not isinstance(archive_runner.get("input_root"), str) or not archive_runner.get("input_root"):
+                archive_runner["input_root"] = profile_batch.get("base_input_dir", default_archive_runner.get("input_root", str(Path.home())))
+            if not isinstance(archive_runner.get("output_root"), str) or not archive_runner.get("output_root"):
+                archive_runner["output_root"] = profile_batch.get("output_base", default_archive_runner.get("output_root", str(Path.home())))
+            if not isinstance(archive_runner.get("year_label"), str) or not archive_runner.get("year_label"):
+                archive_runner["year_label"] = default_archive_runner.get("year_label", "2025")
+            if not isinstance(archive_runner.get("run_name"), str):
+                archive_runner["run_name"] = default_archive_runner.get("run_name", "")
+            if not isinstance(archive_runner.get("last_selected_run_root"), str):
+                archive_runner["last_selected_run_root"] = default_archive_runner.get("last_selected_run_root", "")
+            if not isinstance(archive_runner.get("max_workers"), int):
+                archive_runner["max_workers"] = int(default_archive_runner.get("max_workers", 1))
+            if not isinstance(archive_runner.get("folder_workers"), int):
+                archive_runner["folder_workers"] = int(default_archive_runner.get("folder_workers", 1))
+            if not isinstance(archive_runner.get("include_sl"), bool):
+                archive_runner["include_sl"] = bool(default_archive_runner.get("include_sl", False))
+            if not isinstance(archive_runner.get("refresh_each_folder"), bool):
+                archive_runner["refresh_each_folder"] = bool(default_archive_runner.get("refresh_each_folder", False))
+            if not isinstance(archive_runner.get("cleanup_staging_root"), bool):
+                archive_runner["cleanup_staging_root"] = bool(default_archive_runner.get("cleanup_staging_root", False))
 
     return settings
 
@@ -347,6 +414,7 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
     for analysis_id, defaults in DEFAULT_SETTINGS.get("analyses", {}).items():
         profile = analyses.setdefault(analysis_id, {})
         profile_batch = profile.setdefault("batch", {})
+        profile_archive = profile.setdefault("archive_runner", {})
         profile_pipeline = profile.setdefault("pipeline", {})
 
         if not isinstance(profile_batch.get("base_input_dir"), str):
@@ -361,6 +429,34 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
             profile_batch["aggregate_by_patient"] = defaults["batch"]["aggregate_by_patient"]
         if not isinstance(profile_batch.get("aggregate_dit_reports"), bool):
             profile_batch["aggregate_dit_reports"] = defaults["batch"]["aggregate_dit_reports"]
+
+        default_archive = defaults.get("archive_runner", {})
+        if not isinstance(profile_archive.get("year_label"), str):
+            profile_archive["year_label"] = default_archive.get("year_label", "2025")
+        if not isinstance(profile_archive.get("input_root"), str):
+            profile_archive["input_root"] = str(Path.home())
+        if not isinstance(profile_archive.get("output_root"), str):
+            profile_archive["output_root"] = str(Path.home())
+        if not isinstance(profile_archive.get("run_name"), str):
+            profile_archive["run_name"] = ""
+        if not isinstance(profile_archive.get("last_run_root"), str):
+            profile_archive["last_run_root"] = ""
+        if not isinstance(profile_archive.get("combined_workbook_path"), str):
+            profile_archive["combined_workbook_path"] = ""
+        if not isinstance(profile_archive.get("last_selected_run_root"), str):
+            profile_archive["last_selected_run_root"] = ""
+        if not isinstance(profile_archive.get("max_workers"), int):
+            profile_archive["max_workers"] = default_archive.get("max_workers", 1)
+        if not isinstance(profile_archive.get("folder_workers"), int):
+            profile_archive["folder_workers"] = default_archive.get("folder_workers", 1)
+        if not isinstance(profile_archive.get("resume_existing"), bool):
+            profile_archive["resume_existing"] = default_archive.get("resume_existing", False)
+        if not isinstance(profile_archive.get("include_sl"), bool):
+            profile_archive["include_sl"] = default_archive.get("include_sl", False)
+        if not isinstance(profile_archive.get("refresh_each_folder"), bool):
+            profile_archive["refresh_each_folder"] = default_archive.get("refresh_each_folder", False)
+        if not isinstance(profile_archive.get("cleanup_staging_root"), bool):
+            profile_archive["cleanup_staging_root"] = default_archive.get("cleanup_staging_root", False)
 
         if profile_pipeline.get("mode") not in {"all", "controls", "custom"}:
             profile_pipeline["mode"] = defaults["pipeline"]["mode"]

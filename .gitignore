@@ -33,6 +33,8 @@ TEST_REPORTS_RERUN/
 validation_outputs/
 .pytest_cache/
 release_artifacts/
+packaging/linux_offline_deps
+
 
 # Notes
 Notes.txt

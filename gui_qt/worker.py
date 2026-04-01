@@ -21,6 +21,7 @@ class WorkerSignals(QObject):
     progress_max = pyqtSignal(int)
     status = pyqtSignal(str)
     log = pyqtSignal(str)
+    event = pyqtSignal(object)
     
     # Custom signal for batch jobs: (idx, total, name, state)
     progress_ext = pyqtSignal(int, int, str, str)
@@ -57,7 +58,6 @@ class Worker(QRunnable):
         try:
             result = self.fn(*self.args, **self.kwargs)
         except Exception:
-            traceback.print_exc()
             exctype, value = sys.exc_info()[:2]
             self.signals.error.emit((exctype, value, traceback.format_exc()))
         else:

@@ -544,7 +544,7 @@ def _get_tracking_identity_salt() -> str:
     path = Path(salt_path).expanduser() if salt_path else DEFAULT_TRACKING_IDENTITY_SALT_PATH
     try:
         if path.exists():
-            existing = path.read_text(encoding="utf-8").strip()
+            existing = path.read_text(encoding="utf-8", errors="replace").strip()
             if existing:
                 return existing
         path.parent.mkdir(parents=True, exist_ok=True)

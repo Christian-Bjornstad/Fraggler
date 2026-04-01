@@ -1831,7 +1831,7 @@ def load_ladder_adjustment(fsa: FsaFile) -> dict | None:
         if not adj_path.exists():
             continue
         try:
-            with open(adj_path, "r") as f:
+            with open(adj_path, "r", encoding="utf-8", errors="replace") as f:
                 payload = json.load(f)
                 return _normalize_ladder_adjustment_payload(payload)
         except Exception as e:

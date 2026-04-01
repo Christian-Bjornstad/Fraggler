@@ -414,7 +414,7 @@ def _load_state(
 ) -> dict[str, Any]:
     if state_file.exists():
         try:
-            state = json.loads(state_file.read_text(encoding="utf-8"))
+            state = json.loads(state_file.read_text(encoding="utf-8", errors="replace"))
         except Exception:
             state = {}
     else:

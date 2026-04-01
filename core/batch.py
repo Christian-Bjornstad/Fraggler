@@ -48,7 +48,7 @@ def scan_jobs_from_yaml(yaml_path: Path) -> List[Path]:
         return []
         
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
+        with open(yaml_path, "r", encoding="utf-8", errors="replace") as f:
             data = yaml.safe_load(f)
     except Exception as e:
         log(f"[ERROR] Could not parse YAML: {e}")

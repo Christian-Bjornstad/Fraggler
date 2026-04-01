@@ -8,6 +8,7 @@ from PyQt6.QtGui import QIcon
 from app_meta import APP_VERSION
 from gui_qt.styles import VIBRANT_PRO_QSS
 from gui_qt.tabs.tab_batch import TabBatch
+from gui_qt.tabs.tab_archive_runner import TabArchiveRunner
 from gui_qt.tabs.tab_ladder import TabLadder
 from gui_qt.tabs.tab_log import TabLog
 from gui_qt.tabs.tab_settings import TabAnalysisSettings
@@ -38,10 +39,11 @@ class AnalysisSubButton(QPushButton):
 
 class AnalysisGroup(QWidget):
     """Container for an analysis header and its sub-buttons."""
-    def __init__(self, name, internal_id, on_sub_clicked, parent=None):
+    def __init__(self, name, internal_id, on_sub_clicked, sub_buttons: list[str] | None = None, parent=None):
         super().__init__(parent)
         self.internal_id = internal_id
         self.on_sub_clicked = on_sub_clicked
+        self.sub_button_labels = sub_buttons or ["Run", "Ladder", "Log", "Settings"]
         
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(0, 0, 0, 0)
@@ -55,12 +57,15 @@ class AnalysisGroup(QWidget):
         self.sub_layout.setContentsMargins(0, 0, 0, 0)
         self.sub_layout.setSpacing(0)
         
-        self.btn_run = AnalysisSubButton("•  Run")
-        self.btn_ladder = AnalysisSubButton("•  Ladder")
-        self.btn_log = AnalysisSubButton("•  Log")
-        self.btn_settings = AnalysisSubButton("•  Settings")
-
-        self.sub_buttons = [self.btn_run, self.btn_ladder, self.btn_log, self.btn_settings]
+        self.sub_buttons = []
+        for label in self.sub_button_labels:
+            button = AnalysisSubButton(f"•  {label}")
+            self.sub_buttons.append(button)
+        self.btn_run = self.sub_buttons[0]
+        self.btn_ladder = self.sub_buttons[1] if len(self.sub_buttons) > 1 else self.btn_run
+        self.btn_archive = self.sub_buttons[2] if len(self.sub_buttons) > 4 else None
+        self.btn_log = self.sub_buttons[2] if len(self.sub_buttons) == 4 else self.sub_buttons[3]
+        self.btn_settings = self.sub_buttons[-1]
         for i, btn in enumerate(self.sub_buttons):
             self.sub_layout.addWidget(btn)
             btn.clicked.connect(lambda _, b=btn, idx=i: self._handle_sub_click(b, idx))
@@ -118,7 +123,12 @@ class MainWindow(QMainWindow):
         # --- Analysis Groups ---
         self.groups = []
         
-        self.group_clonality = AnalysisGroup("Klonalitet", "clonality", self.on_sub_tab_clicked)
+        self.group_clonality = AnalysisGroup(
+            "Klonalitet",
+            "clonality",
+            self.on_sub_tab_clicked,
+            sub_buttons=["Run", "Ladder", "Archive Runner", "Log", "Settings"],
+        )
         self.group_flt3 = AnalysisGroup("FLT3 Analysis", "flt3", self.on_sub_tab_clicked)
         self.group_general = AnalysisGroup("General", "general", self.on_sub_tab_clicked)
         
@@ -135,6 +145,7 @@ class MainWindow(QMainWindow):
         # Tabs
         self.tab_run = TabBatch()
         self.tab_ladder = TabLadder()
+        self.tab_archive_runner = TabArchiveRunner()
         self.tab_log = TabLog()
         self.tab_settings_clonality = TabAnalysisSettings("clonality")
         self.tab_settings_flt3 = TabAnalysisSettings("flt3")
@@ -152,6 +163,7 @@ class MainWindow(QMainWindow):
         # Add to stack
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_run))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_ladder))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_archive_runner))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_log))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_clonality))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_flt3))
@@ -211,6 +223,7 @@ class MainWindow(QMainWindow):
             # Refresh tabs if needed
             self.tab_run.set_analysis(new_ana)
             self.tab_ladder.set_analysis(new_ana)
+            self.tab_archive_runner.set_analysis(new_ana)
 
         # Update Sidebar expansion
         for g in self.groups:
@@ -228,19 +241,27 @@ class MainWindow(QMainWindow):
             self.tab_run.set_analysis(analysis_id)
         if changed or getattr(self.tab_ladder, "_current_analysis_id", None) != analysis_id:
             self.tab_ladder.set_analysis(analysis_id)
+        if changed or getattr(self.tab_archive_runner, "_current_analysis_id", None) != analysis_id:
+            self.tab_archive_runner.set_analysis(analysis_id)
             
-        if tab_idx == 3:
-            page_map = {
-                "clonality": 3,
-                "flt3": 4,
-                "general": 5,
-            }
-            page_idx = page_map.get(analysis_id, 3)
+        if analysis_id == "clonality":
+            page_map = {0: 0, 1: 1, 2: 2, 3: 3, 4: 4}
+            page_idx = page_map.get(tab_idx, 0)
         else:
-            page_idx = tab_idx
+            if tab_idx == 3:
+                page_map = {
+                    "flt3": 5,
+                    "general": 6,
+                }
+                page_idx = page_map.get(analysis_id, 5)
+            elif tab_idx == 2:
+                page_idx = 3
+            else:
+                page_idx = tab_idx
         self.stacked_widget.setCurrentIndex(page_idx)
 
     def _on_settings_saved(self, analysis_id):
         if APP_SETTINGS.get("active_analysis") == analysis_id:
             self.tab_run.set_analysis(analysis_id)
             self.tab_ladder.set_analysis(analysis_id)
+            self.tab_archive_runner.set_analysis(analysis_id)

@@ -4,6 +4,7 @@ Fraggler Diagnostics — Main Entry Point for PyQt6 UI
 import multiprocessing
 import sys
 import os
+import locale
 from pathlib import Path
 
 from app_meta import APP_VERSION
@@ -11,11 +12,13 @@ from app_meta import APP_VERSION
 # Force X11 (xcb) on Linux to avoid Wayland symbol mismatches (e.g., wl_proxy_marshal_flags)
 if sys.platform == "linux":
     os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ.setdefault("LANG", "C.UTF-8")
+    os.environ.setdefault("LC_ALL", "C.UTF-8")
+    os.environ.setdefault("PYTHONIOENCODING", "utf-8")
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtGui import QIcon
 
-from gui_qt.main_window import MainWindow
 from core.log import log
 
 LEGACY_PANEL_HOST = "localhost"
@@ -26,13 +29,40 @@ LEGACY_PANEL_ENABLED = os.environ.get("FRAGGLER_ENABLE_LEGACY_PANEL", "").lower(
     "yes",
 }
 
+
+def _remove_macos_metadata_files(bundle_dir: Path) -> None:
+    """Delete AppleDouble/Finder metadata files that can break Linux runtime imports."""
+    patterns = ("._*", ".DS_Store")
+    removed = 0
+    for pattern in patterns:
+        for path in bundle_dir.rglob(pattern):
+            if not path.is_file():
+                continue
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+    if removed:
+        log(f"[INFO] Removed {removed} macOS metadata file(s) from bundle: {bundle_dir}")
+
+
+def _prepare_runtime_bundle() -> Path:
+    bundle_dir = Path(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
+    _remove_macos_metadata_files(bundle_dir)
+    return bundle_dir
+
+
+_BUNDLE_DIR = _prepare_runtime_bundle()
+
+from gui_qt.main_window import MainWindow
+
 def start_panel_server():
     """Start the legacy Panel server when explicitly requested."""
     try:
         import panel as pn
         # Resolve path to app.py relative to this file
-        bundle_dir = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-        app_path = os.path.join(bundle_dir, "app.py")
+        app_path = os.path.join(_BUNDLE_DIR, "app.py")
         
         if not os.path.exists(app_path):
             log(f"[WARN] Could not find legacy app.py at {app_path}. Server not started.")
@@ -80,12 +110,21 @@ def exception_hook(exctype, value, tb):
 sys.excepthook = exception_hook
 
 def main():
+    if sys.platform == "linux":
+        try:
+            locale.setlocale(locale.LC_ALL, "")
+        except locale.Error:
+            try:
+                locale.setlocale(locale.LC_ALL, "C.UTF-8")
+            except locale.Error:
+                pass
+
     app = QApplication(sys.argv)
     app.setApplicationName("Fraggler")
     app.setOrganizationName("OUS")
     app.setApplicationVersion(APP_VERSION)
     
-    icon_path = Path(__file__).parent / "assets" / "app_icon.png"
+    icon_path = _BUNDLE_DIR / "assets" / "app_icon.png"
     if icon_path.exists():
         app_icon = QIcon(str(icon_path))
         app.setWindowIcon(app_icon)

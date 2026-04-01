@@ -114,7 +114,7 @@ def make_reports_tab() -> pn.Column:
             return
         path = _filtered_paths[key]
         try:
-            content = path.read_text(encoding="utf-8")
+            content = path.read_text(encoding="utf-8", errors="replace")
             # Embed the report directly in an iframe
             escaped = content.replace("'", "&#39;")
             viewer.object = f"""<iframe

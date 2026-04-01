@@ -3,6 +3,8 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+HOST_UID="$(id -u)"
+HOST_GID="$(id -g)"
 
 echo "============================================================"
 echo "  Building Fraggler Diagnostics for Linux Offline Bundle"
@@ -22,9 +24,17 @@ echo "Building Docker image..."
 docker build -f packaging/Dockerfile.linux -t fraggler-linux-build .
 
 echo "Running build..."
-rm -rf "$PROJECT_ROOT/dist"
 mkdir -p "$PROJECT_ROOT/dist"
-docker run --rm -v "$PROJECT_ROOT/dist:/app/dist" fraggler-linux-build python3 build_qt.py
+docker run --rm \
+    -v "$PROJECT_ROOT/dist:/mnt" \
+    alpine sh -lc "rm -rf /mnt/* /mnt/.[!.]* /mnt/..?* 2>/dev/null || true"
+docker run --rm \
+    -v "$PROJECT_ROOT/dist:/app/dist" \
+    fraggler-linux-build \
+    python3 build_qt.py
+docker run --rm \
+    -v "$PROJECT_ROOT/dist:/mnt" \
+    alpine sh -lc "chown -R ${HOST_UID}:${HOST_GID} /mnt"
 
 echo "Done!"
 echo "Portable folder: dist/Fraggler_Linux"

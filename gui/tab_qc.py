@@ -154,7 +154,7 @@ def make_qc_tab() -> pn.Column:
             if res_path and res_path.exists():
                 status_md.object = f'<div style="color:var(--green); font-size:13px">QC complete. Report generated at {res_path}</div>'
                 try:
-                    content = res_path.read_text(encoding="utf-8").replace("'", "&#39;")
+                    content = res_path.read_text(encoding="utf-8", errors="replace").replace("'", "&#39;")
                     viewer.object = f"<iframe srcdoc='{content}' style='width:100%;height:700px;border:none;border-radius:8px;background:#fff'></iframe>"
                 except Exception as e:
                     viewer.object = f'<div style="color:var(--red); padding:20px">Could not load preview: {e}</div>'
