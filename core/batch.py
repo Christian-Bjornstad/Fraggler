@@ -348,7 +348,12 @@ def run_batch_jobs(
     aggregate_dit_reports = bool(aggregate_dit_reports) and active_analysis != "general"
     analysis_batch = APP_SETTINGS.get("analyses", {}).get(active_analysis, {}).get("batch", {})
     patient_regex = analysis_batch.get("patient_id_regex", r"\d{2}OUM\d{5}")
-    stream_aggregated_dit = aggregate_dit_reports and _can_stream_aggregated_dit_reports(jobs, patient_regex)
+    has_qc_report_jobs = active_analysis == "clonality" and any(job.get("type") == "qc" for job in jobs)
+    stream_aggregated_dit = (
+        aggregate_dit_reports
+        and not has_qc_report_jobs
+        and _can_stream_aggregated_dit_reports(jobs, patient_regex)
+    )
     defer_dit_html_reports = defer_tracking_workbook_refresh if defer_dit_html_reports is None else bool(defer_dit_html_reports)
     sample_window = s_qc.get("sample_peak_window_bp", s_qc.get("w_sample", 3.0))
     ladder_window = s_qc.get("ladder_peak_window_bp", s_qc.get("w_ladder", 3.0))
@@ -371,6 +376,7 @@ def run_batch_jobs(
     
     # Storage for cross-folder aggregation
     all_collected_entries_by_job: dict[int, list[Any]] = {}
+    qc_report_entries_by_job: dict[int, list[Any]] = {}
     deferred_tracking_entries_by_job: dict[int, list[Any]] | None = {} if defer_tracking_workbook_refresh else None
     failed_jobs = []
     completed_jobs = []
@@ -630,6 +636,8 @@ def run_batch_jobs(
                         progress_callback=_job_progress,
                     )
                     if qc_entries:
+                        with data_lock:
+                            _extend_entries(qc_report_entries_by_job, i, qc_entries)
                         if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
                             with data_lock:
                                 _extend_entries(deferred_tracking_entries_by_job, i, qc_entries)
@@ -833,6 +841,8 @@ def run_batch_jobs(
                 
     # --- CROSS-FOLDER DIT AGGREGATION ---
     all_collected_entries = _materialize_entries(all_collected_entries_by_job)
+    qc_report_entries = _materialize_entries(qc_report_entries_by_job)
+    dit_report_entries = all_collected_entries + qc_report_entries
     deferred_tracking_entries = _materialize_entries(deferred_tracking_entries_by_job)
 
     if aggregate_dit_reports and all_collected_entries and not defer_dit_html_reports:
@@ -847,7 +857,7 @@ def run_batch_jobs(
                     "build_report",
                     "building final aggregated DIT reports",
                     build_dit_html_reports,
-                    all_collected_entries,
+                    dit_report_entries,
                     agg_outdir,
                 )
             if active_analysis == "clonality" and not defer_tracking_workbook_refresh:

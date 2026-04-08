@@ -13,11 +13,12 @@ import plotly.graph_objects as go
 from pathlib import Path
 from html import escape
 
+import core.assay_config as assay_config
 from core.assay_config import (
-    ASSAY_REFERENCE_RANGES,
     CHANNEL_COLORS,
     DEFAULT_TRACE_COLOR,
-    NONSPECIFIC_PEAKS,
+    merged_analysis_attr,
+    reference_shade_rgba,
 )
 from core.analysis import (
     estimate_running_baseline,
@@ -39,6 +40,18 @@ def _flt3_peak_id(row: pd.Series, index: int) -> str:
     height_key = int(round(height)) if np.isfinite(height) else 0
     area_key = int(round(area)) if np.isfinite(area) else 0
     return f"flt3_pk_{bp_key}_{height_key}_{area_key}_{index}"
+
+
+def _reference_shape_fill() -> str:
+    return reference_shade_rgba()
+
+
+def _assay_reference_ranges() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
+
+
+def _nonspecific_peaks() -> dict:
+    return merged_analysis_attr("NONSPECIFIC_PEAKS")
 
 
 def _flt3_candidate_peaks_for_entry(entry: dict) -> list[dict]:
@@ -192,7 +205,7 @@ def compute_group_ymax_for_entries(entries: list[dict]) -> float:
     Beregn felles Y-maks for en gruppe entries, basert på:
 
       - Alle trace-kanaler i entry["trace_channels"] (f.eks. DATA1 + DATA2).
-      - Referansevindu (ASSAY_REFERENCE_RANGES[assay]) hvis det finnes.
+      - Referansevindu (_assay_reference_ranges()[assay]) hvis det finnes.
       - Ellers bp_min–bp_max for entryet.
 
     Brukes for å gi kombinasjonsplott (TCRb/TCRg) en felles og
@@ -229,9 +242,9 @@ def compute_group_ymax_for_entries(entries: list[dict]) -> float:
                 continue
 
         # --- Velg bp-vindu: referanse(r) hvis definert, ellers bp_min–bp_max ---
-        if assay and assay in ASSAY_REFERENCE_RANGES:
+        if assay and assay in _assay_reference_ranges():
             mask_bp = np.zeros_like(bp_all, dtype=bool)
-            for a, b in ASSAY_REFERENCE_RANGES[assay]:
+            for a, b in _assay_reference_ranges()[assay]:
                 mask_bp |= (bp_all >= float(a)) & (bp_all <= float(b))
         else:
             mask_bp = (bp_all >= bp_min) & (bp_all <= bp_max)
@@ -325,9 +338,9 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
     ymax_auto_all = 0.0
 
     # Window for auto-y
-    if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
+    if assay_name and assay_name in _assay_reference_ranges():
         win_bp = np.zeros_like(bp_trace, dtype=bool)
-        for a, b in ASSAY_REFERENCE_RANGES[assay_name]:
+        for a, b in _assay_reference_ranges()[assay_name]:
             win_bp |= (bp_trace >= float(a)) & (bp_trace <= float(b))
     else:
         win_bp = (bp_trace >= bp_min) & (bp_trace <= bp_max)
@@ -364,19 +377,19 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
 
     # Shapes
     shapes = []
-    if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
-        for (a, b) in ASSAY_REFERENCE_RANGES[assay_name]:
-            shapes.append(dict(type="rect", x0=float(a), x1=float(b), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(235,232,203,0.5)", line_width=0))
+    if assay_name and assay_name in _assay_reference_ranges():
+        for (a, b) in _assay_reference_ranges()[assay_name]:
+            shapes.append(dict(type="rect", x0=float(a), x1=float(b), y0=0, y1=1, xref="x", yref="paper", fillcolor=_reference_shape_fill(), line_width=0, layer="above", opacity=1.0))
     else:
-        shapes.append(dict(type="rect", x0=float(bp_min), x1=float(bp_max), y0=0, y1=1, xref="x", yref="paper", fillcolor="rgba(235,232,203,0.15)", line_width=0))
+        shapes.append(dict(type="rect", x0=float(bp_min), x1=float(bp_max), y0=0, y1=1, xref="x", yref="paper", fillcolor=_reference_shape_fill(), line_width=0, layer="above", opacity=1.0))
 
     # NS Peaks
-    if assay_name in NONSPECIFIC_PEAKS:
+    if assay_name in _nonspecific_peaks():
         trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
         baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
         corr_trace = np.maximum(trace_data - baseline, 0.0)
         ns_x, ns_y, ns_text = [], [], []
-        for ns_bp in NONSPECIFIC_PEAKS[assay_name]:
+        for ns_bp in _nonspecific_peaks()[assay_name]:
             shapes.append(dict(type="line", x0=float(ns_bp), x1=float(ns_bp), y0=0, y1=1, xref="x", yref="paper", line=dict(color="rgba(100, 116, 139, 0.7)", width=1.5, dash="dashdot")))
             mask_ns = (bp_trace >= (ns_bp - 3)) & (bp_trace <= (ns_bp + 3))
             if np.any(mask_ns):
@@ -431,8 +444,16 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
         float(forced_xmax) if forced_xmax is not None else data["bp_max"]
     ]
 
-    fig.update_yaxes(range=[0.0, ymax * YMAX_PADDING_FACTOR], gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
-    fig.update_xaxes(range=x_range, gridcolor="#f1f5f9", zerolinecolor="#cbd5e1")
+    fig.update_yaxes(
+        range=[0.0, ymax * YMAX_PADDING_FACTOR],
+        showgrid=False,
+        zeroline=False,
+    )
+    fig.update_xaxes(
+        range=x_range,
+        showgrid=False,
+        zeroline=False,
+    )
 
     # Empty peaks trace for JS
     fig.add_trace(go.Scatter(x=[], y=[], mode="markers", name="Peaks", marker=dict(size=8, color="red", line=dict(color="black", width=1)), hovertemplate="bp=%{x:.2f}<br>height=%{y:.0f}<extra></extra>"))
@@ -1408,9 +1429,9 @@ def build_interactive_assay_batch_plot_html(
         # --- Beregn auto-ymax ut fra referanse-/bp-vindu ---
         # Hvis assay har egne referansevinduer bruker vi UNION av disse
         # (slik som shadingen i plottet). Ellers bruker vi bp_min–bp_max.
-        if assay and assay in ASSAY_REFERENCE_RANGES:
+        if assay and assay in _assay_reference_ranges():
             mask_win = np.zeros_like(bp_trace, dtype=bool)
-            for a, b in ASSAY_REFERENCE_RANGES[assay]:
+            for a, b in _assay_reference_ranges()[assay]:
                 mask_win |= (bp_trace >= float(a)) & (bp_trace <= float(b))
         else:
             mask_win = (bp_trace >= bp_min) & (bp_trace <= bp_max)
@@ -1445,7 +1466,7 @@ def build_interactive_assay_batch_plot_html(
         fig.add_trace(
             go.Scatter(
                 x=bp_trace,
-                y=y_trace,
+                y=y_trace.tolist(),
                 mode="lines",
                 name=f"{primary_ch} trace",
                 line=dict(width=1, color=color),
@@ -1470,8 +1491,8 @@ def build_interactive_assay_batch_plot_html(
 
         # Referanse-shapes
         shapes = []
-        if assay and assay in ASSAY_REFERENCE_RANGES:
-            for (a, b) in ASSAY_REFERENCE_RANGES[assay]:
+        if assay and assay in _assay_reference_ranges():
+            for (a, b) in _assay_reference_ranges()[assay]:
                 shapes.append(
                     dict(
                         type="rect",
@@ -1481,12 +1502,30 @@ def build_interactive_assay_batch_plot_html(
                         y1=1,
                         xref="x",
                         yref="paper",
-                        fillcolor="rgba(235,232,203,0.25)",
+                        fillcolor=_reference_shape_fill(),
                         line_width=0,
+                        layer="above",
+                        opacity=1.0,
                     )
                 )
+        else:
+            shapes.append(
+                dict(
+                    type="rect",
+                    x0=float(bp_min),
+                    x1=float(bp_max),
+                    y0=0,
+                    y1=1,
+                    xref="x",
+                    yref="paper",
+                    fillcolor=_reference_shape_fill(),
+                    line_width=0,
+                    layer="above",
+                    opacity=1.0,
+                )
+            )
         # Uspesifikke topper (vertikale dotted linjer + detection) i batch-plott
-        if assay in NONSPECIFIC_PEAKS:
+        if assay in _nonspecific_peaks():
             ns_x, ns_y, ns_text = [], [], []
             trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
             try:
@@ -1496,7 +1535,7 @@ def build_interactive_assay_batch_plot_html(
             except Exception:
                 corr_trace = trace_data
 
-            for ns_bp in NONSPECIFIC_PEAKS[assay]:
+            for ns_bp in _nonspecific_peaks()[assay]:
                 shapes.append(dict(
                     type="line",
                     x0=float(ns_bp), x1=float(ns_bp),
@@ -1548,15 +1587,15 @@ def build_interactive_assay_batch_plot_html(
         fig.update_yaxes(
             rangemode="tozero",
             range=[0.0, ymax * 1.15],
-            gridcolor="#f1f5f9",
-            zerolinecolor="#cbd5e1"
+            showgrid=False,
+            zeroline=False,
         )
 
         # X-akse: start-zoom til assay-vindu
         fig.update_xaxes(
             range=[bp_min, bp_max],
-            gridcolor="#f1f5f9",
-            zerolinecolor="#cbd5e1"
+            showgrid=False,
+            zeroline=False,
         )
 
         fig_json = json.dumps(fig.to_plotly_json())

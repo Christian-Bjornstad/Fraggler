@@ -10,11 +10,20 @@ import numpy as np
 from fraggler.fraggler import print_warning
 from core.utils import CHANNEL_COLORS
 
-from core.assay_config import (
-    ASSAY_REFERENCE_RANGES,
-    ASSAY_REFERENCE_LABEL,
-    REFERENCE_SHADE_COLOR,
-)
+import core.assay_config as assay_config
+from core.assay_config import DEFAULT_REFERENCE_SHADE_ALPHA, merged_analysis_attr
+
+
+def _assay_reference_ranges() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
+
+
+def _assay_reference_label() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_LABEL")
+
+
+def _reference_shade_color() -> str:
+    return str(getattr(assay_config, "REFERENCE_SHADE_COLOR", "#ded7a6"))
 
 
 def compute_zoom_ymax(
@@ -51,10 +60,11 @@ def compute_zoom_ymax(
     # -----------------------------
     # Velg bp-vindu for zoom
     # -----------------------------
-    if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
+    ref_ranges_by_assay = _assay_reference_ranges()
+    if assay_name and assay_name in ref_ranges_by_assay:
         # Union av alle referansevinduer (slik vi fargelegger gult)
         mask_bp = np.zeros(bp_vals.shape, dtype=bool)
-        for a, b in ASSAY_REFERENCE_RANGES[assay_name]:
+        for a, b in ref_ranges_by_assay[assay_name]:
             mask_bp |= (bp_vals >= float(a)) & (bp_vals <= float(b))
     else:
         # Fallback: bp_min–bp_max for assayen
@@ -116,8 +126,9 @@ def draw_multi_channel_zoom_on_ax(
     # --------------------------------------------------
     shade_ranges = None
 
-    if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
-        shade_ranges = ASSAY_REFERENCE_RANGES[assay_name]
+    ref_ranges_by_assay = _assay_reference_ranges()
+    if assay_name and assay_name in ref_ranges_by_assay:
+        shade_ranges = ref_ranges_by_assay[assay_name]
     else:
         # fallback: hele bp-vinduet som referanse
         shade_ranges = [(bp_min, bp_max)]
@@ -131,8 +142,8 @@ def draw_multi_channel_zoom_on_ax(
         ax.axvspan(
             s,
             e,
-            color=REFERENCE_SHADE_COLOR,
-            alpha=0.25,      # «svak» gulfarge
+            color=_reference_shade_color(),
+            alpha=DEFAULT_REFERENCE_SHADE_ALPHA,
             zorder=0,
         )
 
@@ -270,11 +281,12 @@ def draw_multi_channel_zoom_on_ax(
     ax.set_title(fsa.file_name, fontsize=9)
 
     # Liten referanse-tekst i hjørnet av plottet
-    if assay_name and assay_name in ASSAY_REFERENCE_RANGES:
+    ref_ranges_by_assay = _assay_reference_ranges()
+    if assay_name and assay_name in ref_ranges_by_assay:
         ranges_str = ", ".join(
-            f"{int(a)}–{int(b)} bp" for (a, b) in ASSAY_REFERENCE_RANGES[assay_name]
+            f"{int(a)}–{int(b)} bp" for (a, b) in ref_ranges_by_assay[assay_name]
         )
-        label_txt = ASSAY_REFERENCE_LABEL.get(assay_name, ranges_str)
+        label_txt = _assay_reference_label().get(assay_name, ranges_str)
 
         ax.text(
             0.01,

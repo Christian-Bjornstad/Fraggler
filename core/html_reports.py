@@ -20,13 +20,11 @@ import numpy as np
 
 from fraggler.fraggler import print_green, print_warning
 
+import core.assay_config as assay_config
 from core.assay_config import (
-    ASSAY_CONFIG,
-    ASSAY_DISPLAY_ORDER,
-    ASSAY_REFERENCE_RANGES,
-    ASSAY_REFERENCE_LABEL,
     CHANNEL_COLORS,
     DEFAULT_TRACE_COLOR,
+    merged_analysis_attr,
     OUTDIR_NAME,
 )
 from core.plotly_offline import local_plotly_tag as _local_plotly_tag
@@ -34,10 +32,30 @@ from core.plotting_plotly import (
     compute_group_ymax_for_entries,
     build_interactive_peak_plot_for_entry,
 )
+from core.qc.qc_markers import control_id_from_filename
+from core.qc.qc_plots import build_interactive_peak_plot_for_entry_qc
+from core.qc.qc_rules import QCRules, normalize_assay_qc
 from config import APP_SETTINGS
 
 
 DIT_PATTERN = re.compile(r"(\d{2}OUM\d{5})")
+DIT_QC_CONTROL_IDS = {"PK", "PK1", "PK2", "NK", "RK"}
+
+
+def _assay_config() -> dict:
+    return getattr(assay_config, "ASSAY_CONFIG", {})
+
+
+def _assay_display_order() -> list[str]:
+    return list(getattr(assay_config, "ASSAY_DISPLAY_ORDER", []))
+
+
+def _assay_reference_ranges() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
+
+
+def _assay_reference_label() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_LABEL")
 
 REPORT_STYLE = """
 <style>
@@ -224,6 +242,28 @@ tr:hover td { background: #f0fdfa; /* Soft teal hover */ transition: background 
 }
 .peak-table-container tr.selected-mut td {
     background: #dcfce7 !important;
+}
+
+.dit-qc-section {
+    margin-top: 2rem;
+    margin-bottom: 1.5rem;
+    padding: 0;
+    background: #ffffff;
+    border-radius: 8px;
+    border: 1px solid rgba(226, 232, 240, 0.9);
+    box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.04);
+}
+.dit-qc-section summary {
+    cursor: pointer;
+    padding: 14px 18px;
+    font-weight: 800;
+    color: #1e293b;
+}
+.dit-qc-section[open] summary {
+    border-bottom: 1px solid #e2e8f0;
+}
+.dit-qc-body {
+    padding: 16px 18px 18px;
 }
 
 /* ── Comment Boxes ── */
@@ -590,7 +630,6 @@ function printReport() { window.print(); }
 def _render_file_summary_table(dit_entries: list[dict], html_lines: list[str]):
     """Renders the overview table of all analyzed files."""
     html_lines.append("<h2>Oversikt over analyserte filer</h2>")
-    html_lines.append("<p class='small'>Tabellen viser alle filer for dette DIT-nummeret.</p>")
     is_flt3 = {e.get("assay") for e in dit_entries}.issubset({"FLT3-ITD", "FLT3-D835", "NPM1"})
     if is_flt3:
         html_lines.append(
@@ -907,7 +946,7 @@ def _build_flt3_summary_table(e: dict) -> str:
     assay = e["assay"]
     ratio = float(e.get("ratio", 0.0))
     ratio_str = f"{ratio:.4f}" if ratio > 0 else "&mdash;"
-    positive_ratio = float(ASSAY_CONFIG.get(assay, {}).get("positive_ratio", 0.01))
+    positive_ratio = float(_assay_config().get(assay, {}).get("positive_ratio", 0.01))
     peaks = e["peaks_by_channel"].get(e["primary_peak_channel"], pd.DataFrame())
 
     wt_row = peaks[peaks.label == "WT"].sort_values("peaks", ascending=False) if not peaks.empty else pd.DataFrame()
@@ -1015,10 +1054,10 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
 
     html_lines.append("<div class='assay-block'>")
     html_lines.append(f"<h3>{escape(display_name)}</h3>")
-    ref_ranges = ASSAY_REFERENCE_RANGES.get(reference_assay)
+    ref_ranges = _assay_reference_ranges().get(reference_assay)
     if ref_ranges:
         ranges_str = ", ".join(f"{int(a)}–{int(b)} bp" for (a, b) in ref_ranges)
-        label_txt = ASSAY_REFERENCE_LABEL.get(reference_assay, ranges_str)
+        label_txt = _assay_reference_label().get(reference_assay, ranges_str)
         html_lines.append(f"<p class='small'><strong>Referanseområde:</strong> {escape(ranges_str)}<br>{escape(label_txt)}</p>")
 
     sort_key = _flt3_display_sort_key if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"} else (lambda x: x["fsa"].file_name)
@@ -1060,8 +1099,6 @@ def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: 
     """Renders a combination block for TCRb replicates."""
     if not entries: return
     html_lines.append("<div class='assay-block'>")
-    html_lines.append(f"<h3>TCRβ – Parallell {replicate_num}</h3>")
-    html_lines.append("<p class='small'><strong>Referanseområde: 240–285 bp</strong><br>TCRβ mix A: 240–285 bp (Vβ–Jβ1/2)</p>")
     html_lines.append("<div class='combo-grid'>")
     group_y = compute_group_ymax_for_entries(entries)
     
@@ -1096,7 +1133,6 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
     forced_xmax = max((float(e["bp_max"]) for e in tcrg_entries), default=1000)
 
     html_lines.append("<h2>Kombinasjonsfigur – TCRγ</h2><div class='assay-block'>")
-    html_lines.append("<p class='small'>TCRγ mix A og mix B (begge paralleller) med felles x- og y-akse.</p>")
     html_lines.append("<div class='combo-grid'>")
     for e in sorted(tcrg_entries, key=lambda x: x["assay"]):
         fsa, primary_ch = e["fsa"], e["primary_peak_channel"]
@@ -1115,6 +1151,22 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
         html_lines.append("</div>")
     html_lines.append("</div></div>")
 
+
+def _render_sl_metrics_table(sl_metrics: dict, html_lines: list[str]):
+    targets = sl_metrics.get("targets_bp", [])
+    areas = sl_metrics.get("areas", [])
+    pcts = sl_metrics.get("percents", [])
+    total_area = sl_metrics.get("total_area", float("nan"))
+
+    html_lines.append("<table><tr><th>Fragment (bp)</th><th>Area</th><th>% av total</th></tr>")
+    for bp_val, area_val, pct_val in zip(targets, areas, pcts):
+        area_str = f"{area_val:,.0f}".replace(",", " ") if not np.isnan(area_val) else "&mdash;"
+        pct_str = f"{pct_val:.1f} %" if pct_val is not None and not np.isnan(pct_val) else "&mdash;"
+        html_lines.append(f"<tr><td>{bp_val:.0f}</td><td>{area_str}</td><td>{pct_str}</td></tr>")
+    tot_str = f"{total_area:,.0f}".replace(",", " ") if not np.isnan(total_area) else "&mdash;"
+    html_lines.append(f"<tr><td><strong>Total</strong></td><td><strong>{tot_str}</strong></td><td></td></tr></table>")
+
+
 def _render_sl_section(all_sl_entries: list[dict], html_lines: list[str]):
     """Renders the Size Ladder (DNA quality) section."""
     valid_entries = [e for e in all_sl_entries if e.get("sl_metrics")]
@@ -1126,15 +1178,96 @@ def _render_sl_section(all_sl_entries: list[dict], html_lines: list[str]):
         if not sl_metrics:
             html_lines.append("<p><em>Ingen SL-area-metrikker tilgjengelig.</em></p>")
             continue
-        targets, areas, pcts = sl_metrics.get("targets_bp", []), sl_metrics.get("areas", []), sl_metrics.get("percents", [])
-        total_area = sl_metrics.get("total_area", float("nan"))
-        html_lines.append("<table><tr><th>Fragment (bp)</th><th>Area</th><th>% av total</th></tr>")
-        for bp_val, area_val, pct_val in zip(targets, areas, pcts):
-            area_str = f"{area_val:,.0f}".replace(",", " ") if not np.isnan(area_val) else "&mdash;"
-            pct_str = f"{pct_val:.1f} %" if pct_val is not None and not np.isnan(pct_val) else "&mdash;"
-            html_lines.append(f"<tr><td>{bp_val:.0f}</td><td>{area_str}</td><td>{pct_str}</td></tr>")
-        tot_str = f"{total_area:,.0f}".replace(",", " ") if not np.isnan(total_area) else "&mdash;"
-        html_lines.append(f"<tr><td><strong>Total</strong></td><td><strong>{tot_str}</strong></td><td></td></tr></table>")
+        _render_sl_metrics_table(sl_metrics, html_lines)
+
+
+def _qc_rules_from_settings() -> QCRules:
+    s_qc = APP_SETTINGS.get("qc", {})
+    sample_window = s_qc.get("sample_peak_window_bp", s_qc.get("w_sample", 3.0))
+    ladder_window = s_qc.get("ladder_peak_window_bp", s_qc.get("w_ladder", 3.0))
+    return QCRules(
+        min_r2_ok=s_qc.get("min_r2_ok", 0.999),
+        min_r2_warn=s_qc.get("min_r2_warn", 0.995),
+        nk_ymax_floor=s_qc.get("nk_ymax_floor", 250.0),
+        sample_peak_window_bp=sample_window,
+        sample_peak_window_bp_fallback=s_qc.get("sample_peak_window_bp_fallback", max(float(sample_window) + 4.0, 8.0)),
+        ladder_peak_window_bp=ladder_window,
+    )
+
+
+def _control_id_for_entry(entry: dict) -> str:
+    fsa = entry.get("fsa")
+    return control_id_from_filename(str(getattr(fsa, "file_name", "") or entry.get("file_name") or ""))
+
+
+def _is_dit_qc_control(entry: dict) -> bool:
+    return _control_id_for_entry(entry) in DIT_QC_CONTROL_IDS
+
+
+def _qc_entry_sort_key(entry: dict) -> tuple[str, str, str]:
+    fsa = entry.get("fsa")
+    return (
+        normalize_assay_qc(str(entry.get("assay") or "")),
+        _control_id_for_entry(entry),
+        str(getattr(fsa, "file_name", "") or entry.get("file_name") or ""),
+    )
+
+
+def _render_relevant_qc_section(
+    dit_entries: list[dict],
+    control_entries: list[dict],
+    html_lines: list[str],
+) -> None:
+    patient_assays = {
+        normalize_assay_qc(str(e.get("assay") or ""))
+        for e in dit_entries
+        if e.get("assay")
+    }
+    if not patient_assays:
+        return
+
+    relevant_controls = [
+        e for e in control_entries
+        if normalize_assay_qc(str(e.get("assay") or "")) in patient_assays
+        and _is_dit_qc_control(e)
+    ]
+    if not relevant_controls:
+        return
+
+    relevant_controls = sorted(relevant_controls, key=_qc_entry_sort_key)
+    rules = _qc_rules_from_settings()
+    plot_fragments: dict[int, str] = {}
+
+    for idx, entry in enumerate(relevant_controls):
+        try:
+            frag = build_interactive_peak_plot_for_entry_qc(entry, rules)
+            if frag:
+                plot_fragments[idx] = frag
+        except Exception as ex:
+            plot_fragments[idx] = f"<p class='small'><em>Kunne ikke lage QC-plott: {escape(str(ex))}</em></p>"
+
+    assay_label = ", ".join(sorted(patient_assays))
+    html_lines.append("<details class='dit-qc-section'>")
+    html_lines.append(
+        f"<summary>Relevant QC ({escape(assay_label)} - {len(relevant_controls)} kontrollfiler)</summary>"
+    )
+    html_lines.append("<div class='dit-qc-body'>")
+
+    for assay in sorted({normalize_assay_qc(str(e.get("assay") or "")) for e in relevant_controls}):
+        html_lines.append(f"<h3>QC - {escape(assay)}</h3>")
+        for idx, entry in enumerate(relevant_controls):
+            if normalize_assay_qc(str(entry.get("assay") or "")) != assay:
+                continue
+            fsa = entry.get("fsa")
+            html_lines.append(
+                f"<p class='sample-header'>{escape(_control_id_for_entry(entry))} - "
+                f"{escape(str(getattr(fsa, 'file_name', '') or entry.get('file_name') or ''))}</p>"
+            )
+            html_lines.append(plot_fragments.get(idx, "<p class='small'><em>Ingen QC-data a vise.</em></p>"))
+            if normalize_assay_qc(str(entry.get("assay") or "")) == "SL" and entry.get("sl_metrics"):
+                _render_sl_metrics_table(entry["sl_metrics"], html_lines)
+
+    html_lines.append("</div></details>")
 
 
 def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_outdir: Path) -> Path | None:
@@ -1254,14 +1387,14 @@ def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_ou
 
 def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
     """Main entry for building per-patient DIT reports."""
-    qc_sl_entries = []
+    control_entries = []
     per_dit: dict[str, list[dict]] = defaultdict(list)
-    from core.qc.qc_markers import control_id_from_filename
     for e in entries:
         ctrl_id = control_id_from_filename(e["fsa"].file_name)
-        if ctrl_id in ("PK", "PK1", "PK2") and e.get("assay") == "SL":
-            qc_sl_entries.append(e)
-        if (dit := e.get("dit")): per_dit[dit].append(e)
+        if ctrl_id in DIT_QC_CONTROL_IDS:
+            control_entries.append(e)
+        if (dit := e.get("dit")) and ctrl_id not in DIT_QC_CONTROL_IDS:
+            per_dit[dit].append(e)
 
     if not per_dit:
         print_warning("[DIT] Fant ingen DIT-nummer – ingen rapporter generert.")
@@ -1284,7 +1417,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
         if "FLT3-ITD" in assays or "FLT3-D835" in assays or "NPM1" in assays:
             flt3_blocks = _flt3_report_blocks(assays)
             handled = {"FLT3-ITD", "FLT3-D835", "NPM1"}
-            ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays and a not in handled] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER and a not in handled]
+            display_order = _assay_display_order()
+            ordered = [a for a in display_order if a in assays and a not in handled] + [a for a in assays if a not in display_order and a not in handled]
             for assay_key, block_title, block_entries in flt3_blocks:
                 _render_assay_block(block_title, block_entries, html_lines)
 
@@ -1306,7 +1440,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
                     for a in ["TCRgA", "TCRgB"]:
                         if a in assays: tcrg_all.extend(sorted(assays[a], key=lambda x: x["fsa"].file_name))
                     _render_tcrg_combo_block(tcrg_all, html_lines)
-            _render_sl_section(dit_entries + qc_sl_entries, html_lines)
+            _render_sl_section(dit_entries, html_lines)
+            _render_relevant_qc_section(dit_entries, control_entries, html_lines)
             
             html_lines.append("""
 <div class="print-fab no-print">
@@ -1320,7 +1455,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
             print_green(f"[DIT] Lagret: {out_html}")
             continue
 
-        ordered = [a for a in ASSAY_DISPLAY_ORDER if a in assays] + [a for a in assays if a not in ASSAY_DISPLAY_ORDER]
+        display_order = _assay_display_order()
+        ordered = [a for a in display_order if a in assays] + [a for a in assays if a not in display_order]
         
         for name in ordered:
             _render_assay_block(name, assays[name], html_lines)
@@ -1341,7 +1477,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
                     if a in assays: tcrg_all.extend(sorted(assays[a], key=lambda x: x["fsa"].file_name))
                 _render_tcrg_combo_block(tcrg_all, html_lines)
 
-        _render_sl_section(dit_entries + qc_sl_entries, html_lines)
+        _render_sl_section(dit_entries, html_lines)
+        _render_relevant_qc_section(dit_entries, control_entries, html_lines)
         
         html_lines.append("""
 <div class="print-fab no-print">

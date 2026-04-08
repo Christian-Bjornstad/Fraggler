@@ -25,6 +25,8 @@ from fraggler.fraggler import print_green, print_warning
 from config import resolve_analysis_excel_output_path
 from core.analyses.clonality.config import (
     ASSAY_CONFIG,
+    LIZ_LADDER,
+    ROX_LADDER,
     SL_TARGET_FRAGMENTS_BP,
     SL_WINDOW_BP,
 )
@@ -135,9 +137,9 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
 
     try:
         if ladder == "LIZ":
-            fsa = analyse_fsa_liz(fsa_path, sample_channel)
+            fsa = analyse_fsa_liz(fsa_path, sample_channel, ladder_name=LIZ_LADDER)
         else:
-            fsa = analyse_fsa_rox(fsa_path, sample_channel)
+            fsa = analyse_fsa_rox(fsa_path, sample_channel, ladder_name=ROX_LADDER)
     except Exception as ex:
         print_warning(f"[ANALYZE] Skipping unreadable file {fsa_path.name}: {ex}")
         return None

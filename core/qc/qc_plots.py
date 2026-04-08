@@ -15,12 +15,18 @@ from core.qc.qc_markers import (
     find_peak_near_bp_with_fallback,
     markers_for_entry,
 )
+import core.assay_config as assay_config
 from core.assay_config import (
-    ASSAY_REFERENCE_RANGES,
     CHANNEL_COLORS,
     DEFAULT_TRACE_COLOR,
+    merged_analysis_attr,
+    reference_shade_rgba,
 )
 from core.analysis import estimate_running_baseline
+
+
+def _assay_reference_ranges() -> dict:
+    return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
 
 
 
@@ -74,9 +80,10 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     bp_trace = bp_all[mask]
 
     # Referanse-vindu (for auto-ymax)
-    if assay and assay in ASSAY_REFERENCE_RANGES:
+    ref_ranges_by_assay = _assay_reference_ranges()
+    if assay and assay in ref_ranges_by_assay:
         win_bp = np.zeros_like(bp_trace, dtype=bool)
-        for a, b in ASSAY_REFERENCE_RANGES[assay]:
+        for a, b in ref_ranges_by_assay[assay]:
             win_bp |= (bp_trace >= float(a)) & (bp_trace <= float(b))
     else:
         win_bp = (bp_trace >= bp_min) & (bp_trace <= bp_max)
@@ -232,22 +239,26 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     shapes = []
 
     # Referanse-shading (samme referansevinduer som master). [1](https://hsorhf-my.sharepoint.com/personal/chrbj5_ous-hf_no/Documents/Microsoft%20Copilot%20Chat-filer/fraggler_master_assay_channels.py)
-    if assay and assay in ASSAY_REFERENCE_RANGES:
-        for (a, b) in ASSAY_REFERENCE_RANGES[assay]:
+    if assay and assay in ref_ranges_by_assay:
+        for (a, b) in ref_ranges_by_assay[assay]:
             shapes.append(dict(
                 type="rect",
                 x0=float(a), x1=float(b),
                 y0=0, y1=1, xref="x", yref="paper",
-                fillcolor="rgba(235,232,203,0.25)",
-                line_width=0
+                fillcolor=reference_shade_rgba(),
+                line_width=0,
+                layer="above",
+                opacity=1.0,
             ))
     else:
         shapes.append(dict(
             type="rect",
             x0=float(bp_min), x1=float(bp_max),
             y0=0, y1=1, xref="x", yref="paper",
-            fillcolor="rgba(235,232,203,0.25)",
-            line_width=0
+            fillcolor=reference_shade_rgba(),
+            line_width=0,
+            layer="above",
+            opacity=1.0,
         ))
 
     if marker_specs:
@@ -278,6 +289,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
         plot_bgcolor="white",
         clickmode="event",
         showlegend=True,
+        template="simple_white",
     )
 
 
@@ -286,7 +298,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     if ctrl == "NK":
         ymax = max(float(ymax), float(rules.nk_ymax_floor))
 
-    fig.update_yaxes(range=[ymin, ymax * 1.10])
+    fig.update_yaxes(range=[ymin, ymax * 1.10], showgrid=False, zeroline=False)
 
     x_min = bp_min
     x_max = bp_max
@@ -311,7 +323,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
         x_min = min(x_min, min(exp_bps) - margin)
         x_max = max(x_max, max(exp_bps) + margin)
 
-    fig.update_xaxes(range=[x_min, x_max])
+    fig.update_xaxes(range=[x_min, x_max], showgrid=False, zeroline=False)
 
     fig_json = json.dumps(fig.to_plotly_json())
     safe_id = (sample_id.replace(" ", "_").replace(".", "_").replace("/", "_").replace("\\", "_").replace(":", "_"))

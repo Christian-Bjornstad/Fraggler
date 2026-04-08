@@ -26,7 +26,7 @@ ASSAY_DISPLAY_ORDER = [GENERAL_ASSAY_NAME]
 ASSAY_REFERENCE_RANGES: dict[str, list[tuple[float, float]]] = {}
 ASSAY_REFERENCE_LABEL: dict[str, str] = {}
 NONSPECIFIC_PEAKS: dict[str, list[float]] = {}
-REFERENCE_SHADE_COLOR = "#ebe8cb"
+REFERENCE_SHADE_COLOR = "#ded7a6"
 
 
 def _general_profile(settings: dict | None = None) -> dict:

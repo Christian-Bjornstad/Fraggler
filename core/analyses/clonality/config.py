@@ -173,7 +173,7 @@ ASSAY_CONFIG = {
 # ========= ASSAY-SPESIFIKK REFERANSE-SHADING =================
 # ============================================================
 
-REFERENCE_SHADE_COLOR = "#ebe8cb"
+REFERENCE_SHADE_COLOR = "#ded7a6"
 
 ASSAY_REFERENCE_RANGES: dict[str, list[tuple[float, float]]] = {
     "FR1": [(310.0, 360.0)],

@@ -6,6 +6,7 @@ Dispatcher for analysis-specific configurations.
 from __future__ import annotations
 from pathlib import Path
 import datetime
+import importlib
 
 # ==================================================================
 # ============================= OPTIONS ============================
@@ -30,6 +31,9 @@ DEFAULT_FSA_DIR = Path.cwd() / "data"
 
 DEFAULT_LIZ_LADDER = "LIZ500_250"
 DEFAULT_ROX_LADDER = "ROX400HD"
+
+DEFAULT_REFERENCE_SHADE_COLOR = "#ded7a6"
+DEFAULT_REFERENCE_SHADE_ALPHA = 0.24
 
 MIN_DISTANCE_BETWEEN_PEAKS_LIZ = 30
 MIN_SIZE_STANDARD_HEIGHT_LIZ = 300
@@ -75,6 +79,49 @@ def _get_analysis_attr(attr: str, default: Any = None) -> Any:
     mod = get_analysis_module("config")
     return getattr(mod, attr, default)
 
+def _hex_to_rgb(color: str) -> tuple[int, int, int]:
+    value = str(color or DEFAULT_REFERENCE_SHADE_COLOR).strip()
+    if value.startswith("#"):
+        value = value[1:]
+    if len(value) == 3:
+        value = "".join(ch * 2 for ch in value)
+    if len(value) != 6:
+        value = DEFAULT_REFERENCE_SHADE_COLOR[1:]
+    try:
+        return int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
+    except ValueError:
+        fallback = DEFAULT_REFERENCE_SHADE_COLOR[1:]
+        return int(fallback[0:2], 16), int(fallback[2:4], 16), int(fallback[4:6], 16)
+
+def reference_shade_rgba(alpha: float | None = None) -> str:
+    """Return the shared Plotly fill color for assay reference windows."""
+    color = _get_analysis_attr("REFERENCE_SHADE_COLOR", DEFAULT_REFERENCE_SHADE_COLOR)
+    r, g, b = _hex_to_rgb(str(color))
+    a = DEFAULT_REFERENCE_SHADE_ALPHA if alpha is None else float(alpha)
+    a = max(0.0, min(1.0, a))
+    return f"rgba({r},{g},{b},{a:.2f})"
+
+
+def merged_analysis_attr(attr: str) -> Any:
+    """Return an analysis config mapping merged across known analysis modules."""
+    merged: dict = {}
+    for module_path in (
+        "core.analyses.general.config",
+        "core.analyses.clonality.config",
+        "core.analyses.flt3.config",
+    ):
+        try:
+            value = getattr(importlib.import_module(module_path), attr, None)
+        except ModuleNotFoundError:
+            value = None
+        if isinstance(value, dict):
+            merged.update(value)
+
+    active_value = _get_analysis_attr(attr, None)
+    if isinstance(active_value, dict):
+        merged.update(active_value)
+    return merged
+
 def __getattr__(name: str) -> Any:
     """Module-level getattr (Python 3.7+) for dynamic delegation."""
     if name == "ASSAY_DISPLAY_ORDER":
@@ -88,7 +135,7 @@ def __getattr__(name: str) -> Any:
     if name == "NONSPECIFIC_PEAKS":
         return _get_analysis_attr("NONSPECIFIC_PEAKS", {})
     if name == "REFERENCE_SHADE_COLOR":
-        return _get_analysis_attr("REFERENCE_SHADE_COLOR", "#ebe8cb")
+        return _get_analysis_attr("REFERENCE_SHADE_COLOR", DEFAULT_REFERENCE_SHADE_COLOR)
     
     if name == "ROX_LADDER":
         return _get_analysis_attr("ROX_LADDER", DEFAULT_ROX_LADDER)
