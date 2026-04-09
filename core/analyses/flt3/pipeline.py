@@ -48,6 +48,9 @@ FLT3_QC_TRENDS_FILENAME = "FLT3_QC_TRENDS.xlsx"
 FLT3_MANUAL_RATIO_VERSION = 2
 MANUAL_RATIO_ASSAYS = {"FLT3-ITD", "FLT3-D835"}
 FLT3_REVIEW_MAX_RESIDUAL_BP = 3.0
+FLT3_LOW_SIGNAL_LADDER_PROMINENCE = 100.0
+FLT3_LOW_END_LADDER_PROMINENCE = 120.0
+FLT3_LATE_TEMPLATE_TOLERANCE = 950.0
 
 FLT3_TEMPLATE_TIMES: dict[tuple[str, str], tuple[float, ...]] = {
     ("FLT3-ITD", "10x_diluted"): (
@@ -997,7 +1000,10 @@ def _rank_flt3_template_keys_for_fsa(
         return template_keys
 
     candidate_df = get_ladder_candidates(fsa).copy().sort_values("time").reset_index(drop=True)
-    anchor_candidates = _merged_anchor_candidates(trace, candidate_df)
+    raw_trace = np.asarray(getattr(getattr(fsa, "fsa", {}), "get", lambda *_: [])("DATA4"), dtype=float)
+    if raw_trace.shape != trace.shape:
+        raw_trace = trace
+    anchor_candidates = _merged_anchor_candidates(trace, candidate_df, reference_trace=raw_trace)
     if anchor_candidates.empty:
         return template_keys
 
@@ -1039,6 +1045,68 @@ def _resolved_flt3_template_key(
     if ranked:
         return ranked[0]
     return _flt3_template_key(assay, analysis_type)
+
+
+def _mark_flt3_short_trace_if_needed(
+    fsa: FsaFile,
+    assay: str,
+    analysis_type: str | None,
+) -> bool:
+    missing_steps, trace_last_index = _flt3_short_trace_missing_steps(fsa, assay, analysis_type)
+    if not missing_steps:
+        return False
+
+    setattr(fsa, "ladder_fit_strategy", "short_trace")
+    setattr(
+        fsa,
+        "ladder_fit_note",
+        (
+            f"ROX DATA4 trace ends at scan {trace_last_index:.0f}, before the expected "
+            "GS500ROX high-end ladder steps: "
+            + ", ".join(f"{step:.0f}" for step in missing_steps)
+            + ". Full ladder assignment is not reliable."
+        ),
+    )
+    setattr(fsa, "ladder_missing_expected_steps", missing_steps)
+    setattr(fsa, "ladder_review_required", True)
+    return True
+
+
+def _flt3_short_trace_missing_steps(
+    fsa: FsaFile,
+    assay: str,
+    analysis_type: str | None,
+) -> tuple[list[float], float]:
+    if getattr(fsa, "ladder_fit_strategy", "") == "manual_adjustment":
+        return [], float("nan")
+
+    template_key = _resolved_flt3_template_key(fsa, assay, analysis_type)
+    if template_key is None:
+        return [], float("nan")
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0:
+        return [], float("nan")
+
+    template_times = np.asarray(FLT3_TEMPLATE_TIMES[template_key], dtype=float)
+    expected_steps = _flt3_expected_ladder_steps(fsa)
+    if template_times.size != expected_steps.size:
+        return [], float("nan")
+
+    trace_last_index = float(trace.size - 1)
+    short_margin = 50.0
+    missing_steps = [
+        float(step_bp)
+        for step_bp, template_time in zip(expected_steps, template_times, strict=False)
+        if float(template_time) > trace_last_index - short_margin
+    ]
+    if not missing_steps:
+        return [], trace_last_index
+
+    if min(missing_steps) < 400.0:
+        return [], trace_last_index
+
+    return missing_steps, trace_last_index
 
 
 def _mapped_peak_time_for_step(fsa: FsaFile, target_bp: float) -> float | None:
@@ -1087,6 +1155,8 @@ def _choose_template_trace_peak(
     search_radius: int,
     lower_bound: float | None = None,
     upper_bound: float | None = None,
+    min_intensity: float = FLT3_MIN_LADDER_PEAK_INTENSITY,
+    min_prominence: float = 0.0,
 ) -> float | None:
     if trace.size == 0:
         return None
@@ -1104,8 +1174,13 @@ def _choose_template_trace_peak(
     window = np.asarray(trace[lo : hi + 1], dtype=float)
     if window.size == 0 or not np.any(np.isfinite(window)):
         return None
-    peak_idx, _ = find_peaks(window, distance=6)
+    peak_kwargs = {"distance": 6}
+    if float(min_prominence) > 0.0:
+        peak_kwargs["prominence"] = float(min_prominence)
+    peak_idx, _ = find_peaks(window, **peak_kwargs)
     if peak_idx.size == 0:
+        if float(min_prominence) > 0.0:
+            return None
         snapped = _snap_trace_peak(
             trace,
             target_time,
@@ -1114,13 +1189,13 @@ def _choose_template_trace_peak(
             upper_bound=upper_bound,
         )
         intensity = _trace_intensity_at_time(trace, snapped)
-        if intensity is None or float(intensity) < FLT3_MIN_LADDER_PEAK_INTENSITY:
+        if intensity is None or float(intensity) < float(min_intensity):
             return None
         return snapped
 
     peak_times = pd.Series((peak_idx + lo).astype(float))
     peak_heights = pd.Series(trace[(peak_idx + lo).astype(int)].astype(float), index=peak_times.index)
-    strong = peak_heights.astype(float) >= FLT3_MIN_LADDER_PEAK_INTENSITY
+    strong = peak_heights.astype(float) >= float(min_intensity)
     if strong.any():
         peak_times = peak_times[strong]
         peak_heights = peak_heights[strong]
@@ -1152,15 +1227,24 @@ def _choose_template_trace_peak(
 def _late_trace_peak_candidates(
     trace: np.ndarray,
     *,
-    min_time: float = 3800.0,
+    min_time: float = 3400.0,
     min_intensity: float = FLT3_MIN_LADDER_PEAK_INTENSITY,
+    reference_trace: np.ndarray | None = None,
 ) -> pd.DataFrame:
     if trace.size == 0:
         return pd.DataFrame(columns=["time", "intensity", "source"])
 
     from scipy.signal import find_peaks
 
-    peak_idx, _ = find_peaks(trace, distance=15)
+    reference = np.asarray(reference_trace, dtype=float) if reference_trace is not None else trace
+    if reference.shape != trace.shape:
+        reference = trace
+
+    peak_idx, props = find_peaks(
+        reference,
+        distance=15,
+        prominence=FLT3_LOW_SIGNAL_LADDER_PROMINENCE,
+    )
     if peak_idx.size == 0:
         return pd.DataFrame(columns=["time", "intensity", "source"])
 
@@ -1168,23 +1252,71 @@ def _late_trace_peak_candidates(
         {
             "time": peak_idx.astype(float),
             "intensity": trace[peak_idx].astype(float),
+            "prominence": np.asarray(props.get("prominences", []), dtype=float),
             "source": "trace",
         }
     )
+    low_signal = rows["intensity"].astype(float) < float(min_intensity)
+    rows.loc[low_signal, "source"] = "late_prominent"
     rows = rows[
         (rows["time"].astype(float) >= float(min_time))
-        & (rows["intensity"].astype(float) >= float(min_intensity))
+        & (
+            (rows["intensity"].astype(float) >= float(min_intensity))
+            | (rows["prominence"].astype(float) >= FLT3_LOW_SIGNAL_LADDER_PROMINENCE)
+        )
     ].copy()
     if rows.empty:
         return pd.DataFrame(columns=["time", "intensity", "source"])
     return rows.sort_values(["time", "intensity"], ascending=[True, False]).reset_index(drop=True)
 
 
-def _merged_anchor_candidates(trace: np.ndarray, candidate_df: pd.DataFrame) -> pd.DataFrame:
+def _low_end_trace_peak_candidates(
+    trace: np.ndarray,
+    *,
+    min_time: float,
+    max_time: float,
+) -> pd.DataFrame:
+    if trace.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+
+    from scipy.signal import find_peaks
+
+    peak_idx, props = find_peaks(
+        trace,
+        distance=5,
+        prominence=FLT3_LOW_END_LADDER_PROMINENCE,
+    )
+    if peak_idx.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+
+    rows = pd.DataFrame(
+        {
+            "time": peak_idx.astype(float),
+            "intensity": trace[peak_idx].astype(float),
+            "prominence": np.asarray(props.get("prominences", []), dtype=float),
+            "source": "low_prominent",
+        }
+    )
+    rows = rows[
+        (rows["time"].astype(float) >= float(min_time))
+        & (rows["time"].astype(float) <= float(max_time))
+        & (rows["prominence"].astype(float) >= FLT3_LOW_END_LADDER_PROMINENCE)
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+    return rows.sort_values(["time", "intensity"], ascending=[True, False]).reset_index(drop=True)
+
+
+def _merged_anchor_candidates(
+    trace: np.ndarray,
+    candidate_df: pd.DataFrame,
+    *,
+    reference_trace: np.ndarray | None = None,
+) -> pd.DataFrame:
     frames: list[pd.DataFrame] = []
     if not candidate_df.empty:
         frames.append(candidate_df.loc[:, ["time", "intensity", "source"]].copy())
-    late_trace = _late_trace_peak_candidates(trace)
+    late_trace = _late_trace_peak_candidates(trace, reference_trace=reference_trace)
     if not late_trace.empty:
         frames.append(late_trace)
     if not frames:
@@ -1195,12 +1327,18 @@ def _merged_anchor_candidates(trace: np.ndarray, candidate_df: pd.DataFrame) -> 
         return pd.DataFrame(columns=["time", "intensity", "source"])
 
     merged["time_key"] = merged["time"].astype(float).round().astype(int)
+    late_prominent_keys = set(
+        merged.loc[merged["source"].astype(str) == "late_prominent", "time_key"].astype(int).tolist()
+    )
     merged = (
         merged.sort_values(["intensity", "time"], ascending=[False, False])
         .drop_duplicates(subset=["time_key"], keep="first")
         .sort_values("time")
         .reset_index(drop=True)
     )
+    if late_prominent_keys:
+        late_mask = merged["time_key"].astype(int).isin(late_prominent_keys)
+        merged.loc[late_mask, "source"] = "late_prominent"
     return merged.loc[:, ["time", "intensity", "source"]]
 
 
@@ -1388,9 +1526,9 @@ def _flt3_high_end_anchors_are_plausible(
     gap = float(anchor_500) - float(anchor_490)
     if gap < 35.0 or gap > 80.0:
         return False
-    if abs(float(anchor_500) - float(template_500)) > 180.0:
+    if abs(float(anchor_500) - float(template_500)) > FLT3_LATE_TEMPLATE_TOLERANCE:
         return False
-    if abs(float(anchor_490) - float(template_490)) > 180.0:
+    if abs(float(anchor_490) - float(template_490)) > FLT3_LATE_TEMPLATE_TOLERANCE:
         return False
     return True
 
@@ -1400,9 +1538,19 @@ def _flt3_peak_meets_min_intensity(trace: np.ndarray, peak_time: float | None) -
     return intensity is not None and float(intensity) >= FLT3_MIN_LADDER_PEAK_INTENSITY
 
 
+def _flt3_template_rescue_trace_min_intensity(step_bp: float) -> float:
+    return -220.0
+
+
+def _flt3_template_rescue_trace_min_prominence(step_bp: float) -> float:
+    if step_bp <= 100.0 or step_bp >= 340.0:
+        return FLT3_LOW_END_LADDER_PROMINENCE
+    return 80.0
+
+
 def _flt3_template_window(template_time: float, step_bp: float) -> tuple[float, float]:
     if step_bp >= 490.0:
-        return float(template_time - 110.0), float(template_time + 380.0)
+        return float(template_time - 110.0), float(template_time + 1200.0)
     if step_bp >= 450.0:
         return float(template_time - 120.0), float(template_time + 320.0)
     if step_bp >= 400.0:
@@ -1439,7 +1587,12 @@ def _rank_flt3_high_end_anchor_combos(
     rows = anchor_candidates.copy()
     rows["time"] = rows["time"].astype(float)
     rows["intensity"] = rows["intensity"].astype(float)
-    rows = rows[rows["intensity"] >= FLT3_MIN_LADDER_PEAK_INTENSITY].copy()
+    if "source" not in rows.columns:
+        rows["source"] = ""
+    rows = rows[
+        (rows["intensity"] >= FLT3_MIN_LADDER_PEAK_INTENSITY)
+        | (rows["source"].astype(str) == "late_prominent")
+    ].copy()
     if rows.empty:
         return []
 
@@ -1447,9 +1600,12 @@ def _rank_flt3_high_end_anchor_combos(
     target_gap_450_490 = float(template_490 - template_450)
     target_gap_450_500 = float(template_500 - template_450)
 
+    # Compact FLT3 runs can place the true 450/490/500 anchors below the old
+    # absolute floors (for example 3722/3933/3977), so keep the window tied to
+    # the selected template rather than to long-run scan positions.
     candidates_500 = rows[
-        (rows["time"] >= max(4000.0, template_500 - 260.0))
-        & (rows["time"] <= template_500 + 380.0)
+        (rows["time"] >= template_500 - 300.0)
+        & (rows["time"] <= template_500 + 1200.0)
     ].copy()
     if candidates_500.empty:
         return []
@@ -1459,8 +1615,8 @@ def _rank_flt3_high_end_anchor_combos(
     for peak_500 in candidates_500.itertuples(index=False):
         candidates_490 = rows[
             (rows["time"] < peak_500.time - 20.0)
-            & (rows["time"] >= max(3950.0, peak_500.time - 90.0))
-            & (rows["time"] <= peak_500.time - 35.0)
+            & (rows["time"] >= max(template_490 - 190.0, peak_500.time - 95.0))
+            & (rows["time"] <= peak_500.time - 30.0)
         ].copy()
         if candidates_490.empty:
             continue
@@ -1468,8 +1624,8 @@ def _rank_flt3_high_end_anchor_combos(
         for peak_490 in candidates_490.itertuples(index=False):
             candidates_450 = rows[
                 (rows["time"] < peak_490.time - 120.0)
-                & (rows["time"] >= max(3800.0, peak_490.time - 320.0))
-                & (rows["time"] <= peak_490.time - 180.0)
+                & (rows["time"] >= max(template_450 - 230.0, peak_490.time - 340.0))
+                & (rows["time"] <= peak_490.time - 170.0)
             ].copy()
             if candidates_450.empty:
                 continue
@@ -1579,6 +1735,297 @@ def _choose_template_candidate_time(
     return float(candidates.loc[best_idx, "time"])
 
 
+def _choose_flt3_forward_candidate_time(
+    candidate_df: pd.DataFrame,
+    target_time: float,
+    previous_time: float | None,
+    target_gap: float | None,
+    intensity_reference: float | None = None,
+) -> float | None:
+    if candidate_df.empty:
+        return None
+
+    candidates = candidate_df.copy()
+    candidates["time"] = candidates["time"].astype(float)
+    candidates["intensity"] = candidates["intensity"].astype(float)
+
+    lower_bound = float(target_time - 70.0)
+    upper_bound = float(target_time + 70.0)
+    if previous_time is not None:
+        lower_bound = max(lower_bound, float(previous_time) + 8.0)
+
+    candidates = candidates[
+        (candidates["time"] >= lower_bound)
+        & (candidates["time"] <= upper_bound)
+        & (candidates["intensity"] >= FLT3_MIN_LADDER_PEAK_INTENSITY)
+    ].copy()
+    if candidates.empty:
+        return None
+
+    score = (candidates["time"].astype(float) - float(target_time)).abs()
+    if previous_time is not None and target_gap is not None and target_gap > 0:
+        actual_gap = candidates["time"].astype(float) - float(previous_time)
+        candidates = candidates[
+            (actual_gap >= max(10.0, float(target_gap) * 0.45))
+            & (actual_gap <= float(target_gap) * 1.75)
+        ].copy()
+        if candidates.empty:
+            return None
+        score = (candidates["time"].astype(float) - float(target_time)).abs()
+        score = score + (actual_gap.loc[candidates.index] - float(target_gap)).abs() * 1.8
+
+    intensity_penalty = candidates["intensity"].astype(float).apply(
+        lambda value: _flt3_ladder_intensity_penalty(float(value), intensity_reference)
+    )
+    score = score + intensity_penalty - candidates["intensity"].astype(float).clip(lower=0.0, upper=2000.0) * 0.0015
+    best_idx = score.astype(float).idxmin()
+    return float(candidates.loc[best_idx, "time"])
+
+
+def _rank_flt3_short_trace_triads(
+    candidate_df: pd.DataFrame,
+    template_times: np.ndarray,
+    trace_last_index: float,
+    *,
+    limit: int = 10,
+) -> list[tuple[float, float, float]]:
+    if candidate_df.empty:
+        return []
+
+    idx_139 = FLT3_TEMPLATE_STEP_INDEX[139]
+    idx_150 = FLT3_TEMPLATE_STEP_INDEX[150]
+    idx_160 = FLT3_TEMPLATE_STEP_INDEX[160]
+    template_gap_139_150 = float(template_times[idx_150] - template_times[idx_139])
+    template_gap_150_160 = float(template_times[idx_160] - template_times[idx_150])
+
+    rows = candidate_df.copy()
+    rows["time"] = rows["time"].astype(float)
+    rows["intensity"] = rows["intensity"].astype(float)
+    rows = rows[
+        (rows["time"] >= float(template_times[idx_139]) - 140.0)
+        & (rows["time"] <= min(float(trace_last_index) - 120.0, float(template_times[idx_160]) + 950.0))
+        & (rows["intensity"] >= FLT3_MIN_LADDER_PEAK_INTENSITY)
+    ].copy()
+    if rows.empty:
+        return []
+
+    scored: list[tuple[float, tuple[float, float, float]]] = []
+    for peak_139 in rows.itertuples(index=False):
+        candidates_150 = rows[
+            (rows["time"] > float(peak_139.time) + 25.0)
+            & (rows["time"] < float(peak_139.time) + 90.0)
+        ].copy()
+        if candidates_150.empty:
+            continue
+        for peak_150 in candidates_150.itertuples(index=False):
+            gap_139_150 = float(peak_150.time - peak_139.time)
+            if gap_139_150 < 40.0 or gap_139_150 > 80.0:
+                continue
+            candidates_160 = rows[
+                (rows["time"] > float(peak_150.time) + 25.0)
+                & (rows["time"] < float(peak_150.time) + 90.0)
+            ].copy()
+            if candidates_160.empty:
+                continue
+            for peak_160 in candidates_160.itertuples(index=False):
+                gap_150_160 = float(peak_160.time - peak_150.time)
+                span_139_160 = float(peak_160.time - peak_139.time)
+                if gap_150_160 < 40.0 or gap_150_160 > 80.0:
+                    continue
+                if span_139_160 < 95.0 or span_139_160 > 145.0:
+                    continue
+
+                score = (
+                    abs(gap_139_150 - template_gap_139_150) * 3.0
+                    + abs(gap_150_160 - template_gap_150_160) * 3.0
+                    + abs((gap_139_150 + gap_150_160) - (template_gap_139_150 + template_gap_150_160)) * 1.2
+                    - (
+                        float(peak_139.intensity)
+                        + float(peak_150.intensity)
+                        + float(peak_160.intensity)
+                    )
+                    * 0.01
+                )
+                scored.append(
+                    (
+                        float(score),
+                        (
+                            float(peak_139.time),
+                            float(peak_150.time),
+                            float(peak_160.time),
+                        ),
+                    )
+                )
+
+    ranked: list[tuple[float, float, float]] = []
+    seen: set[tuple[int, int, int]] = set()
+    for _, combo in sorted(scored, key=lambda item: item[0]):
+        combo_key = tuple(int(round(value)) for value in combo)
+        if combo_key in seen:
+            continue
+        seen.add(combo_key)
+        ranked.append(combo)
+        if len(ranked) >= int(limit):
+            break
+    return ranked
+
+
+def _attempt_flt3_short_trace_partial_fit(
+    fsa: FsaFile,
+    assay: str,
+    analysis_type: str | None,
+    missing_steps: list[float],
+    trace_last_index: float,
+) -> FsaFile | None:
+    template_key = _resolved_flt3_template_key(fsa, assay, analysis_type)
+    if template_key is None:
+        return None
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0:
+        return None
+
+    full_expected_steps = _flt3_expected_ladder_steps(fsa)
+    template_times = np.asarray(FLT3_TEMPLATE_TIMES[template_key], dtype=float)
+    if template_times.size != full_expected_steps.size:
+        return None
+
+    idx_139 = FLT3_TEMPLATE_STEP_INDEX[139]
+    idx_300 = FLT3_TEMPLATE_STEP_INDEX[300]
+    last_missing_idx = FLT3_TEMPLATE_STEP_INDEX[int(round(min(missing_steps)))]
+    last_available_idx = max(0, last_missing_idx - 1)
+    if last_available_idx < idx_300:
+        return None
+
+    candidate_df = get_ladder_candidates(fsa).copy()
+    if candidate_df.empty:
+        return None
+
+    candidate_df["time"] = candidate_df["time"].astype(float)
+    candidate_df["intensity"] = candidate_df["intensity"].astype(float)
+    candidate_df = candidate_df.sort_values("time").reset_index(drop=True)
+
+    triads = _rank_flt3_short_trace_triads(candidate_df, template_times, trace_last_index)
+    if not triads:
+        return None
+
+    best_trial: FsaFile | None = None
+    best_qc: dict[str, float | int] | None = None
+    best_subset_indices: list[int] | None = None
+
+    template_139 = float(template_times[idx_139])
+    template_gap_139_150 = float(template_times[idx_139 + 1] - template_times[idx_139])
+    template_gap_150_160 = float(template_times[idx_139 + 2] - template_times[idx_139 + 1])
+
+    for peak_139, peak_150, peak_160 in triads:
+        scale = (
+            ((float(peak_150) - float(peak_139)) / template_gap_139_150)
+            + ((float(peak_160) - float(peak_150)) / template_gap_150_160)
+        ) / 2.0
+        if scale < 0.90 or scale > 1.25:
+            continue
+
+        aligned_times = (template_times - template_139) * scale + float(peak_139)
+        mapping_times: dict[int, float] = {
+            idx_139: float(peak_139),
+            idx_139 + 1: float(peak_150),
+            idx_139 + 2: float(peak_160),
+        }
+        previous_time = float(peak_160)
+        previous_target_time = float(aligned_times[idx_139 + 2])
+
+        for step_idx in range(idx_139 + 3, last_available_idx + 1):
+            target_time = float(aligned_times[step_idx])
+            if target_time >= float(trace_last_index) - 10.0:
+                break
+            target_gap = float(target_time - previous_target_time)
+            intensity_reference = _flt3_ladder_intensity_reference(trace, mapping_times)
+            peak_time = _choose_flt3_forward_candidate_time(
+                candidate_df,
+                target_time,
+                previous_time,
+                target_gap,
+                intensity_reference,
+            )
+            if peak_time is None:
+                break
+            mapping_times[int(step_idx)] = float(peak_time)
+            previous_time = float(peak_time)
+            previous_target_time = float(target_time)
+
+        last_kept_idx = max(mapping_times)
+        if last_kept_idx < idx_300:
+            continue
+        subset_indices = list(range(idx_139, last_kept_idx + 1))
+        if any(index not in mapping_times for index in subset_indices):
+            continue
+
+        try:
+            trial = copy.deepcopy(fsa)
+            subset_steps = full_expected_steps[subset_indices].copy()
+            subset_peak_times = np.asarray(
+                [float(mapping_times[index]) for index in subset_indices],
+                dtype=float,
+            )
+            if np.any(np.diff(subset_peak_times) <= 0):
+                continue
+            trial.expected_ladder_steps = subset_steps.copy()
+            trial.ladder_steps = subset_steps.copy()
+            trial.best_size_standard = subset_peak_times.copy()
+            trial = fit_size_standard_to_ladder(trial)
+        except Exception:
+            continue
+
+        if not getattr(trial, "fitted_to_model", False):
+            continue
+
+        qc = compute_ladder_qc_metrics(trial)
+        if not np.isfinite(float(qc.get("r2", float("nan")))):
+            continue
+        if float(qc.get("max_abs_error_bp", float("inf"))) > FLT3_REVIEW_MAX_RESIDUAL_BP:
+            continue
+
+        if best_qc is None:
+            best_trial = trial
+            best_qc = qc
+            best_subset_indices = subset_indices
+            continue
+
+        best_max = float(best_qc.get("max_abs_error_bp", float("inf")))
+        best_r2 = float(best_qc.get("r2", float("-inf")))
+        current_max = float(qc.get("max_abs_error_bp", float("inf")))
+        current_r2 = float(qc.get("r2", float("-inf")))
+        if (
+            max(subset_indices) > max(best_subset_indices or [])
+            and current_max <= best_max + 0.35
+        ) or current_max + 0.05 < best_max or (
+            abs(current_max - best_max) <= 0.05 and current_r2 > best_r2 + 1e-6
+        ):
+            best_trial = trial
+            best_qc = qc
+            best_subset_indices = subset_indices
+
+    if best_trial is None or best_subset_indices is None:
+        return None
+
+    kept_step_values = [float(full_expected_steps[index]) for index in best_subset_indices]
+    omitted_steps = [
+        float(full_expected_steps[index])
+        for index in range(max(best_subset_indices) + 1, int(full_expected_steps.size))
+    ]
+    best_trial.expected_ladder_steps = full_expected_steps.copy()
+    best_trial.ladder_missing_expected_steps = omitted_steps
+    best_trial.ladder_fit_strategy = "short_trace_partial"
+    best_trial.ladder_review_required = False
+    best_trial.ladder_fit_note = (
+        f"ROX DATA4 trace ends at scan {trace_last_index:.0f}. "
+        "Partial FLT3 ladder fit anchored from 139/150/160 and trimmed to the recorded tail "
+        f"(kept {', '.join(f'{step:.0f}' for step in kept_step_values)} bp; "
+        f"omitted {', '.join(f'{step:.0f}' for step in omitted_steps)} bp)."
+    )
+    return best_trial
+
+
 def _template_mapping_payload_for_anchors(
     fsa: FsaFile,
     template_key: tuple[str, str],
@@ -1640,7 +2087,7 @@ def _template_mapping_payload_for_anchors(
                 if step_bp <= 100.0:
                     radius = 75
                 else:
-                    radius = 26 if step_idx >= len(expected_steps) - 6 else 42
+                    radius = 65 if step_bp >= 400.0 else (42 if step_idx >= len(expected_steps) - 6 else 95)
                 lower_bound = None
                 if previous_time is not None and target_gap is not None:
                     lower_bound = float(previous_time) - float(target_gap) * 1.75
@@ -1654,6 +2101,8 @@ def _template_mapping_payload_for_anchors(
                     search_radius=radius,
                     lower_bound=lower_bound,
                     upper_bound=upper_bound,
+                    min_intensity=_flt3_template_rescue_trace_min_intensity(step_bp),
+                    min_prominence=_flt3_template_rescue_trace_min_prominence(step_bp),
                 )
         if peak_time is None:
             return None
@@ -1672,6 +2121,221 @@ def _template_mapping_payload_for_anchors(
         "manual_candidates": sorted({float(value) for value in manual_candidates}),
         "template_key": template_key,
     }
+
+
+def _template_mapping_payloads_for_scaled_endpoints(
+    fsa: FsaFile,
+    template_key: tuple[str, str],
+    template_times: np.ndarray,
+    expected_steps: np.ndarray,
+    candidate_df: pd.DataFrame,
+    anchor_candidates: pd.DataFrame,
+    anchor_450: float,
+    anchor_490: float,
+    anchor_500: float,
+    *,
+    limit: int = 8,
+) -> list[dict[str, object]]:
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0 or candidate_df.empty or anchor_candidates.empty:
+        return []
+
+    template_450 = float(template_times[-3])
+    template_490 = float(template_times[-2])
+    template_500 = float(template_times[-1])
+
+    candidates = anchor_candidates.copy()
+    candidates["time"] = candidates["time"].astype(float)
+    candidates["intensity"] = candidates["intensity"].astype(float)
+
+    candidate_times = [
+        float(value) for value in candidate_df.get("time", pd.Series(dtype=float)).tolist()
+    ]
+    payloads: list[tuple[float, dict[str, object]]] = []
+    seen: set[tuple[int, ...]] = set()
+
+    for low_anchor_idx in (0, 1, 2, 4):
+        low_anchor_bp = float(expected_steps[low_anchor_idx])
+        template_low = float(template_times[low_anchor_idx])
+        template_span = template_500 - template_low
+        if template_span <= 0.0:
+            continue
+
+        low_min = float(anchor_500) - template_span * 1.18
+        low_max = float(anchor_500) - template_span * 0.90
+        low_candidates = candidates[
+            (candidates["time"] >= low_min)
+            & (candidates["time"] <= low_max)
+            & (candidates["time"] < float(anchor_450) - 1500.0)
+            & (
+                (candidates["intensity"] >= FLT3_MIN_LADDER_PEAK_INTENSITY)
+                | (candidates.get("source", "").astype(str) == "low_prominent")
+            )
+        ].copy()
+        low_trace_candidates = _low_end_trace_peak_candidates(
+            trace,
+            min_time=low_min,
+            max_time=min(low_max, float(anchor_450) - 1500.0),
+        )
+        if not low_trace_candidates.empty:
+            low_candidates = pd.concat([low_candidates, low_trace_candidates], ignore_index=True)
+        if low_candidates.empty:
+            continue
+        low_candidates["time_key"] = low_candidates["time"].astype(float).round().astype(int)
+        low_candidates = (
+            low_candidates.sort_values(["intensity", "time"], ascending=[False, False])
+            .drop_duplicates(subset=["time_key"], keep="first")
+            .sort_values("time")
+            .reset_index(drop=True)
+        )
+
+        for low_peak in low_candidates.itertuples(index=False):
+            anchor_low = float(low_peak.time)
+            scale = (float(anchor_500) - anchor_low) / template_span
+            if scale < 0.90 or scale > 1.18:
+                continue
+
+            aligned_times = (template_times - template_low) * scale + anchor_low
+            if abs(float(anchor_450) - float(aligned_times[-3])) > 90.0:
+                continue
+            if abs(float(anchor_490) - float(aligned_times[-2])) > 90.0:
+                continue
+
+            mapping_times: dict[int, float] = {
+                int(low_anchor_idx): anchor_low,
+                int(len(expected_steps) - 3): float(anchor_450),
+                int(len(expected_steps) - 2): float(anchor_490),
+                int(len(expected_steps) - 1): float(anchor_500),
+            }
+            if int(low_anchor_idx) == FLT3_TEMPLATE_STEP_INDEX[139]:
+                peak_160 = _choose_template_candidate_time(
+                    candidate_df,
+                    float(aligned_times[6]),
+                    None,
+                    None,
+                    None,
+                )
+                if peak_160 is None:
+                    peak_160 = _choose_template_trace_peak(
+                        trace,
+                        float(aligned_times[6]),
+                        None,
+                        None,
+                        None,
+                        search_radius=55,
+                        lower_bound=float(anchor_low) + 20.0,
+                        min_intensity=_flt3_template_rescue_trace_min_intensity(float(expected_steps[6])),
+                        min_prominence=_flt3_template_rescue_trace_min_prominence(float(expected_steps[6])),
+                    )
+                if peak_160 is None or peak_160 <= float(anchor_low) + 15.0:
+                    continue
+
+                target_gap_150_160 = float(aligned_times[6] - aligned_times[5])
+                peak_150 = _choose_template_candidate_time(
+                    candidate_df,
+                    float(aligned_times[5]),
+                    float(peak_160),
+                    target_gap_150_160,
+                    None,
+                )
+                if peak_150 is None:
+                    peak_150 = _choose_template_trace_peak(
+                        trace,
+                        float(aligned_times[5]),
+                        float(peak_160),
+                        target_gap_150_160,
+                        None,
+                        search_radius=45,
+                        lower_bound=float(anchor_low) + 10.0,
+                        upper_bound=float(peak_160) - 8.0,
+                        min_intensity=_flt3_template_rescue_trace_min_intensity(float(expected_steps[5])),
+                        min_prominence=_flt3_template_rescue_trace_min_prominence(float(expected_steps[5])),
+                    )
+                if peak_150 is None or peak_150 <= float(anchor_low) + 8.0 or peak_150 >= float(peak_160) - 8.0:
+                    continue
+
+                mapping_times[5] = float(peak_150)
+                mapping_times[6] = float(peak_160)
+            previous_time = float(anchor_500)
+            previous_target_time = float(aligned_times[-1])
+            ok = True
+
+            for step_idx in range(len(expected_steps) - 2, -1, -1):
+                if step_idx in mapping_times:
+                    previous_time = float(mapping_times[step_idx])
+                    previous_target_time = float(aligned_times[step_idx])
+                    continue
+
+                target_time = float(aligned_times[step_idx])
+                target_gap = float(previous_target_time - target_time)
+                intensity_reference = _flt3_ladder_intensity_reference(trace, mapping_times)
+                peak_time = _choose_template_candidate_time(
+                    candidate_df,
+                    target_time,
+                    previous_time,
+                    target_gap,
+                    intensity_reference,
+                )
+                if peak_time is None:
+                    step_bp = float(expected_steps[step_idx])
+                    radius = 75 if step_bp <= 100.0 else 42
+                    if step_bp >= 400.0:
+                        radius = 65
+                    elif step_idx >= len(expected_steps) - 6:
+                        radius = 42
+                    else:
+                        radius = 95
+                    lower_bound = float(previous_time) - float(target_gap) * 1.75
+                    upper_bound = previous_time - 8.0
+                    peak_time = _choose_template_trace_peak(
+                        trace,
+                        target_time,
+                        previous_time,
+                        target_gap,
+                        intensity_reference,
+                        search_radius=radius,
+                        lower_bound=lower_bound,
+                        upper_bound=upper_bound,
+                        min_intensity=_flt3_template_rescue_trace_min_intensity(step_bp),
+                        min_prominence=_flt3_template_rescue_trace_min_prominence(step_bp),
+                    )
+                if peak_time is None or peak_time >= previous_time:
+                    ok = False
+                    break
+
+                mapping_times[int(step_idx)] = float(peak_time)
+                previous_time = float(peak_time)
+                previous_target_time = target_time
+
+            if not ok or len(mapping_times) != int(expected_steps.size):
+                continue
+
+            mapping_key = tuple(int(round(mapping_times[index])) for index in range(len(expected_steps)))
+            if mapping_key in seen:
+                continue
+            seen.add(mapping_key)
+
+            manual_candidates: list[float] = []
+            for peak_time in mapping_times.values():
+                if _candidate_index_for_time(candidate_times, peak_time, tolerance=1.5) is None:
+                    manual_candidates.append(float(peak_time))
+
+            shape_penalty = _flt3_mapping_shape_penalty(mapping_times, template_times, trace)
+            payloads.append(
+                (
+                    float(shape_penalty),
+                    {
+                        "mapping": {},
+                        "mapping_times": {int(k): float(v) for k, v in mapping_times.items()},
+                        "manual_candidates": sorted({float(value) for value in manual_candidates}),
+                        "template_key": template_key,
+                        "template_anchor_mode": f"scaled_{int(low_anchor_bp)}_500",
+                    },
+                )
+            )
+
+    payloads = sorted(payloads, key=lambda item: item[0])
+    return [payload for _, payload in payloads[: int(limit)]]
 
 
 def _template_mapping_payload(
@@ -1695,7 +2359,10 @@ def _template_mapping_payload(
         return None
 
     candidate_df = get_ladder_candidates(fsa).copy().sort_values("time").reset_index(drop=True)
-    anchor_candidates = _merged_anchor_candidates(trace, candidate_df)
+    raw_trace = np.asarray(getattr(getattr(fsa, "fsa", {}), "get", lambda *_: [])("DATA4"), dtype=float)
+    if raw_trace.shape != trace.shape:
+        raw_trace = trace
+    anchor_candidates = _merged_anchor_candidates(trace, candidate_df, reference_trace=raw_trace)
 
     anchor_500 = _mapped_peak_time_for_step(fsa, 500.0)
     anchor_490 = _mapped_peak_time_for_step(fsa, 490.0)
@@ -1784,7 +2451,10 @@ def _attempt_flt3_template_fit(
         return None
 
     candidate_df = get_ladder_candidates(fsa).copy().sort_values("time").reset_index(drop=True)
-    anchor_candidates = _merged_anchor_candidates(trace, candidate_df)
+    raw_trace = np.asarray(getattr(getattr(fsa, "fsa", {}), "get", lambda *_: [])("DATA4"), dtype=float)
+    if raw_trace.shape != trace.shape:
+        raw_trace = trace
+    anchor_candidates = _merged_anchor_candidates(trace, candidate_df, reference_trace=raw_trace)
     auto_500 = _mapped_peak_time_for_step(fsa, 500.0)
     auto_490 = _mapped_peak_time_for_step(fsa, 490.0)
     auto_450 = _mapped_peak_time_for_step(fsa, 450.0)
@@ -1803,7 +2473,8 @@ def _attempt_flt3_template_fit(
     best_payload: dict[str, object] | None = None
     best_qc: dict[str, float | int] | None = None
 
-    seen: set[tuple[int, int, int]] = set()
+    seen_combos: set[tuple[int, int, int]] = set()
+    seen_payloads: set[tuple[int, ...]] = set()
     for template_key in template_keys:
         template_times = np.asarray(FLT3_TEMPLATE_TIMES[template_key], dtype=float)
         if template_times.size != expected_steps.size:
@@ -1860,9 +2531,10 @@ def _attempt_flt3_template_fit(
                 int(round(anchor_490)),
                 int(round(anchor_500)),
             )
-            if combo_key in seen:
+            if combo_key in seen_combos:
                 continue
-            seen.add(combo_key)
+            seen_combos.add(combo_key)
+            candidate_payloads: list[dict[str, object]] = []
             payload = _template_mapping_payload_for_anchors(
                 fsa,
                 template_key,
@@ -1873,92 +2545,114 @@ def _attempt_flt3_template_fit(
                 float(anchor_490),
                 float(anchor_500),
             )
-            if payload is None:
-                continue
-            try:
-                trial = copy.deepcopy(fsa)
-                trial.expected_ladder_steps = expected_steps.copy()
-                trial.ladder_steps = trial.expected_ladder_steps.copy()
-                trial = apply_manual_ladder_mapping(
-                    trial,
-                    {
-                        "mapping": payload["mapping"],
-                        "mapping_times": payload["mapping_times"],
-                        "manual_candidates": payload["manual_candidates"],
-                    },
-                )
-            except Exception:
-                continue
-
-            rescued_qc = compute_ladder_qc_metrics(trial)
-            rescued_max = float(rescued_qc.get("max_abs_error_bp", float("inf")))
-            rescued_mean = float(rescued_qc.get("mean_abs_error_bp", float("inf")))
-            rescued_r2 = float(rescued_qc.get("r2", float("-inf")))
-            rescued_shape = _flt3_mapping_shape_penalty(
-                payload["mapping_times"],
-                template_times,
-                trace,
-            )
-
-            improved = (
-                rescued_max + 0.2 < current_max
-                or rescued_mean + 0.1 < current_mean
-                or rescued_r2 > current_r2 + 1e-5
-                or (
-                    current_invalid
-                    and rescued_r2 >= 0.999
-                    and rescued_shape <= FLT3_ACCEPTABLE_RESCUE_SHAPE_PENALTY
-                    and rescued_shape + 100.0 < current_shape
-                )
-                or (
-                    rescued_r2 >= current_r2 - 2e-5
-                    and rescued_max <= current_max + 0.15
-                    and rescued_mean <= current_mean + 0.05
-                    and rescued_shape + 25.0 < current_shape
+            if payload is not None:
+                candidate_payloads.append(payload)
+            candidate_payloads.extend(
+                _template_mapping_payloads_for_scaled_endpoints(
+                    fsa,
+                    template_key,
+                    template_times,
+                    expected_steps,
+                    candidate_df,
+                    anchor_candidates,
+                    float(anchor_450),
+                    float(anchor_490),
+                    float(anchor_500),
                 )
             )
-            if not improved:
-                continue
 
-            if best_qc is None:
-                best_trial = trial
-                best_payload = payload
-                best_qc = dict(rescued_qc)
-                best_qc["_shape_penalty"] = rescued_shape
-                continue
+            for payload in candidate_payloads:
+                payload_mapping = payload["mapping_times"]
+                payload_key = tuple(
+                    int(round(float(payload_mapping[index]))) for index in range(len(expected_steps))
+                )
+                if payload_key in seen_payloads:
+                    continue
+                seen_payloads.add(payload_key)
+                try:
+                    trial = copy.deepcopy(fsa)
+                    trial.expected_ladder_steps = expected_steps.copy()
+                    trial.ladder_steps = trial.expected_ladder_steps.copy()
+                    trial = apply_manual_ladder_mapping(
+                        trial,
+                        {
+                            "mapping": payload["mapping"],
+                            "mapping_times": payload["mapping_times"],
+                            "manual_candidates": payload["manual_candidates"],
+                        },
+                    )
+                except Exception:
+                    continue
 
-            best_r2 = float(best_qc.get("r2", float("-inf")))
-            best_max = float(best_qc.get("max_abs_error_bp", float("inf")))
-            best_mean = float(best_qc.get("mean_abs_error_bp", float("inf")))
-            best_shape = float(best_qc.get("_shape_penalty", float("inf")))
-            both_high_quality = rescued_r2 >= 0.999 and best_r2 >= 0.999
-            if (
-                (
-                    both_high_quality
-                    and rescued_shape + 20.0 < best_shape
-                    and rescued_max <= best_max + 0.50
-                    and rescued_mean <= best_mean + 0.25
+                rescued_qc = compute_ladder_qc_metrics(trial)
+                rescued_max = float(rescued_qc.get("max_abs_error_bp", float("inf")))
+                rescued_mean = float(rescued_qc.get("mean_abs_error_bp", float("inf")))
+                rescued_r2 = float(rescued_qc.get("r2", float("-inf")))
+                rescued_shape = _flt3_mapping_shape_penalty(
+                    payload["mapping_times"],
+                    template_times,
+                    trace,
                 )
-                or (
-                    rescued_r2 > best_r2 + 1e-6
-                    and (not both_high_quality or rescued_shape <= best_shape + 40.0)
+
+                improved = (
+                    rescued_max + 0.2 < current_max
+                    or rescued_mean + 0.1 < current_mean
+                    or rescued_r2 > current_r2 + 1e-5
+                    or (
+                        current_invalid
+                        and rescued_r2 >= 0.999
+                        and rescued_shape <= FLT3_ACCEPTABLE_RESCUE_SHAPE_PENALTY
+                        and rescued_shape + 100.0 < current_shape
+                    )
+                    or (
+                        rescued_r2 >= current_r2 - 2e-5
+                        and rescued_max <= current_max + 0.15
+                        and rescued_mean <= current_mean + 0.05
+                        and rescued_shape + 25.0 < current_shape
+                    )
                 )
-                or (abs(rescued_r2 - best_r2) <= 1e-6 and rescued_max + 0.05 < best_max)
-                or (
-                    abs(rescued_r2 - best_r2) <= 1e-6
-                    and abs(rescued_max - best_max) <= 0.05
-                    and rescued_mean + 0.02 < best_mean
-                )
-                or (
-                    abs(rescued_r2 - best_r2) <= 2e-5
-                    and abs(rescued_max - best_max) <= 0.2
-                    and rescued_shape + 15.0 < best_shape
-                )
-            ):
-                best_trial = trial
-                best_payload = payload
-                best_qc = dict(rescued_qc)
-                best_qc["_shape_penalty"] = rescued_shape
+                if not improved:
+                    continue
+
+                if best_qc is None:
+                    best_trial = trial
+                    best_payload = payload
+                    best_qc = dict(rescued_qc)
+                    best_qc["_shape_penalty"] = rescued_shape
+                    continue
+
+                best_r2 = float(best_qc.get("r2", float("-inf")))
+                best_max = float(best_qc.get("max_abs_error_bp", float("inf")))
+                best_mean = float(best_qc.get("mean_abs_error_bp", float("inf")))
+                best_shape = float(best_qc.get("_shape_penalty", float("inf")))
+                both_high_quality = rescued_r2 >= 0.999 and best_r2 >= 0.999
+                if (
+                    (
+                        both_high_quality
+                        and rescued_shape + 20.0 < best_shape
+                        and rescued_max <= best_max + 0.50
+                        and rescued_mean <= best_mean + 0.25
+                    )
+                    or (
+                        rescued_r2 > best_r2 + 1e-6
+                        and (not both_high_quality or rescued_shape <= best_shape + 40.0)
+                    )
+                    or (abs(rescued_r2 - best_r2) <= 1e-6 and rescued_max + 0.05 < best_max)
+                    or (
+                        abs(rescued_r2 - best_r2) <= 1e-6
+                        and abs(rescued_max - best_max) <= 0.05
+                        and rescued_mean + 0.02 < best_mean
+                    )
+                    or (
+                        abs(rescued_r2 - best_r2) <= 2e-5
+                        and abs(rescued_max - best_max) <= 0.2
+                        and rescued_shape + 15.0 < best_shape
+                    )
+                ):
+                    best_trial = trial
+                    best_payload = payload
+                    best_qc = dict(rescued_qc)
+                    best_qc["_shape_penalty"] = rescued_shape
 
     if best_trial is None or best_payload is None or best_qc is None:
         return None
@@ -2052,6 +2746,25 @@ def _analyse_fsa_candidate(
 ) -> FsaFile | None:
     fsa = analyse_fsa_rox(fsa_path, sample_channel, ladder_name=FLT3_ROX_LADDER)
     if fsa is not None:
+        short_trace_missing_steps, trace_last_index = _flt3_short_trace_missing_steps(
+            fsa,
+            assay,
+            analysis_type,
+        )
+        if short_trace_missing_steps:
+            rescued = _attempt_flt3_short_trace_partial_fit(
+                fsa,
+                assay,
+                analysis_type,
+                short_trace_missing_steps,
+                trace_last_index,
+            )
+            if rescued is not None:
+                setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
+                return rescued
+        if _mark_flt3_short_trace_if_needed(fsa, assay, analysis_type):
+            setattr(fsa, "_flt3_sizing_method", _infer_sizing_method(fsa))
+            return fsa
         rescued = _attempt_flt3_template_fit(fsa, assay, analysis_type)
         if rescued is not None:
             setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
