@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import threading
+from collections import Counter
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -207,6 +208,44 @@ def _summarize_state(state: dict[str, Any], elapsed_seconds: float, folders: lis
     }
 
 
+def _coerce_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value or "").strip().lower()
+    return text in {"1", "true", "yes", "y"}
+
+
+def _summarize_ladder_validation(entries: list[dict[str, Any]]) -> dict[str, Any]:
+    status_counts: Counter[str] = Counter()
+    ladder_counts: Counter[str] = Counter()
+    profile_counts: Counter[str] = Counter()
+    review_required_count = 0
+
+    for entry in entries:
+        ladder_status = str(entry.get("ladder_qc") or entry.get("LadderQC") or "").strip()
+        if ladder_status:
+            status_counts[ladder_status] += 1
+
+        ladder_name = str(entry.get("ladder") or entry.get("Ladder") or "").strip()
+        if ladder_name:
+            ladder_counts[ladder_name] += 1
+
+        profile = str(entry.get("ladder_fit_profile") or entry.get("ladderFitProfile") or "").strip()
+        if profile:
+            profile_counts[profile] += 1
+
+        if _coerce_bool(entry.get("ladder_review_required", entry.get("ladderReviewRequired", False))):
+            review_required_count += 1
+
+    return {
+        "entry_count": int(len(entries)),
+        "review_required_count": int(review_required_count),
+        "status_counts": dict(sorted(status_counts.items())),
+        "ladder_counts": dict(sorted(ladder_counts.items())),
+        "profile_counts": dict(sorted(profile_counts.items())),
+    }
+
+
 def run_validation(argv: list[str] | None = None) -> dict[str, Any]:
     parser = build_arg_parser()
     args = parser.parse_args(argv)
@@ -311,6 +350,7 @@ def run_validation(argv: list[str] | None = None) -> dict[str, Any]:
                 "artifact_export": round(timing["artifact_export_finished"] - timing["artifact_export_started"], 3),
             },
             "candidate_entry_count": int(len(collected_entries)),
+            "ladder_validation": _summarize_ladder_validation(collected_entries),
             "state_summary": _summarize_state(state_payload if isinstance(state_payload, dict) else {}, elapsed, folders),
         }
         summary_json.parent.mkdir(parents=True, exist_ok=True)

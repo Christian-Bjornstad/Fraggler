@@ -38,6 +38,8 @@ DEFAULT_DATA_ROOT = Path("/Volumes/T7 Shield/DATA/flt3")
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "validation_outputs"
 FLT3_ASSAYS = {"FLT3-ITD", "FLT3-D835"}
 DIT_SPECIMEN_RE = re.compile(r"^\d{2}OUM\d{5}$", re.IGNORECASE)
+FLT3_TEMPLATE_RESCUE_AUTO_ACCEPT_MAX_RESIDUAL_BP = 4.0
+FLT3_TEMPLATE_RESCUE_AUTO_ACCEPT_MIN_R2 = 0.9997
 
 
 class Flt3ValidationTimeout(TimeoutError):
@@ -234,6 +236,29 @@ def _preferred_injection(meta: dict[str, Any]) -> int:
     return int(PREFERRED_INJECTION_TIME.get(assay, meta.get("protocol_injection_time") or meta.get("injection_time") or 0))
 
 
+def _should_auto_accept_flt3_review_case(
+    *,
+    ladder_fit_strategy: str,
+    missing_steps: list[float],
+    max_abs_error_bp: float,
+    r2: float,
+    fitted_step_count: int,
+    expected_step_count: int,
+) -> bool:
+    if ladder_fit_strategy != "flt3_template_rescue":
+        return False
+    if missing_steps:
+        return False
+    if expected_step_count <= 0 or fitted_step_count != expected_step_count:
+        return False
+    if not math.isfinite(max_abs_error_bp) or not math.isfinite(r2):
+        return False
+    return bool(
+        r2 >= FLT3_TEMPLATE_RESCUE_AUTO_ACCEPT_MIN_R2
+        and max_abs_error_bp <= FLT3_TEMPLATE_RESCUE_AUTO_ACCEPT_MAX_RESIDUAL_BP
+    )
+
+
 def _year_for(path: Path, data_root: Path) -> str:
     try:
         rel = path.relative_to(data_root)
@@ -252,6 +277,9 @@ def _review_reason(
     error: str = "",
 ) -> str:
     if error:
+        lowered_error = error.lower()
+        if "timed out" in lowered_error or "timeout" in lowered_error:
+            return "Per-file validation timed out; treat as short/incomplete-trace review, not a ladder-fit failure."
         return error
     if status == "ladder_fit_failed":
         return "No ladder fit returned by the FLT3 analysis path."
@@ -281,6 +309,17 @@ def _queue_group(row: dict[str, Any]) -> str:
     strategy = str(row.get("ladder_fit_strategy") or "")
     missing = str(row.get("ladder_missing_expected_steps") or "")
     reason = str(row.get("review_reason") or "")
+    error = str(row.get("error") or "")
+    lowered_reason = reason.lower()
+    lowered_error = error.lower()
+    if (
+        strategy == "timeout_review"
+        or "timed out" in lowered_reason
+        or "timed out" in lowered_error
+        or "timeout" in lowered_reason
+        or "timeout" in lowered_error
+    ):
+        return "short_trace_timeout"
     if status in {"analysis_error", "ladder_fit_failed"}:
         return "fit_failed"
     if strategy == "short_trace":
@@ -307,6 +346,8 @@ def _row_for_failed_path(path: Path, data_root: Path, status: str, error: str) -
         relative = str(path.relative_to(data_root))
     except ValueError:
         relative = path.name
+    error_lower = error.lower()
+    ladder_fit_strategy = "timeout_review" if ("timed out" in error_lower or "timeout" in error_lower) else ""
     return {
         "path": str(path),
         "relative_path": relative,
@@ -315,9 +356,11 @@ def _row_for_failed_path(path: Path, data_root: Path, status: str, error: str) -
         "file": path.name,
         "status": status,
         "needs_manual_review": True,
+        "ladder_fit_strategy": ladder_fit_strategy,
+        "ladder_review_required": True,
         "review_reason": _review_reason(
             status=status,
-            ladder_fit_strategy="",
+            ladder_fit_strategy=ladder_fit_strategy,
             missing_steps=[],
             max_abs_error_bp=float("inf"),
             r2=float("nan"),
@@ -358,7 +401,7 @@ def validate_one_path(payload: tuple[str, str, bool, bool, int, bool, str]) -> d
                 required_run_name=required_run_name,
             )
     except Flt3ValidationTimeout:
-        return _row_for_failed_path(path, data_root, "analysis_error", f"timed out after {timeout_seconds}s")
+        return _row_for_failed_path(path, data_root, "review_required", f"timed out after {timeout_seconds}s")
     except Exception as exc:
         return _row_for_failed_path(path, data_root, "analysis_error", str(exc))
     finally:
@@ -419,6 +462,8 @@ def _validate_one_path_inner(
             assay,
             str(meta.get("analysis_type") or ""),
         )
+    except Flt3ValidationTimeout:
+        raise
     except Exception as exc:
         row = _row_for_failed_path(path, data_root, "analysis_error", str(exc))
         row.update(meta)
@@ -447,10 +492,26 @@ def _validate_one_path_inner(
     max_abs_error_bp = _safe_float(metrics.get("max_abs_error_bp"), float("inf"))
     ladder_fit_strategy = str(getattr(fsa, "ladder_fit_strategy", "auto_full"))
     missing_steps = [float(v) for v in getattr(fsa, "ladder_missing_expected_steps", []) or []]
+    expected_steps_arr = np.asarray(
+        getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", [])),
+        dtype=float,
+    )
+    fitted_steps_arr = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    expected_step_count = int(expected_steps_arr.size)
+    fitted_step_count = int(fitted_steps_arr.size)
     ladder_review_required = bool(
         getattr(fsa, "ladder_review_required", bool(missing_steps))
         or (math.isfinite(max_abs_error_bp) and max_abs_error_bp > FLT3_REVIEW_MAX_RESIDUAL_BP)
     )
+    if _should_auto_accept_flt3_review_case(
+        ladder_fit_strategy=ladder_fit_strategy,
+        missing_steps=missing_steps,
+        max_abs_error_bp=max_abs_error_bp,
+        r2=r2,
+        fitted_step_count=fitted_step_count,
+        expected_step_count=expected_step_count,
+    ):
+        ladder_review_required = False
 
     if ladder_fit_strategy == "manual_adjustment":
         status = "manual_adjustment"
@@ -791,12 +852,23 @@ def run_validation(
     checkpoint_every: int,
     dit_only: bool,
     required_run_name: str,
+    excluded_basenames: list[str] | None = None,
+    progress_callback=None,
+    progress_max_callback=None,
+    status_callback=None,
 ) -> dict[str, Any]:
     data_root = data_root.expanduser().resolve()
     output_dir = output_dir.expanduser().resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
 
     files = _discover_files(data_root, selected_years, limit, input_manifest=input_manifest)
+    excluded_name_set = {
+        str(name).strip()
+        for name in (excluded_basenames or [])
+        if str(name).strip()
+    }
+    if excluded_name_set:
+        files = [path for path in files if path.name not in excluded_name_set]
     payloads = [
         (
             str(path),
@@ -812,12 +884,29 @@ def run_validation(
 
     rows: list[dict[str, Any]] = []
     print(f"Discovered {len(files)} FSA files under {data_root}", flush=True)
+    if progress_max_callback is not None:
+        try:
+            progress_max_callback.emit(len(payloads))
+        except AttributeError:
+            progress_max_callback(len(payloads))
+    if status_callback is not None:
+        message = f"Discovered {len(payloads)} FLT3 files to validate."
+        try:
+            status_callback.emit(message)
+        except AttributeError:
+            status_callback(message)
 
     def maybe_checkpoint(idx: int) -> None:
         if checkpoint_every <= 0 or idx <= 0 or idx % checkpoint_every != 0:
             return
         _write_output_bundle(output_dir, rows, data_root, suffix=".partial")
         print(f"Checkpoint saved after {idx}/{len(payloads)} files", flush=True)
+        if status_callback is not None:
+            message = f"Checkpoint saved after {idx}/{len(payloads)} files ({max(len(payloads) - idx, 0)} remaining)."
+            try:
+                status_callback.emit(message)
+            except AttributeError:
+                status_callback(message)
 
     if workers <= 1:
         iterator = map(validate_one_path, payloads)
@@ -825,6 +914,17 @@ def run_validation(
             rows.append(row)
             if idx == 1 or idx % 100 == 0 or idx == len(payloads):
                 print(f"Validated {idx}/{len(payloads)} files", flush=True)
+                if status_callback is not None:
+                    message = f"Validated {idx}/{len(payloads)} files ({max(len(payloads) - idx, 0)} remaining)."
+                    try:
+                        status_callback.emit(message)
+                    except AttributeError:
+                        status_callback(message)
+            if progress_callback is not None:
+                try:
+                    progress_callback.emit(idx)
+                except AttributeError:
+                    progress_callback(idx)
             maybe_checkpoint(idx)
     else:
         from multiprocessing import Pool
@@ -834,9 +934,22 @@ def run_validation(
                 rows.append(row)
                 if idx == 1 or idx % 100 == 0 or idx == len(payloads):
                     print(f"Validated {idx}/{len(payloads)} files", flush=True)
+                    if status_callback is not None:
+                        message = f"Validated {idx}/{len(payloads)} files ({max(len(payloads) - idx, 0)} remaining)."
+                        try:
+                            status_callback.emit(message)
+                        except AttributeError:
+                            status_callback(message)
+                if progress_callback is not None:
+                    try:
+                        progress_callback.emit(idx)
+                    except AttributeError:
+                        progress_callback(idx)
                 maybe_checkpoint(idx)
 
     summary = _write_output_bundle(output_dir, rows, data_root)
+    summary["excluded_basenames"] = sorted(excluded_name_set)
+    summary["excluded_count"] = len(excluded_name_set)
 
     print(json.dumps(_json_safe(summary), indent=2, sort_keys=True))
     print(f"Metrics CSV: {output_dir / 'flt3_ladder_metrics.csv'}")

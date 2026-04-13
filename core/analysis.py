@@ -10,6 +10,7 @@ from pathlib import Path
 import copy
 import time
 from itertools import combinations, product
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -116,6 +117,96 @@ ROX400HD_LOCAL_REFINEMENT_MAX_TRIALS = 256
 ROX400HD_LOCAL_REFINEMENT_MIN_SCORE_GAIN = 0.10
 ROX400HD_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN = 0.20
 ROX400HD_LOCAL_REFINEMENT_MAX_R2_DROP = 0.0008
+
+LADDER_FIT_PROFILE_CLONALITY_LIZ500 = "clonality_liz500"
+LADDER_FIT_PROFILE_CLONALITY_ROX400HD = "clonality_rox400hd"
+LADDER_FIT_PROFILE_FLT3_GS500ROX = "flt3_gs500rox"
+
+LADDER_FIT_AUTO_ACCEPT_RULES: dict[str, dict[str, float]] = {
+    LADDER_FIT_PROFILE_CLONALITY_LIZ500: {
+        "r2_floor": 0.9985,
+        "mean_abs_error_bp": 1.8,
+        "max_abs_error_bp": 3.0,
+    },
+    LADDER_FIT_PROFILE_CLONALITY_ROX400HD: {
+        "r2_floor": 0.9985,
+        "mean_abs_error_bp": 1.8,
+        "max_abs_error_bp": 3.0,
+    },
+    LADDER_FIT_PROFILE_FLT3_GS500ROX: {
+        "r2_floor": 0.9985,
+        "mean_abs_error_bp": 1.8,
+        "max_abs_error_bp": 3.0,
+    },
+}
+
+LADDER_FIT_GS500_REFINEMENT_RULES: dict[str, dict[str, Any]] = {
+    LADDER_FIT_PROFILE_CLONALITY_LIZ500: {
+        "trigger_max_abs_error": GS500_LOCAL_REFINEMENT_TRIGGER_MAX_ABS_ERROR,
+        "trigger_mean_abs_error": GS500_LOCAL_REFINEMENT_TRIGGER_MEAN_ABS_ERROR,
+        "step_residual": GS500_LOCAL_REFINEMENT_STEP_RESIDUAL,
+        "early_step_residual": GS500_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL,
+        "max_steps": GS500_LOCAL_REFINEMENT_MAX_STEPS,
+        "max_options_per_step": GS500_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP,
+        "max_trials": GS500_LOCAL_REFINEMENT_MAX_TRIALS,
+        "min_score_gain": GS500_LOCAL_REFINEMENT_MIN_SCORE_GAIN,
+        "min_max_error_gain": GS500_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN,
+        "max_r2_drop": GS500_LOCAL_REFINEMENT_MAX_R2_DROP,
+        "trace_option_min_distance": GS500_TRACE_OPTION_MIN_DISTANCE,
+        "trace_option_min_height": GS500_TRACE_OPTION_MIN_HEIGHT,
+        "edge_trace_option_min_height": GS500_EDGE_TRACE_OPTION_MIN_HEIGHT,
+        "trace_option_rel_height": GS500_TRACE_OPTION_REL_HEIGHT,
+        "edge_trace_option_rel_height": GS500_EDGE_TRACE_OPTION_REL_HEIGHT,
+        "anchor_block_max_residual": GS500_ANCHOR_BLOCK_MAX_RESIDUAL,
+        "block_refinement_margin": GS500_BLOCK_REFINEMENT_MARGIN,
+        "block_refinement_min_distance": GS500_BLOCK_REFINEMENT_MIN_DISTANCE,
+        "block_refinement_min_height": GS500_BLOCK_REFINEMENT_MIN_HEIGHT,
+        "edge_block_refinement_margin": GS500_EDGE_BLOCK_REFINEMENT_MARGIN,
+        "edge_block_refinement_min_height": GS500_EDGE_BLOCK_REFINEMENT_MIN_HEIGHT,
+        "block_refinement_max_candidates": GS500_BLOCK_REFINEMENT_MAX_CANDIDATES,
+        "anchor_blocks": GS500_ANCHOR_BLOCKS,
+    },
+    LADDER_FIT_PROFILE_FLT3_GS500ROX: {
+        "trigger_max_abs_error": GS500_LOCAL_REFINEMENT_TRIGGER_MAX_ABS_ERROR,
+        "trigger_mean_abs_error": GS500_LOCAL_REFINEMENT_TRIGGER_MEAN_ABS_ERROR,
+        "step_residual": GS500_LOCAL_REFINEMENT_STEP_RESIDUAL,
+        "early_step_residual": GS500_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL,
+        "max_steps": GS500_LOCAL_REFINEMENT_MAX_STEPS,
+        "max_options_per_step": GS500_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP,
+        "max_trials": GS500_LOCAL_REFINEMENT_MAX_TRIALS,
+        "min_score_gain": GS500_LOCAL_REFINEMENT_MIN_SCORE_GAIN,
+        "min_max_error_gain": GS500_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN,
+        "max_r2_drop": GS500_LOCAL_REFINEMENT_MAX_R2_DROP,
+        "trace_option_min_distance": GS500_TRACE_OPTION_MIN_DISTANCE,
+        "trace_option_min_height": GS500_TRACE_OPTION_MIN_HEIGHT,
+        "edge_trace_option_min_height": GS500_EDGE_TRACE_OPTION_MIN_HEIGHT,
+        "trace_option_rel_height": GS500_TRACE_OPTION_REL_HEIGHT,
+        "edge_trace_option_rel_height": GS500_EDGE_TRACE_OPTION_REL_HEIGHT,
+        "anchor_block_max_residual": GS500_ANCHOR_BLOCK_MAX_RESIDUAL,
+        "block_refinement_margin": GS500_BLOCK_REFINEMENT_MARGIN,
+        "block_refinement_min_distance": GS500_BLOCK_REFINEMENT_MIN_DISTANCE,
+        "block_refinement_min_height": GS500_BLOCK_REFINEMENT_MIN_HEIGHT,
+        "edge_block_refinement_margin": GS500_EDGE_BLOCK_REFINEMENT_MARGIN,
+        "edge_block_refinement_min_height": GS500_EDGE_BLOCK_REFINEMENT_MIN_HEIGHT,
+        "block_refinement_max_candidates": GS500_BLOCK_REFINEMENT_MAX_CANDIDATES,
+        "anchor_blocks": GS500_ANCHOR_BLOCKS,
+    },
+}
+
+LADDER_FIT_ROX400HD_REFINEMENT_RULES: dict[str, dict[str, float]] = {
+    LADDER_FIT_PROFILE_CLONALITY_ROX400HD: {
+        "trigger_max_abs_error": ROX400HD_LOCAL_REFINEMENT_TRIGGER_MAX_ABS_ERROR,
+        "trigger_mean_abs_error": ROX400HD_LOCAL_REFINEMENT_TRIGGER_MEAN_ABS_ERROR,
+        "step_residual": ROX400HD_LOCAL_REFINEMENT_STEP_RESIDUAL,
+        "early_step_residual": ROX400HD_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL,
+        "max_steps": ROX400HD_LOCAL_REFINEMENT_MAX_STEPS,
+        "max_options_per_step": ROX400HD_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP,
+        "max_trials": ROX400HD_LOCAL_REFINEMENT_MAX_TRIALS,
+        "min_score_gain": ROX400HD_LOCAL_REFINEMENT_MIN_SCORE_GAIN,
+        "min_max_error_gain": ROX400HD_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN,
+        "max_r2_drop": ROX400HD_LOCAL_REFINEMENT_MAX_R2_DROP,
+    },
+}
 
 
 def _log_ladder_timing(label: str, phase: str, fsa_path: Path, elapsed_seconds: float, **details: object) -> None:
@@ -226,7 +317,77 @@ def _count_missing_low_end_steps(fsa: FsaFile) -> int:
     return missing
 
 
+def _normalize_ladder_fit_profile(
+    ladder_fit_profile: str | None = None,
+    *,
+    analysis_id: str | None = None,
+    ladder_name: str | None = None,
+) -> str:
+    profile = str(ladder_fit_profile or "").strip().lower()
+    if profile in LADDER_FIT_AUTO_ACCEPT_RULES:
+        return profile
+
+    analysis = str(analysis_id or "").strip().lower()
+    ladder = str(ladder_name or "").strip().upper()
+
+    if profile == "gs500rox":
+        return LADDER_FIT_PROFILE_FLT3_GS500ROX
+    if profile in {"rox400hd", "clonality_rox"}:
+        return LADDER_FIT_PROFILE_CLONALITY_ROX400HD
+    if profile in {"liz500", "liz500_250", "clonality_liz"}:
+        return LADDER_FIT_PROFILE_CLONALITY_LIZ500
+
+    if analysis == "flt3" or ladder == "GS500ROX":
+        return LADDER_FIT_PROFILE_FLT3_GS500ROX
+    if ladder.startswith("LIZ"):
+        return LADDER_FIT_PROFILE_CLONALITY_LIZ500
+    if ladder == "ROX400HD":
+        return LADDER_FIT_PROFILE_CLONALITY_ROX400HD
+    if analysis == "clonality":
+        return LADDER_FIT_PROFILE_CLONALITY_ROX400HD if "ROX" in ladder else LADDER_FIT_PROFILE_CLONALITY_LIZ500
+    return LADDER_FIT_PROFILE_CLONALITY_ROX400HD if "ROX" in ladder else LADDER_FIT_PROFILE_CLONALITY_LIZ500
+
+
+def _set_ladder_fit_profile(
+    fsa: FsaFile,
+    ladder_fit_profile: str | None = None,
+    *,
+    analysis_id: str | None = None,
+) -> str:
+    profile = _normalize_ladder_fit_profile(
+        ladder_fit_profile,
+        analysis_id=analysis_id,
+        ladder_name=str(getattr(fsa, "ladder", "") or ""),
+    )
+    fsa.ladder_fit_profile = profile
+    return profile
+
+
+def _get_ladder_fit_profile(fsa: FsaFile) -> str:
+    return _set_ladder_fit_profile(
+        fsa,
+        getattr(fsa, "ladder_fit_profile", None),
+        analysis_id=str(getattr(fsa, "analysis_id", "") or ""),
+    )
+
+
+def _ladder_fit_auto_accept_rules(profile: str) -> dict[str, float]:
+    normalized = _normalize_ladder_fit_profile(profile)
+    return LADDER_FIT_AUTO_ACCEPT_RULES[normalized]
+
+
+def _ladder_fit_gs500_refinement_rules(profile: str) -> dict[str, Any] | None:
+    normalized = _normalize_ladder_fit_profile(profile)
+    return LADDER_FIT_GS500_REFINEMENT_RULES.get(normalized)
+
+
+def _ladder_fit_rox400hd_refinement_rules(profile: str) -> dict[str, float] | None:
+    normalized = _normalize_ladder_fit_profile(profile)
+    return LADDER_FIT_ROX400HD_REFINEMENT_RULES.get(normalized)
+
+
 def _set_ladder_fit_metadata(fsa: FsaFile, strategy: str, note: str | None = None) -> FsaFile:
+    _set_ladder_fit_profile(fsa, getattr(fsa, "ladder_fit_profile", None), analysis_id=str(getattr(fsa, "analysis_id", "") or ""))
     fsa.ladder_fit_strategy = strategy
     fsa.ladder_missing_expected_steps = _missing_expected_ladder_steps(fsa)
     fsa.ladder_review_required = bool(fsa.ladder_missing_expected_steps)
@@ -381,29 +542,42 @@ def _is_acceptable_auto_fit(
     metrics: dict[str, float | int],
     *,
     missing_count: int = 0,
+    ladder_fit_profile: str | None = None,
 ) -> bool:
+    rules = _ladder_fit_auto_accept_rules(_normalize_ladder_fit_profile(ladder_fit_profile))
     return (
         missing_count == 0
-        and float(metrics.get("r2", float("-inf"))) >= AUTO_ACCEPT_R2_FLOOR
-        and float(metrics.get("mean_abs_error_bp", float("inf"))) <= AUTO_ACCEPT_MEAN_ABS_ERROR
-        and float(metrics.get("max_abs_error_bp", float("inf"))) <= AUTO_ACCEPT_MAX_ABS_ERROR
+        and float(metrics.get("r2", float("-inf"))) >= float(rules["r2_floor"])
+        and float(metrics.get("mean_abs_error_bp", float("inf"))) <= float(rules["mean_abs_error_bp"])
+        and float(metrics.get("max_abs_error_bp", float("inf"))) <= float(rules["max_abs_error_bp"])
     )
 
 
-def _annotate_fit_qc_review(fsa: FsaFile, metrics: dict[str, float | int]) -> FsaFile:
+def _annotate_fit_qc_review(
+    fsa: FsaFile,
+    metrics: dict[str, float | int],
+    *,
+    ladder_fit_profile: str | None = None,
+) -> FsaFile:
     if bool(getattr(fsa, "ladder_review_required", False)):
         return fsa
 
+    profile = _normalize_ladder_fit_profile(
+        ladder_fit_profile or getattr(fsa, "ladder_fit_profile", None),
+        analysis_id=str(getattr(fsa, "analysis_id", "") or ""),
+        ladder_name=str(getattr(fsa, "ladder", "") or ""),
+    )
+    rules = _ladder_fit_auto_accept_rules(profile)
     reasons: list[str] = []
     r2 = float(metrics.get("r2", float("nan")))
     mean_abs_error = float(metrics.get("mean_abs_error_bp", float("inf")))
     max_abs_error = float(metrics.get("max_abs_error_bp", float("inf")))
 
-    if not np.isfinite(r2) or r2 < AUTO_ACCEPT_R2_FLOOR:
+    if not np.isfinite(r2) or r2 < float(rules["r2_floor"]):
         reasons.append(f"R2 {r2:.6f}")
-    if not np.isfinite(mean_abs_error) or mean_abs_error > AUTO_ACCEPT_MEAN_ABS_ERROR:
+    if not np.isfinite(mean_abs_error) or mean_abs_error > float(rules["mean_abs_error_bp"]):
         reasons.append(f"mean residual {mean_abs_error:.2f} bp")
-    if not np.isfinite(max_abs_error) or max_abs_error > AUTO_ACCEPT_MAX_ABS_ERROR:
+    if not np.isfinite(max_abs_error) or max_abs_error > float(rules["max_abs_error_bp"]):
         reasons.append(f"max residual {max_abs_error:.2f} bp")
 
     if not reasons:
@@ -884,15 +1058,19 @@ def _gs500_local_refinement_radius(step_bp: float) -> float:
     return 55.0
 
 
-def _gs500_local_refinement_threshold(step_bp: float, step_idx: int) -> float:
+def _gs500_local_refinement_threshold(step_bp: float, step_idx: int, rules: dict[str, Any]) -> float:
     if step_bp <= 160.0:
-        return GS500_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL
+        return float(rules["early_step_residual"])
     if step_idx < 4:
-        return GS500_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL
-    return GS500_LOCAL_REFINEMENT_STEP_RESIDUAL
+        return float(rules["early_step_residual"])
+    return float(rules["step_residual"])
 
 
-def _gs500_refinement_candidate_indices(expected_steps: np.ndarray, residuals: np.ndarray) -> list[int]:
+def _gs500_refinement_candidate_indices(
+    expected_steps: np.ndarray,
+    residuals: np.ndarray,
+    rules: dict[str, Any],
+) -> list[int]:
     residual_arr = np.asarray(residuals, dtype=float)
     expected_arr = np.asarray(expected_steps, dtype=float)
     if expected_arr.size == 0 or residual_arr.size != expected_arr.size:
@@ -900,16 +1078,16 @@ def _gs500_refinement_candidate_indices(expected_steps: np.ndarray, residuals: n
 
     selected: list[int] = []
     seen: set[int] = set()
-    for block in GS500_ANCHOR_BLOCKS:
+    for block in rules["anchor_blocks"]:
         block_indices = [idx for idx in block if idx < expected_arr.size]
         if not block_indices:
             continue
         block_residuals = residual_arr[block_indices]
         trigger = any(
-            float(block_residuals[pos]) >= _gs500_local_refinement_threshold(float(expected_arr[idx]), int(idx))
+            float(block_residuals[pos]) >= _gs500_local_refinement_threshold(float(expected_arr[idx]), int(idx), rules)
             for pos, idx in enumerate(block_indices)
         )
-        if trigger or float(np.max(block_residuals)) >= GS500_ANCHOR_BLOCK_MAX_RESIDUAL:
+        if trigger or float(np.max(block_residuals)) >= float(rules["anchor_block_max_residual"]):
             for idx in block_indices:
                 if idx not in seen:
                     selected.append(int(idx))
@@ -934,6 +1112,7 @@ def _trace_peak_options(
     max_options: int,
     min_height: float = GS500_TRACE_OPTION_MIN_HEIGHT,
     relative_height: float = GS500_TRACE_OPTION_REL_HEIGHT,
+    min_distance: int = GS500_TRACE_OPTION_MIN_DISTANCE,
 ) -> list[float]:
     signal_trace = np.asarray(trace, dtype=float)
     if signal_trace.size == 0 or upper_bound <= lower_bound:
@@ -960,7 +1139,7 @@ def _trace_peak_options(
     peaks, _props = signal.find_peaks(
         window,
         height=height_floor,
-        distance=GS500_TRACE_OPTION_MIN_DISTANCE,
+        distance=int(min_distance),
     )
     if peaks.size == 0:
         return []
@@ -997,6 +1176,7 @@ def _gs500_anchor_block_candidate_times(
     fsa: FsaFile,
     peak_times: np.ndarray,
     block_indices: list[int],
+    rules: dict[str, Any],
 ) -> list[float]:
     if not block_indices:
         return []
@@ -1017,7 +1197,7 @@ def _gs500_anchor_block_candidate_times(
     if upper_bound <= lower_bound:
         return block_times.tolist()
 
-    margin = GS500_EDGE_BLOCK_REFINEMENT_MARGIN if edge_focus else GS500_BLOCK_REFINEMENT_MARGIN
+    margin = float(rules["edge_block_refinement_margin"]) if edge_focus else float(rules["block_refinement_margin"])
     window_start = max(lower_bound, float(block_times[0]) - margin)
     window_end = min(upper_bound, float(block_times[-1]) + margin)
     if window_end <= window_start:
@@ -1059,20 +1239,20 @@ def _gs500_anchor_block_candidate_times(
             local_max = float(np.max(window))
             if local_max > 0.0:
                 height_floor = max(
-                    GS500_EDGE_BLOCK_REFINEMENT_MIN_HEIGHT if edge_focus else GS500_BLOCK_REFINEMENT_MIN_HEIGHT,
+                    float(rules["edge_block_refinement_min_height"]) if edge_focus else float(rules["block_refinement_min_height"]),
                     float(np.percentile(window, 70)) * 0.30,
                     local_max * (0.02 if edge_focus else 0.04),
                 )
                 peaks, _props = signal.find_peaks(
                     window,
                     height=height_floor,
-                    distance=GS500_BLOCK_REFINEMENT_MIN_DISTANCE,
+                    distance=int(rules["block_refinement_min_distance"]),
                 )
                 for peak_idx in peaks.tolist():
                     add_candidate(float(peak_idx + lo))
 
     ordered = list(rows.values())
-    if len(ordered) <= GS500_BLOCK_REFINEMENT_MAX_CANDIDATES:
+    if len(ordered) <= int(rules["block_refinement_max_candidates"]):
         return sorted(item[0] for item in ordered)
 
     block_center = float(np.mean(block_times))
@@ -1089,7 +1269,7 @@ def _gs500_anchor_block_candidate_times(
         if any(abs(existing - candidate_time) <= 1.5 for existing in selected):
             continue
         selected.append(float(candidate_time))
-        if len(selected) >= GS500_BLOCK_REFINEMENT_MAX_CANDIDATES:
+        if len(selected) >= int(rules["block_refinement_max_candidates"]):
             break
     return sorted(selected)
 
@@ -1178,6 +1358,7 @@ def _gs500_local_refinement_options(
     peak_times: np.ndarray,
     predicted_bp: np.ndarray,
     step_idx: int,
+    rules: dict[str, Any],
 ) -> list[float]:
     current_time = float(peak_times[step_idx])
     step_bp = float(expected_steps[step_idx])
@@ -1231,9 +1412,10 @@ def _gs500_local_refinement_options(
             upper_bound=min(trace_upper, target_time + (radius * 1.25)),
             target_time=target_time,
             current_time=current_time,
-            max_options=GS500_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP,
-            min_height=GS500_EDGE_TRACE_OPTION_MIN_HEIGHT if edge_focus else GS500_TRACE_OPTION_MIN_HEIGHT,
-            relative_height=GS500_EDGE_TRACE_OPTION_REL_HEIGHT if edge_focus else GS500_TRACE_OPTION_REL_HEIGHT,
+            max_options=int(rules["max_options_per_step"]),
+            min_height=float(rules["edge_trace_option_min_height"]) if edge_focus else float(rules["trace_option_min_height"]),
+            relative_height=float(rules["edge_trace_option_rel_height"]) if edge_focus else float(rules["trace_option_rel_height"]),
+            min_distance=int(rules["trace_option_min_distance"]),
         )
         for candidate_time in trace_options:
             candidate_key = int(round(candidate_time))
@@ -1262,13 +1444,13 @@ def _gs500_local_refinement_options(
         if any(abs(existing - candidate_time) <= 1.5 for existing in options):
             continue
         options.append(float(candidate_time))
-        if len(options) >= int(GS500_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP):
+        if len(options) >= int(rules["max_options_per_step"]):
             break
 
     if not options:
         options = [current_time]
     elif not any(abs(value - current_time) <= 1.5 for value in options):
-        options = [current_time] + options[: GS500_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP - 1]
+        options = [current_time] + options[: int(rules["max_options_per_step"]) - 1]
     return options
 
 
@@ -1277,6 +1459,8 @@ def _gs500_refinement_is_material(
     best_metrics: dict[str, float | int],
     current_score: tuple[float, float, float, float],
     best_score: tuple[float, float, float, float],
+    rules: dict[str, Any],
+    auto_accept_rules: dict[str, float],
 ) -> bool:
     current_max = float(current_metrics.get("max_abs_error_bp", float("inf")))
     best_max = float(best_metrics.get("max_abs_error_bp", float("inf")))
@@ -1285,13 +1469,13 @@ def _gs500_refinement_is_material(
 
     if not np.isfinite(best_max):
         return False
-    if best_r2 + GS500_LOCAL_REFINEMENT_MAX_R2_DROP < current_r2:
+    if best_r2 + float(rules["max_r2_drop"]) < current_r2:
         return False
-    if best_max <= AUTO_ACCEPT_MAX_ABS_ERROR and current_max > AUTO_ACCEPT_MAX_ABS_ERROR:
+    if best_max <= float(auto_accept_rules["max_abs_error_bp"]) and current_max > float(auto_accept_rules["max_abs_error_bp"]):
         return True
     return (
-        best_score[0] + GS500_LOCAL_REFINEMENT_MIN_SCORE_GAIN < current_score[0]
-        and best_max + GS500_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN < current_max
+        best_score[0] + float(rules["min_score_gain"]) < current_score[0]
+        and best_max + float(rules["min_max_error_gain"]) < current_max
     )
 
 
@@ -1300,6 +1484,8 @@ def _rox400hd_refinement_is_material(
     best_metrics: dict[str, float | int],
     current_score: tuple[float, float, float, float],
     best_score: tuple[float, float, float, float],
+    rules: dict[str, float],
+    auto_accept_rules: dict[str, float],
 ) -> bool:
     current_max = float(current_metrics.get("max_abs_error_bp", float("inf")))
     best_max = float(best_metrics.get("max_abs_error_bp", float("inf")))
@@ -1308,13 +1494,13 @@ def _rox400hd_refinement_is_material(
 
     if not np.isfinite(best_max):
         return False
-    if best_r2 + ROX400HD_LOCAL_REFINEMENT_MAX_R2_DROP < current_r2:
+    if best_r2 + float(rules["max_r2_drop"]) < current_r2:
         return False
-    if best_max <= AUTO_ACCEPT_MAX_ABS_ERROR and current_max > AUTO_ACCEPT_MAX_ABS_ERROR:
+    if best_max <= float(auto_accept_rules["max_abs_error_bp"]) and current_max > float(auto_accept_rules["max_abs_error_bp"]):
         return True
     return (
-        best_score[0] + ROX400HD_LOCAL_REFINEMENT_MIN_SCORE_GAIN < current_score[0]
-        and best_max + ROX400HD_LOCAL_REFINEMENT_MIN_MAX_ERROR_GAIN < current_max
+        best_score[0] + float(rules["min_score_gain"]) < current_score[0]
+        and best_max + float(rules["min_max_error_gain"]) < current_max
     )
 
 
@@ -1344,17 +1530,22 @@ def _prefer_residual_heavier_refinement_candidate(
 
 
 def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    profile = _get_ladder_fit_profile(fsa)
+    rules = _ladder_fit_gs500_refinement_rules(profile)
+    if rules is None:
+        return None
     if not _is_gs500_family_ladder(fsa):
         return None
     if _missing_expected_ladder_steps(fsa):
         return None
 
+    auto_accept_rules = _ladder_fit_auto_accept_rules(profile)
     current_metrics = compute_ladder_qc_metrics(fsa)
     current_max = float(current_metrics.get("max_abs_error_bp", float("inf")))
     current_mean = float(current_metrics.get("mean_abs_error_bp", float("inf")))
     if (
-        current_max <= GS500_LOCAL_REFINEMENT_TRIGGER_MAX_ABS_ERROR
-        and current_mean <= GS500_LOCAL_REFINEMENT_TRIGGER_MEAN_ABS_ERROR
+        current_max <= float(rules["trigger_max_abs_error"])
+        and current_mean <= float(rules["trigger_mean_abs_error"])
     ):
         return None
 
@@ -1365,25 +1556,25 @@ def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path)
         return None
 
     residuals = np.abs(expected_steps - predicted_bp)
-    ranked_indices = _gs500_refinement_candidate_indices(expected_steps, residuals)
+    ranked_indices = _gs500_refinement_candidate_indices(expected_steps, residuals, rules)
     step_indices: list[int] = []
     option_lists: list[list[float]] = []
     trial_count = 1
 
     for step_idx in ranked_indices:
-        threshold = _gs500_local_refinement_threshold(float(expected_steps[step_idx]), int(step_idx))
+        threshold = _gs500_local_refinement_threshold(float(expected_steps[step_idx]), int(step_idx), rules)
         if float(residuals[step_idx]) < threshold:
             continue
-        options = _gs500_local_refinement_options(fsa, expected_steps, peak_times, predicted_bp, int(step_idx))
+        options = _gs500_local_refinement_options(fsa, expected_steps, peak_times, predicted_bp, int(step_idx), rules)
         if len(options) < 2:
             continue
         projected_trials = trial_count * len(options)
-        if projected_trials > GS500_LOCAL_REFINEMENT_MAX_TRIALS:
+        if projected_trials > int(rules["max_trials"]):
             continue
         step_indices.append(int(step_idx))
         option_lists.append(options)
         trial_count = projected_trials
-        if len(step_indices) >= GS500_LOCAL_REFINEMENT_MAX_STEPS:
+        if len(step_indices) >= int(rules["max_steps"]):
             break
 
     best_trial = None
@@ -1420,19 +1611,19 @@ def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path)
                 best_metrics = metrics
                 best_score = score
 
-    for block in GS500_ANCHOR_BLOCKS:
+    for block in rules["anchor_blocks"]:
         block_indices = [int(idx) for idx in block if idx < expected_steps.size]
         if len(block_indices) < 2:
             continue
         block_residuals = residuals[block_indices]
         trigger = any(
-            float(block_residuals[pos]) >= _gs500_local_refinement_threshold(float(expected_steps[idx]), int(idx))
+            float(block_residuals[pos]) >= _gs500_local_refinement_threshold(float(expected_steps[idx]), int(idx), rules)
             for pos, idx in enumerate(block_indices)
         )
-        if not trigger and float(np.max(block_residuals)) < GS500_ANCHOR_BLOCK_MAX_RESIDUAL:
+        if not trigger and float(np.max(block_residuals)) < float(rules["anchor_block_max_residual"]):
             continue
 
-        candidate_pool = _gs500_anchor_block_candidate_times(fsa, peak_times, block_indices)
+        candidate_pool = _gs500_anchor_block_candidate_times(fsa, peak_times, block_indices, rules)
         if len(candidate_pool) <= len(block_indices):
             continue
 
@@ -1452,7 +1643,7 @@ def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path)
                 continue
 
             trial_counter += 1
-            if trial_counter > GS500_LOCAL_REFINEMENT_MAX_TRIALS:
+            if trial_counter > int(rules["max_trials"]):
                 break
 
             trial_times = peak_times.copy()
@@ -1482,7 +1673,7 @@ def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path)
 
     if best_trial is None or best_metrics is None or best_score is None:
         return None
-    if not _gs500_refinement_is_material(current_metrics, best_metrics, current_score, best_score):
+    if not _gs500_refinement_is_material(current_metrics, best_metrics, current_score, best_score, rules, auto_accept_rules):
         return None
 
     changed_steps = [
@@ -1499,17 +1690,22 @@ def _try_gs500_family_local_refinement(fsa: FsaFile, label: str, fsa_path: Path)
 
 
 def _try_rox400hd_local_refinement(fsa: FsaFile, label: str, fsa_path: Path) -> FsaFile | None:
+    profile = _get_ladder_fit_profile(fsa)
+    rules = _ladder_fit_rox400hd_refinement_rules(profile)
+    if rules is None:
+        return None
     if not _is_rox400hd_ladder(fsa):
         return None
     if _missing_expected_ladder_steps(fsa):
         return None
 
+    auto_accept_rules = _ladder_fit_auto_accept_rules(profile)
     current_metrics = compute_ladder_qc_metrics(fsa)
     current_max = float(current_metrics.get("max_abs_error_bp", float("inf")))
     current_mean = float(current_metrics.get("mean_abs_error_bp", float("inf")))
     if (
-        current_max <= ROX400HD_LOCAL_REFINEMENT_TRIGGER_MAX_ABS_ERROR
-        and current_mean <= ROX400HD_LOCAL_REFINEMENT_TRIGGER_MEAN_ABS_ERROR
+        current_max <= float(rules["trigger_max_abs_error"])
+        and current_mean <= float(rules["trigger_mean_abs_error"])
     ):
         return None
 
@@ -1526,7 +1722,7 @@ def _try_rox400hd_local_refinement(fsa: FsaFile, label: str, fsa_path: Path) -> 
     trial_count = 1
 
     for step_idx in ranked_indices.tolist():
-        threshold = ROX400HD_LOCAL_REFINEMENT_EARLY_STEP_RESIDUAL if step_idx < 5 else ROX400HD_LOCAL_REFINEMENT_STEP_RESIDUAL
+        threshold = float(rules["early_step_residual"]) if step_idx < 5 else float(rules["step_residual"])
         if float(residuals[step_idx]) < threshold:
             continue
         options = _local_refinement_options(
@@ -1536,17 +1732,17 @@ def _try_rox400hd_local_refinement(fsa: FsaFile, label: str, fsa_path: Path) -> 
             predicted_bp,
             int(step_idx),
             radius_fn=_rox400hd_local_refinement_radius,
-            max_options=ROX400HD_LOCAL_REFINEMENT_MAX_OPTIONS_PER_STEP,
+            max_options=int(rules["max_options_per_step"]),
         )
         if len(options) < 2:
             continue
         projected_trials = trial_count * len(options)
-        if projected_trials > ROX400HD_LOCAL_REFINEMENT_MAX_TRIALS:
+        if projected_trials > int(rules["max_trials"]):
             continue
         step_indices.append(int(step_idx))
         option_lists.append(options)
         trial_count = projected_trials
-        if len(step_indices) >= ROX400HD_LOCAL_REFINEMENT_MAX_STEPS:
+        if len(step_indices) >= int(rules["max_steps"]):
             break
 
     if not step_indices:
@@ -1587,7 +1783,7 @@ def _try_rox400hd_local_refinement(fsa: FsaFile, label: str, fsa_path: Path) -> 
 
     if best_trial is None or best_metrics is None or best_score is None:
         return None
-    if not _rox400hd_refinement_is_material(current_metrics, best_metrics, current_score, best_score):
+    if not _rox400hd_refinement_is_material(current_metrics, best_metrics, current_score, best_score, rules, auto_accept_rules):
         return None
 
     changed_steps = [
@@ -2771,6 +2967,7 @@ def analyse_fsa_liz(
     ladder_name: str | None = None,
     min_distance_between_peaks: float | None = None,
     min_size_standard_height: float | None = None,
+    ladder_fit_profile: str | None = None,
 ) -> FsaFile | None:
     """Ladder-fit for LIZ (TCRg/IGK/KDE).
     
@@ -2783,6 +2980,11 @@ def analyse_fsa_liz(
     )
     base_min_height = float(
         MIN_SIZE_STANDARD_HEIGHT_LIZ if min_size_standard_height is None else min_size_standard_height
+    )
+    ladder_fit_profile = _normalize_ladder_fit_profile(
+        ladder_fit_profile,
+        analysis_id="clonality",
+        ladder_name=ladder_name,
     )
 
     print_green(
@@ -2804,6 +3006,8 @@ def analyse_fsa_liz(
         min_size_standard_height=configs[0]["min_h"],
         size_standard_channel="DATA105",
     )
+    base_fsa.analysis_id = "clonality"
+    _set_ladder_fit_profile(base_fsa, ladder_fit_profile, analysis_id="clonality")
     base_fsa = find_size_standard_peaks(base_fsa)
     
     applied = _try_apply_saved_ladder_adjustment(base_fsa, load_ladder_adjustment(base_fsa), "LIZ")
@@ -2822,6 +3026,8 @@ def analyse_fsa_liz(
             min_size_standard_height=cfg["min_h"],
             size_standard_channel="DATA105",
         )
+        fsa.analysis_id = "clonality"
+        _set_ladder_fit_profile(fsa, ladder_fit_profile, analysis_id="clonality")
         liz_data = np.asarray(fsa.fsa["DATA105"]).astype(float)
         fsa = find_size_standard_peaks(fsa)
 
@@ -2919,6 +3125,7 @@ def analyse_fsa_rox(
     ladder_name: str | None = None,
     min_distance_between_peaks: float | None = None,
     min_size_standard_height: float | None = None,
+    ladder_fit_profile: str | None = None,
 ) -> FsaFile | None:
     """Ladder-fit for ROX (FR1–3, TCRbA/B/C, SL, DHJH_D/E).
     
@@ -2931,6 +3138,10 @@ def analyse_fsa_rox(
     )
     base_min_height = float(
         MIN_SIZE_STANDARD_HEIGHT_ROX if min_size_standard_height is None else min_size_standard_height
+    )
+    ladder_fit_profile = _normalize_ladder_fit_profile(
+        ladder_fit_profile,
+        ladder_name=ladder_name,
     )
 
     print_green(
@@ -2952,6 +3163,8 @@ def analyse_fsa_rox(
         min_size_standard_height=configs[0]["min_h"],
         size_standard_channel="DATA4",
     )
+    base_fsa.analysis_id = "flt3" if ladder_fit_profile == LADDER_FIT_PROFILE_FLT3_GS500ROX else "clonality"
+    _set_ladder_fit_profile(base_fsa, ladder_fit_profile, analysis_id=str(getattr(base_fsa, "analysis_id", "") or ""))
     base_fsa = find_size_standard_peaks(base_fsa)
     base_raw_rox = np.asarray(base_fsa.fsa["DATA4"], dtype=float)
     base_found = np.asarray(getattr(base_fsa, "size_standard_peaks", []), dtype=float)
@@ -2990,6 +3203,8 @@ def analyse_fsa_rox(
             min_size_standard_height=cfg["min_h"],
             size_standard_channel="DATA4",
         )
+        fsa.analysis_id = "flt3" if ladder_fit_profile == LADDER_FIT_PROFILE_FLT3_GS500ROX else "clonality"
+        _set_ladder_fit_profile(fsa, ladder_fit_profile, analysis_id=str(getattr(fsa, "analysis_id", "") or ""))
         rox_data = np.asarray(fsa.fsa["DATA4"]).astype(float)
         fsa = find_size_standard_peaks(fsa)
 

@@ -37,6 +37,8 @@ from core.analyses.clonality.tracking_excel import (
     update_clonality_tracking_workbook,
 )
 from core.analysis import (
+    LADDER_FIT_PROFILE_CLONALITY_LIZ500,
+    LADDER_FIT_PROFILE_CLONALITY_ROX400HD,
     analyse_fsa_liz,
     analyse_fsa_rox,
     auto_detect_sl_peaks,
@@ -137,9 +139,19 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
 
     try:
         if ladder == "LIZ":
-            fsa = analyse_fsa_liz(fsa_path, sample_channel, ladder_name=LIZ_LADDER)
+            fsa = analyse_fsa_liz(
+                fsa_path,
+                sample_channel,
+                ladder_name=LIZ_LADDER,
+                ladder_fit_profile=LADDER_FIT_PROFILE_CLONALITY_LIZ500,
+            )
         else:
-            fsa = analyse_fsa_rox(fsa_path, sample_channel, ladder_name=ROX_LADDER)
+            fsa = analyse_fsa_rox(
+                fsa_path,
+                sample_channel,
+                ladder_name=ROX_LADDER,
+                ladder_fit_profile=LADDER_FIT_PROFILE_CLONALITY_ROX400HD,
+            )
     except Exception as ex:
         print_warning(f"[ANALYZE] Skipping unreadable file {fsa_path.name}: {ex}")
         return None

@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import panel as pn
 import plotly.graph_objects as go
+from scipy.signal import find_peaks
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -86,6 +87,44 @@ def _fit_grade(metrics: dict[str, float | int] | None) -> tuple[str, str]:
     return "fail", "Fit still needs work."
 
 
+def _bootstrap_candidates_from_trace(trace: np.ndarray) -> pd.DataFrame:
+    if trace.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+
+    try:
+        baseline = estimate_running_baseline(trace, bin_size=200, quantile=0.10)
+        corrected = np.clip(np.asarray(trace, dtype=float) - baseline, a_min=0, a_max=None)
+    except Exception:
+        corrected = np.asarray(trace, dtype=float)
+
+    peak_idx, props = find_peaks(
+        corrected,
+        distance=12,
+        prominence=35.0,
+        height=40.0,
+    )
+    if peak_idx.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+
+    rows = pd.DataFrame(
+        {
+            "time": peak_idx.astype(float),
+            "intensity": corrected[peak_idx].astype(float),
+            "prominence": np.asarray(props.get("prominences", []), dtype=float),
+            "source": "trace_bootstrap",
+        }
+    )
+    rows = rows[
+        (rows["time"].astype(float) >= 1400.0)
+        & (rows["time"].astype(float) <= 4700.0)
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=["time", "intensity", "source"])
+    rows = rows.sort_values(["prominence", "intensity"], ascending=[False, False]).head(80)
+    rows = rows.sort_values("time").reset_index(drop=True)
+    return rows.loc[:, ["time", "intensity", "source"]]
+
+
 class Flt3LadderReviewApp:
     def __init__(self, data_dir: Path | str, case_manifest: Path | str | None = None):
         self.data_dir = Path(data_dir).expanduser().resolve()
@@ -115,12 +154,14 @@ class Flt3LadderReviewApp:
         self.status = pn.pane.Markdown("")
         self.summary = pn.pane.Markdown("")
         self.instructions = pn.pane.Markdown(
-            "Select a ladder step, then use the candidate table, the time input, or the plot to assign a peak."
+            "Click the trace to inspect a position, then choose whether to keep the exact time or snap to a nearby peak. You can add manual candidates even when the pipeline did not propose them."
         )
         self.selection_help = pn.pane.Markdown("")
         self.mapping_view = pn.pane.Markdown("")
         self.plot = pn.pane.Plotly(height=580, config={"responsive": True, "scrollZoom": True})
         self.plot.param.watch(self._on_plot_click, "click_data")
+        self.step_buttons: dict[int, pn.widgets.Button] = {}
+        self.step_button_box = pn.FlexBox(sizing_mode="stretch_width")
 
         self.assay_filter = pn.widgets.RadioButtonGroup(
             name="Assay",
@@ -143,7 +184,7 @@ class Flt3LadderReviewApp:
             name="Fit Source",
             options=["Pipeline rescue", "Raw adjustable"],
             button_type="default",
-            value="Pipeline rescue",
+            value="Raw adjustable" if self.case_manifest else "Pipeline rescue",
         )
         self.search_input = pn.widgets.TextInput(name="Search", placeholder="Specimen, file, run, well")
         self.file_select = pn.widgets.Select(name="FLT3 File", options={})
@@ -163,8 +204,15 @@ class Flt3LadderReviewApp:
         self.step_select = pn.widgets.Select(name="Ladder Step", options={})
         self.candidate_select = pn.widgets.Select(name="Candidate Peak", options={})
         self.assign_btn = pn.widgets.Button(name="Assign Selected Peak", button_type="primary")
+        self.manual_mode = pn.widgets.RadioButtonGroup(
+            name="Manual Mode",
+            options=["Snap to local peak", "Use exact time"],
+            button_type="default",
+            value="Snap to local peak",
+        )
         self.manual_time_input = pn.widgets.FloatInput(name="Manual Peak Time", step=1.0, value=None)
-        self.snap_btn = pn.widgets.Button(name="Snap Time To Peak", button_type="primary")
+        self.add_btn = pn.widgets.Button(name="Add Manual Candidate", button_type="default")
+        self.snap_btn = pn.widgets.Button(name="Assign Manual Time", button_type="primary")
         self.clear_btn = pn.widgets.Button(name="Clear Step", button_type="warning")
         self.reset_btn = pn.widgets.Button(name="Reset Edits", button_type="default")
         self.save_btn = pn.widgets.Button(name="Save Adjustment", button_type="success")
@@ -198,6 +246,7 @@ class Flt3LadderReviewApp:
         self.sort_mode.param.watch(self._on_filter_change, "value")
         self.step_select.param.watch(self._on_step_select_change, "value")
         self.candidate_select.param.watch(self._on_candidate_select_change, "value")
+        self.manual_mode.param.watch(self._on_manual_mode_change, "value")
         self.step_table.param.watch(self._on_step_table_select, "selection")
         self.candidate_table.param.watch(self._on_candidate_table_select, "selection")
 
@@ -207,6 +256,7 @@ class Flt3LadderReviewApp:
         self.reload_btn.on_click(lambda _event: self._reload_current_file())
         self.rescan_btn.on_click(lambda _event: self._rescan_files())
         self.assign_btn.on_click(lambda _event: self._assign_selected_candidate())
+        self.add_btn.on_click(lambda _event: self._add_manual_candidate())
         self.snap_btn.on_click(lambda _event: self._assign_manual_time_input())
         self.clear_btn.on_click(lambda _event: self._clear_selected_step())
         self.reset_btn.on_click(lambda _event: self._load_record(self.current_record))
@@ -214,24 +264,43 @@ class Flt3LadderReviewApp:
         self.remove_btn.on_click(lambda _event: self._delete_adjustment())
 
         sidebar = pn.Column(
-            self.assay_filter,
-            self.injection_filter,
-            self.preferred_only,
-            self.descending_steps,
-            self.fit_source,
-            self.search_input,
-            self.sort_mode,
-            self.rank_btn,
-            self.file_select,
-            pn.Row(self.prev_btn, self.next_btn),
-            pn.Row(self.reload_btn, self.rescan_btn),
-            self.step_select,
-            self.candidate_select,
-            self.manual_time_input,
-            pn.Row(self.assign_btn, self.snap_btn),
-            pn.Row(self.clear_btn, self.reset_btn),
-            pn.Row(self.save_btn, self.remove_btn),
-            width=380,
+            pn.Card(
+                self.assay_filter,
+                self.injection_filter,
+                self.preferred_only,
+                self.descending_steps,
+                self.fit_source,
+                self.search_input,
+                self.sort_mode,
+                self.rank_btn,
+                title="Filter And Queue",
+                collapsed=False,
+            ),
+            pn.Card(
+                self.file_select,
+                pn.Row(self.prev_btn, self.next_btn),
+                pn.Row(self.reload_btn, self.rescan_btn),
+                title="Current File",
+                collapsed=False,
+            ),
+            pn.Card(
+                self.step_select,
+                self.step_button_box,
+                title="Quick Step Pad",
+                collapsed=False,
+            ),
+            pn.Card(
+                self.candidate_select,
+                self.manual_mode,
+                self.manual_time_input,
+                pn.Row(self.assign_btn, self.add_btn),
+                self.snap_btn,
+                pn.Row(self.clear_btn, self.reset_btn),
+                pn.Row(self.save_btn, self.remove_btn),
+                title="Manual Peak Tools",
+                collapsed=False,
+            ),
+            width=410,
         )
 
         review_tables = pn.Row(
@@ -243,12 +312,15 @@ class Flt3LadderReviewApp:
         main = pn.Column(
             self.title,
             self.status,
-            self.summary,
-            self.instructions,
-            self.selection_help,
-            self.plot,
-            review_tables,
-            self.mapping_view,
+            pn.Row(
+                pn.Card(self.summary, title="Case Summary", collapsed=False, sizing_mode="stretch_width"),
+                pn.Card(self.selection_help, title="Selection State", collapsed=False, sizing_mode="stretch_width"),
+                sizing_mode="stretch_width",
+            ),
+            pn.Card(self.instructions, title="Workflow", collapsed=False, sizing_mode="stretch_width"),
+            pn.Card(self.plot, title="Ladder Trace", collapsed=False, sizing_mode="stretch_width"),
+            pn.Card(review_tables, title="Steps And Candidates", collapsed=False, sizing_mode="stretch_width"),
+            pn.Card(self.mapping_view, title="Current Mapping", collapsed=False, sizing_mode="stretch_width"),
             sizing_mode="stretch_width",
         )
 
@@ -256,8 +328,13 @@ class Flt3LadderReviewApp:
 
         self._update_filtered_records()
         if self.filtered_records:
-            self.file_select.value = str(self.filtered_records[0]["path"])
-            self._load_record(self.filtered_records[0])
+            first_path = str(self.filtered_records[0]["path"])
+            self.file_select.param.update(value=first_path)
+            selected = next(
+                (record for record in self.filtered_records if str(record["path"]) == first_path),
+                self.filtered_records[0],
+            )
+            self._load_record(selected)
         else:
             self._set_status("No FLT3 files found in this folder.", level="warning")
             self._refresh_views()
@@ -340,6 +417,69 @@ class Flt3LadderReviewApp:
         if qc:
             label += f" | r2 {float(qc.get('r2', float('nan'))):.6f} | max {float(qc.get('max_abs_error_bp', float('nan'))):.2f} bp"
         return label
+
+    def _step_button_action(self, step_idx: int) -> None:
+        if not (0 <= int(step_idx) < len(self.ladder_steps)):
+            return
+
+        peak_time = self._selected_candidate_time()
+        if peak_time is not None:
+            candidate_idx = self._candidate_index_for_time(peak_time, tolerance=2.0)
+            source = "manual"
+            if candidate_idx is not None:
+                source = str(self.current_candidates.iloc[candidate_idx].get("source", "auto"))
+                peak_time = float(self.current_candidates.iloc[candidate_idx]["time"])
+            self._assign_time_to_step(int(step_idx), float(peak_time), source=source)
+            return
+
+        if self.manual_time_input.value is not None:
+            try:
+                peak_time, source = self._resolve_manual_peak_time()
+            except Exception:
+                self.step_select.value = int(step_idx)
+                return
+            existing_idx = self._candidate_index_for_time(peak_time, tolerance=2.0)
+            if existing_idx is not None:
+                source = str(self.current_candidates.iloc[existing_idx].get("source", "auto"))
+                peak_time = float(self.current_candidates.iloc[existing_idx]["time"])
+            self._assign_time_to_step(int(step_idx), float(peak_time), source=source)
+            return
+
+        self.step_select.value = int(step_idx)
+
+    def _rebuild_step_buttons(self) -> None:
+        self.step_buttons = {}
+        children: list[object] = []
+        if self.ladder_steps.size == 0:
+            self.step_button_box.objects = [
+                pn.pane.Markdown("No ladder steps loaded.", styles={"color": "#64748b"})
+            ]
+            return
+
+        selected_step = self._selected_step_index()
+        ordered = self._ordered_step_indices()
+        for idx in ordered:
+            step_bp = float(self.ladder_steps[idx])
+            assigned = self.mapping_times.get(idx)
+            if assigned is None:
+                name = f"{step_bp:.0f}"
+                button_type = "default"
+            else:
+                name = f"{step_bp:.0f} *"
+                button_type = "success"
+            if selected_step == idx:
+                button_type = "primary" if assigned is None else "warning"
+            btn = pn.widgets.Button(
+                name=name,
+                button_type=button_type,
+                width=66,
+                height=40,
+                margin=(0, 6, 6, 0),
+            )
+            btn.on_click(lambda _event, step_idx=idx: self._step_button_action(step_idx))
+            self.step_buttons[int(idx)] = btn
+            children.append(btn)
+        self.step_button_box.objects = children
 
     def _ensure_record_qc(self, record: dict[str, Any]) -> dict[str, Any] | None:
         path_key = str(record["path"])
@@ -559,6 +699,7 @@ class Flt3LadderReviewApp:
         if record is None:
             return
         self.current_record = record
+        loaded_source_label = self.fit_source.value.lower()
         try:
             if self.fit_source.value == "Pipeline rescue":
                 fsa, meta = self._load_pipeline_rescued_fsa(record)
@@ -569,18 +710,50 @@ class Flt3LadderReviewApp:
                     metadata=record["meta"],
                 )
         except Exception as exc:
-            self.current_fsa = None
-            self.preview_fsa = None
-            self.current_meta = record.get("meta")
-            self.current_candidates = pd.DataFrame(columns=["time", "intensity", "source"])
-            self.ladder_steps = np.asarray([], dtype=float)
-            self.mapping_times = {}
-            self.manual_candidate_times = []
-            self.preview_metrics = None
-            self.preview_reason = str(exc)
-            self._set_status(f"Could not load ladder state for {record['path'].name}: {exc}", level="error")
-            self._refresh_views()
-            return
+            if self.fit_source.value == "Pipeline rescue":
+                try:
+                    fsa, meta = load_adjustable_fsa(
+                        record["path"],
+                        preferred_analysis="flt3",
+                        metadata=record["meta"],
+                    )
+                    loaded_source_label = "raw adjustable fallback"
+                    self._set_status(
+                        (
+                            f"Pipeline fit was unavailable for {record['path'].name}. "
+                            "Opened raw adjustable ladder state instead."
+                        ),
+                        level="warning",
+                    )
+                except Exception as raw_exc:
+                    self.current_fsa = None
+                    self.preview_fsa = None
+                    self.current_meta = record.get("meta")
+                    self.current_candidates = pd.DataFrame(columns=["time", "intensity", "source"])
+                    self.ladder_steps = np.asarray([], dtype=float)
+                    self.mapping_times = {}
+                    self.manual_candidate_times = []
+                    self.preview_metrics = None
+                    self.preview_reason = str(raw_exc)
+                    self._set_status(
+                        f"Could not load ladder state for {record['path'].name}: {raw_exc}",
+                        level="error",
+                    )
+                    self._refresh_views()
+                    return
+            else:
+                self.current_fsa = None
+                self.preview_fsa = None
+                self.current_meta = record.get("meta")
+                self.current_candidates = pd.DataFrame(columns=["time", "intensity", "source"])
+                self.ladder_steps = np.asarray([], dtype=float)
+                self.mapping_times = {}
+                self.manual_candidate_times = []
+                self.preview_metrics = None
+                self.preview_reason = str(exc)
+                self._set_status(f"Could not load ladder state for {record['path'].name}: {exc}", level="error")
+                self._refresh_views()
+                return
 
         self.current_fsa = fsa
         self.preview_fsa = None
@@ -592,38 +765,66 @@ class Flt3LadderReviewApp:
 
         payload = load_ladder_adjustment(fsa)
         base_mapping_times = self._infer_mapping_times_from_payload(payload, fsa)
+        payload_manual_candidates = (payload or {}).get("manual_candidates", [])
+        if not payload_manual_candidates:
+            payload_manual_candidates = getattr(fsa, "ladder_review_manual_candidates", []) or []
         self.manual_candidate_times = sorted(
-            {float(value) for value in (payload or {}).get("manual_candidates", [])}
+            {
+                float(value)
+                for value in payload_manual_candidates
+                if value is not None and np.isfinite(float(value))
+            }
         )
-        self.mapping_times = dict(base_mapping_times)
+        self.mapping_times = {
+            int(step_idx): float(time_value)
+            for step_idx, time_value in dict(base_mapping_times).items()
+            if time_value is not None and np.isfinite(float(time_value))
+        }
 
         candidates = get_ladder_candidates(fsa).copy()
         if "source" not in candidates.columns:
             candidates["source"] = "auto"
+        if candidates.empty:
+            trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+            candidates = _bootstrap_candidates_from_trace(trace)
         self.current_candidates = candidates.reset_index(drop=True)
 
         for time_value in list(self.mapping_times.values()) + list(self.manual_candidate_times):
             self._ensure_candidate_time(time_value, source="manual")
 
         self._refresh_preview()
-        self._set_status(f"Loaded {record['path'].name} using {self.fit_source.value.lower()} fit.", level="success")
+        if loaded_source_label != "raw adjustable fallback":
+            self._set_status(f"Loaded {record['path'].name} using {loaded_source_label} fit.", level="success")
         self._refresh_views()
 
     def _infer_mapping_times_from_payload(self, payload: dict | None, fsa) -> dict[int, float]:
         if payload and payload.get("mapping_times"):
-            return {int(k): float(v) for k, v in payload["mapping_times"].items()}
+            return {
+                int(k): float(v)
+                for k, v in payload["mapping_times"].items()
+                if v is not None and np.isfinite(float(v))
+            }
+        review_mapping = getattr(fsa, "ladder_review_mapping_times", None)
+        if review_mapping:
+            return {
+                int(k): float(v)
+                for k, v in dict(review_mapping).items()
+                if v is not None and np.isfinite(float(v))
+            }
 
         mapping: dict[int, float] = {}
-        expected = np.asarray(
+        expected = np.atleast_1d(np.asarray(
             getattr(fsa, "expected_ladder_steps", getattr(fsa, "ladder_steps", [])),
             dtype=float,
-        )
-        fitted_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
-        fitted_peaks = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+        ))
+        fitted_steps = np.atleast_1d(np.asarray(getattr(fsa, "ladder_steps", []), dtype=float))
+        fitted_peaks = np.atleast_1d(np.asarray(getattr(fsa, "best_size_standard", []), dtype=float))
         if expected.size == 0 or fitted_steps.size == 0 or fitted_peaks.size == 0:
             return mapping
 
         for step_bp, peak_time in zip(fitted_steps, fitted_peaks):
+            if not np.isfinite(float(step_bp)) or not np.isfinite(float(peak_time)):
+                continue
             matches = np.where(np.isclose(expected, float(step_bp), atol=1e-6))[0]
             if matches.size:
                 mapping[int(matches[0])] = float(peak_time)
@@ -639,6 +840,8 @@ class Flt3LadderReviewApp:
         return int(matches.index[0])
 
     def _ensure_candidate_time(self, peak_time: float, *, source: str) -> int:
+        if not np.isfinite(float(peak_time)):
+            return -1
         existing = self._candidate_index_for_time(peak_time)
         if existing is not None:
             return existing
@@ -685,6 +888,17 @@ class Flt3LadderReviewApp:
         peak_index = lo + local_index
         return float(peak_index), float(trace[peak_index])
 
+    def _resolve_manual_peak_time(self) -> tuple[float, str]:
+        if self.manual_time_input.value is None:
+            raise ValueError("Enter a peak time or click the plot first.")
+
+        raw_time = float(self.manual_time_input.value)
+        if self.manual_mode.value == "Use exact time":
+            return float(raw_time), "manual"
+
+        peak_time, _intensity = self._find_local_peak_time(raw_time)
+        return float(peak_time), "manual"
+
     def _assign_time_to_step(self, step_idx: int, peak_time: float, *, source: str) -> None:
         if step_idx < 0 or step_idx >= len(self.ladder_steps):
             return
@@ -694,6 +908,7 @@ class Flt3LadderReviewApp:
                 self.manual_candidate_times.append(float(peak_time))
                 self.manual_candidate_times.sort()
             self._ensure_candidate_time(peak_time, source="manual")
+            self.candidate_select.value = float(peak_time)
         self.last_clicked_time = float(peak_time)
         self._refresh_preview()
         self._refresh_views()
@@ -722,22 +937,46 @@ class Flt3LadderReviewApp:
         if step_idx is None:
             self._set_status("Select a ladder step first.", level="warning")
             return
-        if self.manual_time_input.value is None:
-            self._set_status("Enter a peak time or click the plot first.", level="warning")
-            return
         try:
-            peak_time, _intensity = self._find_local_peak_time(float(self.manual_time_input.value))
+            peak_time, source = self._resolve_manual_peak_time()
         except Exception as exc:
-            self._set_status(f"Could not snap to a peak: {exc}", level="error")
+            self._set_status(f"Could not resolve manual peak time: {exc}", level="error")
             return
         self.manual_time_input.value = float(peak_time)
         existing_idx = self._candidate_index_for_time(peak_time, tolerance=2.0)
         if existing_idx is not None:
             source = str(self.current_candidates.iloc[existing_idx].get("source", "auto"))
             peak_time = float(self.current_candidates.iloc[existing_idx]["time"])
-        else:
-            source = "manual"
         self._assign_time_to_step(step_idx, peak_time, source=source)
+
+    def _add_manual_candidate(self) -> None:
+        if self.current_fsa is None:
+            self._set_status("No FLT3 file is loaded.", level="warning")
+            return
+        try:
+            peak_time, _source = self._resolve_manual_peak_time()
+        except Exception as exc:
+            self._set_status(f"Could not add manual candidate: {exc}", level="error")
+            return
+
+        self.manual_time_input.value = float(peak_time)
+        candidate_idx = self._ensure_candidate_time(float(peak_time), source="manual")
+        if not any(np.isclose(float(existing), float(peak_time), atol=1e-6) for existing in self.manual_candidate_times):
+            self.manual_candidate_times.append(float(peak_time))
+            self.manual_candidate_times.sort()
+        self.last_clicked_time = float(peak_time)
+        self._refresh_preview()
+        self._refresh_views()
+        self.candidate_select.value = float(peak_time)
+        candidate_df = self.candidate_table.value
+        if candidate_df is not None and not candidate_df.empty:
+            matches = candidate_df.index[(candidate_df["time"].astype(float) - float(peak_time)).abs() <= 1e-6]
+            if len(matches):
+                self.candidate_table.selection = [int(matches[0])]
+        self._set_status(
+            f"Added manual candidate at {float(peak_time):.1f} (candidate #{candidate_idx}).",
+            level="success",
+        )
 
     def _clear_selected_step(self) -> None:
         step_idx = self._selected_step_index()
@@ -814,26 +1053,32 @@ class Flt3LadderReviewApp:
         points = click_data.get("points") or []
         if not points:
             return
-        step_idx = self._selected_step_index()
-        if step_idx is None:
-            self._set_status("Select a ladder step first, then click the trace.", level="warning")
-            return
         try:
             x_value = float(points[0].get("x"))
-            peak_time, _intensity = self._find_local_peak_time(x_value)
         except Exception as exc:
-            self._set_status(f"Could not assign clicked peak: {exc}", level="error")
+            self._set_status(f"Could not read clicked trace position: {exc}", level="error")
             return
 
-        self.last_clicked_time = float(peak_time)
-        self.manual_time_input.value = float(peak_time)
-        existing_idx = self._candidate_index_for_time(peak_time, tolerance=2.0)
+        self.last_clicked_time = float(x_value)
+        self.manual_time_input.value = float(x_value)
+        existing_idx = self._candidate_index_for_time(x_value, tolerance=8.0)
         if existing_idx is not None:
-            source = str(self.current_candidates.iloc[existing_idx].get("source", "auto"))
             peak_time = float(self.current_candidates.iloc[existing_idx]["time"])
+            self.candidate_select.value = peak_time
+            candidate_df = self.candidate_table.value
+            if candidate_df is not None and not candidate_df.empty:
+                matches = candidate_df.index[(candidate_df["time"].astype(float) - peak_time).abs() <= 1e-6]
+                if len(matches):
+                    self.candidate_table.selection = [int(matches[0])]
+            self._set_status(
+                f"Clicked {x_value:.1f}. Nearest candidate at {peak_time:.1f} selected. Use exact mode if you want the clicked time itself.",
+                level="info",
+            )
         else:
-            source = "manual"
-        self._assign_time_to_step(step_idx, peak_time, source=source)
+            self._set_status(
+                f"Clicked trace position {x_value:.1f}. Use 'Add Manual Candidate' or 'Assign Manual Time' to keep it.",
+                level="info",
+            )
 
     def _next_missing_step(self) -> int | None:
         for idx in self._ordered_step_indices():
@@ -1074,6 +1319,9 @@ class Flt3LadderReviewApp:
         self.manual_time_input.value = float(value)
         self._refresh_selection_help()
 
+    def _on_manual_mode_change(self, _event) -> None:
+        self._refresh_selection_help()
+
     def _on_step_order_change(self, _event) -> None:
         self._refresh_views()
 
@@ -1090,10 +1338,15 @@ class Flt3LadderReviewApp:
         if peak_time is not None:
             cand_text = f"{peak_time:.1f}"
         click_text = "none" if self.last_clicked_time is None else f"{self.last_clicked_time:.1f}"
+        manual_mode = str(self.manual_mode.value or "Snap to local peak")
         self.selection_help.object = (
             f"- Selected step: `{step_text}`\n"
             f"- Selected candidate: `{cand_text}`\n"
-            f"- Last clicked/snapped peak: `{click_text}`"
+            f"- Last clicked position: `{click_text}`\n"
+            f"- Manual mode: `{manual_mode}`\n"
+            "- `Add Manual Candidate` stores a peak without assigning it yet.\n"
+            "- `Assign Manual Time` maps the current manual time directly to the selected step.\n"
+            "- The step pad can assign the current candidate/manual time directly to `500`, `490`, `450`, etc."
         )
 
     def _step_options(self) -> dict[str, int]:
@@ -1157,6 +1410,7 @@ class Flt3LadderReviewApp:
         selected_step = self._selected_step_index()
         if selected_step is not None and selected_step in self.mapping_times:
             self.manual_time_input.value = float(self.mapping_times[selected_step])
+        self._rebuild_step_buttons()
         self._refresh_selection_help()
 
     def _build_plot(self) -> go.Figure:
@@ -1175,6 +1429,12 @@ class Flt3LadderReviewApp:
             y_arr = np.clip(trace_raw - baseline, a_min=0, a_max=None)
         except Exception:
             y_arr = trace_raw.astype(float)
+
+        def corrected_intensity(time_value: float) -> float:
+            idx = int(round(float(time_value)))
+            if idx < 0 or idx >= len(y_arr):
+                return 0.0
+            return float(y_arr[idx])
 
         x_arr = np.arange(len(y_arr))
         fig.add_trace(
@@ -1201,7 +1461,7 @@ class Flt3LadderReviewApp:
 
         for _, row in sorted_candidates.iterrows():
             peak_time = float(row["time"])
-            intensity = float(row.get("intensity", 0.0))
+            intensity = corrected_intensity(peak_time)
             source = str(row.get("source", "auto"))
             step_idx = used_by_time.get(peak_time)
             if step_idx is not None:
@@ -1264,11 +1524,14 @@ class Flt3LadderReviewApp:
             x_min = max(0.0, min(x_candidates) - 120.0)
             x_max = min(float(len(y_arr) - 1), max(x_candidates) + 120.0)
             fig.update_xaxes(range=[x_min, x_max])
+        else:
+            fig.update_xaxes(range=[1400.0, min(float(len(y_arr) - 1), 4700.0)])
 
         fig.update_layout(
             title="FLT3 GS500ROX Ladder Trace",
             xaxis_title="Time (scan index)",
             yaxis_title="Corrected intensity",
+            yaxis=dict(range=[0, 4000]),
             height=580,
             margin=dict(l=30, r=20, t=45, b=30),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0.0),

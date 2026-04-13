@@ -5,7 +5,13 @@ from pathlib import Path
 
 from core.analyses.clonality.classification import classify_fsa as classify_clonality_fsa
 from core.analyses.flt3.classification import classify_fsa as classify_flt3_fsa
-from core.analysis import analyse_fsa_liz, analyse_fsa_rox
+from core.analysis import (
+    LADDER_FIT_PROFILE_CLONALITY_LIZ500,
+    LADDER_FIT_PROFILE_CLONALITY_ROX400HD,
+    LADDER_FIT_PROFILE_FLT3_GS500ROX,
+    analyse_fsa_liz,
+    analyse_fsa_rox,
+)
 from core.assay_config import (
     LIZ_LADDER,
     MIN_DISTANCE_BETWEEN_PEAKS_LIZ,
@@ -109,6 +115,11 @@ def _normalize_clonality_classification(fsa_path: Path, classified: tuple) -> di
         "bp_min": float(bp_min),
         "bp_max": float(bp_max),
         "sample_channel": trace_channels[0] if trace_channels else None,
+        "ladder_fit_profile": (
+            LADDER_FIT_PROFILE_CLONALITY_LIZ500
+            if exact_ladder.upper().startswith("LIZ")
+            else LADDER_FIT_PROFILE_CLONALITY_ROX400HD
+        ),
         "raw": classified,
         "file_path": fsa_path,
     }
@@ -127,6 +138,7 @@ def _normalize_flt3_classification(fsa_path: Path, classified: dict) -> dict:
         "bp_min": float(classified["bp_min"]),
         "bp_max": float(classified["bp_max"]),
         "sample_channel": classified["trace_channels"][0] if classified.get("trace_channels") else None,
+        "ladder_fit_profile": LADDER_FIT_PROFILE_FLT3_GS500ROX,
         "raw": classified,
         "file_path": fsa_path,
     }
@@ -220,6 +232,7 @@ def load_adjustable_fsa(
 
     ladder, min_distance, min_height = _resolve_ladder_runtime(metadata["analysis"], metadata["ladder"])
     metadata["ladder"] = ladder
+    ladder_fit_profile = metadata.get("ladder_fit_profile")
 
     if ladder.upper().startswith("LIZ"):
         fsa = analyse_fsa_liz(
@@ -228,6 +241,7 @@ def load_adjustable_fsa(
             ladder_name=ladder,
             min_distance_between_peaks=min_distance,
             min_size_standard_height=min_height,
+            ladder_fit_profile=str(ladder_fit_profile or LADDER_FIT_PROFILE_CLONALITY_LIZ500),
         )
     else:
         fsa = analyse_fsa_rox(
@@ -236,6 +250,10 @@ def load_adjustable_fsa(
             ladder_name=ladder,
             min_distance_between_peaks=min_distance,
             min_size_standard_height=min_height,
+            ladder_fit_profile=str(
+                ladder_fit_profile
+                or (LADDER_FIT_PROFILE_FLT3_GS500ROX if metadata.get("analysis") == "flt3" else LADDER_FIT_PROFILE_CLONALITY_ROX400HD)
+            ),
         )
 
     if fsa is None:
@@ -257,5 +275,9 @@ def load_adjustable_fsa(
                 min_height,
                 size_standard_channel="DATA4",
             )
+    if metadata.get("analysis"):
+        fsa.analysis_id = str(metadata["analysis"])
+    if ladder_fit_profile:
+        fsa.ladder_fit_profile = str(ladder_fit_profile)
 
     return fsa, metadata

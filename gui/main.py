@@ -18,6 +18,7 @@ _APP_CSS = _CSS_PATH.read_text(encoding="utf-8", errors="replace") if _CSS_PATH.
 def build_app() -> pn.Column:
     """Build the full application as a pn.Column (templateless)."""
     from gui.tab_batch    import make_batch_tab
+    from gui.tab_flt3_validate import make_flt3_validation_tab
     from gui.tab_qc       import make_qc_tab
     from gui.tab_log      import make_log_tab
     from gui.tab_settings import make_settings_tab
@@ -32,6 +33,7 @@ def build_app() -> pn.Column:
 
     tabs = pn.Tabs(
         ("Batch",    _wrap(make_batch_tab())),
+        ("FLT3 Validate", _wrap(make_flt3_validation_tab())),
         ("QC",       _wrap(make_qc_tab())),
         ("Log",      _wrap(make_log_tab())),
         ("Settings", _wrap(make_settings_tab())),
