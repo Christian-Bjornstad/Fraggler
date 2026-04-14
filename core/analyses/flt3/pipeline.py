@@ -41,6 +41,7 @@ from core.analyses.flt3.config import (
 )
 from core.analyses.shared_pipeline import finalize_pipeline_run, normalize_pipeline_paths, scan_fsa_files
 from core.html_reports import extract_dit_from_name
+from core.area import compute_peak_area_gaussian
 
 
 FLT3_LADDER_QC_THRESHOLD = 0.99
@@ -775,8 +776,7 @@ def _calculate_peak_area(
     label: str,
 ) -> float:
     half_width_bp = _peak_area_half_width_bp(assay, label, center_bp)
-    auc_mask = (bp_all >= center_bp - half_width_bp) & (bp_all <= center_bp + half_width_bp)
-    return _calculate_auc(trace, time_all[auc_mask])
+    return compute_peak_area_gaussian(trace, time_all, bp_all, center_bp, half_width_bp)
 
 
 def _correct_peak_channel_traces(

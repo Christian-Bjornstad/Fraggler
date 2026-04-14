@@ -239,7 +239,7 @@ AUTO_ACCEPT_MAX_ABS_ERROR = 3.0
 ROX_PREFERRED_TIME_MIN = 1500.0
 ROX_PREFERRED_TIME_MAX = 4000.0
 ROX_PREFERRED_TIME_MARGIN = 75.0
-ROX_HARD_FILTER_TIME_MIN = 1450.0
+ROX_HARD_FILTER_TIME_MIN = 1600.0
 ROX_HARD_FILTER_TIME_MAX = 4050.0
 ROX_APEX_SNAP_RADIUS = 6
 ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT = 250.0
@@ -1872,7 +1872,7 @@ def _clean_rox_size_standard_peaks(all_found: np.ndarray, rox_data: np.ndarray) 
     cleaned: list[int] = []
     for idx, peak in enumerate(np.asarray(all_found, dtype=int)):
         height = float(rox_data[peak])
-        if height > 31000 or peak < 1000:
+        if height > 28000 or peak < 1200:
             continue
 
         if median_h > 0 and height > (median_h * ROX_DYEBLOB_HEIGHT_MULTIPLIER):
@@ -3118,6 +3118,27 @@ def analyse_fsa_liz(
     print_warning(f"[LIZ] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
     return None
 
+def _is_ladder_fit_monotonic(fsa: Any) -> bool:
+    """Sjekker om basepair-mappingen er strengt monoton i det relevante området."""
+    if not getattr(fsa, "fitted_to_model", False):
+        return False
+    df = getattr(fsa, "sample_data_with_basepairs", None)
+    if df is None:
+        return False
+    bp = df["basepairs"].values
+    if bp.size < 2:
+        return True
+    
+    # Vi sjekker området fra før første ladder peak til etter siste
+    mask = (bp >= 20.0) & (bp <= 650.0)
+    if not np.any(mask):
+        return True
+        
+    relevant_bp = bp[mask]
+    diffs = np.diff(relevant_bp)
+    return bool(np.all(diffs >= -0.01))
+
+
 def analyse_fsa_rox(
     fsa_path: Path,
     sample_channel: str,
@@ -3258,6 +3279,10 @@ def analyse_fsa_rox(
                 if not getattr(fsa, "fitted_to_model", False):
                     fsa = fit_size_standard_to_ladder(fsa)
                 if getattr(fsa, "fitted_to_model", False):
+                    if not _is_ladder_fit_monotonic(fsa):
+                        fsa.fitted_to_model = False
+                        continue
+
                     qc = compute_ladder_qc_metrics(fsa)
                     refined = _try_rox400hd_local_refinement(fsa, "ROX", fsa_path)
                     if refined is not None:
@@ -3377,11 +3402,23 @@ def estimate_running_baseline(
     trace: np.ndarray,
     bin_size: int = BASELINE_BIN_SIZE,
     quantile: float = BASELINE_QUANTILE,
+    use_arpls: bool = True,
+    lam: float = 1000.0,
 ) -> np.ndarray:
-    """Rask tilnærming til rullende baseline (O(N), for plotting)."""
+    """Robust rullende baseline med arPLS som default."""
     n = trace.size
     if n == 0:
         return np.zeros_like(trace, dtype=float)
+
+    if use_arpls:
+        try:
+            from fraggler.fraggler import baseline_arPLS
+            # Bruker lavere ratio (0.01) for tigther convergence
+            baseline = baseline_arPLS(trace, ratio=0.01, lam=lam)
+            return baseline
+        except Exception:
+            pass # Fallback til den enkle metoden
+
     if bin_size < 20:
         bin_size = 20
 
