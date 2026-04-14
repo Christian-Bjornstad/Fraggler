@@ -1,14 +1,19 @@
-Notes til meg selv
+Ting å fikse:
 
-Samtale med patolog:
+- Fikse opp i SL figur og Tabell når det kommer til størrelse og areal, de samsvarer ikke.
+- Legge på spesifikt referanseområde med tabell for klonalitet. se excel. tekst i farger for den trace / data man forventer....
+- Legge på to ulike farger for TCRg siden der kan man og forventer begge tett på hverandre.
+- Fjerne farger der det ikke er overlapp i referanseområdet, det nye...
+- Fikse IKZF1 med kontroll og dit-visning.
+- Legge til "credits" mtp. MIT lisense, fikse også lisence for git og oss.
+- Legge til QC parametere, se excel.
+- Fikse "vindu" når man åpner det, ikke alltid at figurene vises...
+- Fikse NPM1....
 
-Det er vitkig at vi hele tiden kan se hele plottet, altså alt... 
-Det kan nemlig være enkelte topepr som er viktige for oss selv utenfor...
-Derfor bør vi:
 
-Markere uspesifikke topper...
-Kunne legge til html_reports    
-    - Må optimalisere bildene litt hvis pdf
-Kunne huske peaks som vi legger til, manuelt...
-
-Legge til uspesifikke topper med et symbol elelrno, så er det lett å se for alle.
+Andre ting:
+- Gjøre den raskere
+- Sjekke om ting kan optimaliseres med annen kode enn bare python
+- Validere FLT3.
+- Legge til IGH-MUT som en analyse
+- Lage presentasjon og demo osv osv osv. 28. april.
