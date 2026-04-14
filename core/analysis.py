@@ -98,6 +98,14 @@ GS500_BLOCK_REFINEMENT_MARGIN = 120.0
 GS500_BLOCK_REFINEMENT_MIN_DISTANCE = 10
 GS500_BLOCK_REFINEMENT_MIN_HEIGHT = 80.0
 GS500_EDGE_BLOCK_REFINEMENT_MARGIN = 180.0
+
+# --- Deep Search (Super-Search) Fallback ---
+DEEP_SEARCH_TIMEOUT = 300.0  # 5 minutes
+DEEP_SEARCH_PEAK_CAP = 80
+DEEP_SEARCH_TRIGGER_CURVATURE = 0.5
+DEEP_SEARCH_TRIGGER_MAX_ERROR = 5.0
+DEEP_SEARCH_BEAM_WIDTH = 500
+
 GS500_EDGE_BLOCK_REFINEMENT_MIN_HEIGHT = 45.0
 GS500_BLOCK_REFINEMENT_MAX_CANDIDATES = 10
 GS500_ANCHOR_BLOCKS: tuple[tuple[int, ...], ...] = (
@@ -127,16 +135,19 @@ LADDER_FIT_AUTO_ACCEPT_RULES: dict[str, dict[str, float]] = {
         "r2_floor": 0.9985,
         "mean_abs_error_bp": 1.8,
         "max_abs_error_bp": 3.0,
+        "max_curvature": 0.5,
     },
     LADDER_FIT_PROFILE_CLONALITY_ROX400HD: {
         "r2_floor": 0.9985,
         "mean_abs_error_bp": 1.8,
         "max_abs_error_bp": 3.0,
+        "max_curvature": 0.5,
     },
     LADDER_FIT_PROFILE_FLT3_GS500ROX: {
         "r2_floor": 0.9985,
         "mean_abs_error_bp": 1.8,
         "max_abs_error_bp": 3.0,
+        "max_curvature": 0.5,
     },
 }
 
@@ -521,6 +532,7 @@ def _fit_score_tuple(
         + float(missing_penalty),
         float(metrics.get("max_abs_error_bp", float("inf"))),
         -float(metrics.get("r2", float("-inf"))),
+        float(metrics.get("max_curvature", 0.0)),
         float(intensity_penalty),
     )
 
@@ -572,6 +584,7 @@ def _annotate_fit_qc_review(
     r2 = float(metrics.get("r2", float("nan")))
     mean_abs_error = float(metrics.get("mean_abs_error_bp", float("inf")))
     max_abs_error = float(metrics.get("max_abs_error_bp", float("inf")))
+    max_curvature = float(metrics.get("max_curvature", 0.0))
 
     if not np.isfinite(r2) or r2 < float(rules["r2_floor"]):
         reasons.append(f"R2 {r2:.6f}")
@@ -579,6 +592,8 @@ def _annotate_fit_qc_review(
         reasons.append(f"mean residual {mean_abs_error:.2f} bp")
     if not np.isfinite(max_abs_error) or max_abs_error > float(rules["max_abs_error_bp"]):
         reasons.append(f"max residual {max_abs_error:.2f} bp")
+    if max_curvature > float(rules.get("max_curvature", 0.5)):
+        reasons.append(f"high curvature {max_curvature:.3f}")
 
     if not reasons:
         return fsa
@@ -3113,10 +3128,140 @@ def analyse_fsa_liz(
 
     if best_fallback_fsa is not None:
         best_fallback_fsa = _finalize_auto_fit_metadata(best_fallback_fsa)
+        qc = compute_ladder_qc_metrics(best_fallback_fsa)
+        if qc["max_curvature"] < DEEP_SEARCH_TRIGGER_CURVATURE and qc["max_abs_error_bp"] < DEEP_SEARCH_TRIGGER_MAX_ERROR:
+            return _annotate_fit_qc_review(best_fallback_fsa, qc)
+
+    # --- Deep Search Fallback (Super-Search) ---
+    print_green(f"[DEEP SEARCH] Starter 5-minutters grundig backup-søk for {fsa_path.name}...")
+    base_raw_liz = np.asarray(base_fsa.fsa["DATA105"], dtype=float)
+    deep_fsa = _run_deep_ladder_search(base_fsa, base_raw_liz)
+    if deep_fsa is not None:
+        # Perform standard refinements on the deep search result
+        refined = _try_gs500_family_local_refinement(deep_fsa, "LIZ", fsa_path)
+        if refined is not None:
+            deep_fsa = refined
+        
+        qc = compute_ladder_qc_metrics(deep_fsa)
+        deep_fsa = _finalize_auto_fit_metadata(deep_fsa)
+        print_green(f"[DEEP SEARCH] Suksess! Fant løsning med curvature={qc['max_curvature']:.3f} for {fsa_path.name}")
+        return _annotate_fit_qc_review(deep_fsa, qc)
+
+    if best_fallback_fsa is not None:
         return _annotate_fit_qc_review(best_fallback_fsa, compute_ladder_qc_metrics(best_fallback_fsa))
 
     print_warning(f"[LIZ] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
     return None
+
+def _run_deep_ladder_search(fsa: FsaFile, trace: np.ndarray) -> FsaFile | None:
+    """Ultimate backup exhaustive search using curvature as the primary selection metric."""
+    import time
+    start_time = time.perf_counter()
+    
+    expected = np.asarray(fsa.expected_ladder_steps, dtype=float)
+    if expected.size < 4:
+        return None
+
+    # 1. Broad peak detection
+    peaks, props = signal.find_peaks(trace, height=20.0, distance=15)
+    heights = props["peak_heights"]
+    
+    # Sort by height and take top N
+    top_indices = np.argsort(-heights)[:DEEP_SEARCH_PEAK_CAP]
+    candidates = np.sort(peaks[top_indices]).astype(float)
+    
+    if candidates.size < expected.size:
+        return None
+
+    # 2. Wide-Beam Search
+    # Frontier: list of (path_tuple, current_score)
+    # Score here is a simple spacing heuristic
+    frontier: list[tuple[tuple[float, ...], float]] = [((), 0.0)]
+    
+    # Pre-calculate typical gaps if possible or just use broad limits
+    # Total bp distance / Total pixels approx
+    # But it's easier to just use a generous distance constraint and let curvature rank at the end
+    
+    for step_idx, target_bp in enumerate(expected):
+        new_frontier = []
+        for path, score in frontier:
+            last_p = path[-1] if path else 0.0
+            
+            # Find possible next peaks
+            # We enforce a strictly increasing path
+            valid_next = candidates[candidates > last_p]
+            
+            # Prune by total distance to avoid impossible jumps
+            if step_idx > 0:
+                prev_bp = expected[step_idx - 1]
+                bp_gap = target_bp - prev_bp
+                # Expected pixels per bp is roughly 5-15
+                min_p_gap = max(10, bp_gap * 4.0)
+                max_p_gap = bp_gap * 25.0
+                valid_next = valid_next[(valid_next - last_p >= min_p_gap) & (valid_next - last_p <= max_p_gap)]
+            
+            for p in valid_next:
+                # Basic score: just enough to keep the beam focused
+                # We'll rely on the final curvature check for the win
+                if path:
+                    # Heuristic: keep spacing relatively consistent with previous step
+                    if len(path) >= 2:
+                        last_gap = path[-1] - path[-2]
+                        last_bp_gap = expected[step_idx-1] - expected[step_idx-2]
+                        curr_bp_gap = target_bp - expected[step_idx-1]
+                        expected_gap = last_gap * (curr_bp_gap / last_bp_gap)
+                        gap_diff = abs((p - last_p) - expected_gap)
+                        new_score = score + gap_diff
+                    else:
+                        new_score = score
+                else:
+                    new_score = 0.0
+                
+                new_frontier.append((path + (p,), new_score))
+                
+        if not new_frontier:
+            break
+            
+        new_frontier.sort(key=lambda x: x[1])
+        frontier = new_frontier[:DEEP_SEARCH_BEAM_WIDTH]
+        
+        if time.perf_counter() - start_time > DEEP_SEARCH_TIMEOUT:
+            print_warning(f"[DEEP SEARCH] Timeout reached at step {step_idx}/{len(expected)}")
+            break
+
+    # 3. Final Selection among full-length paths
+    full_paths = [p for p, s in frontier if len(p) == len(expected)]
+    if not full_paths:
+        return None
+        
+    print_green(f"[DEEP SEARCH] Found {len(full_paths)} complete candidates. Ranking by curvature...")
+    
+    best_fsa = None
+    best_qc = None
+    
+    # We evaluate the top N full paths using the actual spline curvature
+    for i, path in enumerate(full_paths[:100]): # Evaluate top 100 by spacing heuristic
+        trial = _clone_fsa_for_ladder_trial(fsa)
+        trial.best_size_standard = np.asarray(path, dtype=float)
+        trial.ladder_steps = expected.copy()
+        trial.n_ladder_peaks = int(expected.size)
+        
+        try:
+            trial = fit_size_standard_to_ladder(trial)
+            if not getattr(trial, "fitted_to_model", False):
+                continue
+            if not _is_ladder_fit_monotonic(trial):
+                continue
+                
+            qc = compute_ladder_qc_metrics(trial)
+            if best_qc is None or qc["max_curvature"] < best_qc["max_curvature"]:
+                best_fsa = trial
+                best_qc = qc
+        except Exception:
+            continue
+            
+    return best_fsa
+
 
 def _is_ladder_fit_monotonic(fsa: Any) -> bool:
     """Sjekker om basepair-mappingen er strengt monoton i det relevante området."""
@@ -3374,6 +3519,25 @@ def analyse_fsa_rox(
 
     if best_fallback_fsa is not None:
         best_fallback_fsa = _finalize_auto_fit_metadata(best_fallback_fsa)
+        qc = compute_ladder_qc_metrics(best_fallback_fsa)
+        if qc["max_curvature"] < DEEP_SEARCH_TRIGGER_CURVATURE and qc["max_abs_error_bp"] < DEEP_SEARCH_TRIGGER_MAX_ERROR:
+            return _annotate_fit_qc_review(best_fallback_fsa, qc)
+
+    # --- Deep Search Fallback (Super-Search) ---
+    print_green(f"[DEEP SEARCH] Starter 5-minutters grundig backup-søk for {fsa_path.name}...")
+    deep_fsa = _run_deep_ladder_search(base_fsa, base_raw_rox)
+    if deep_fsa is not None:
+        # Perform standard refinements on the deep search result
+        refined = _try_rox400hd_local_refinement(deep_fsa, "ROX", fsa_path)
+        if refined is not None:
+            deep_fsa = refined
+        
+        qc = compute_ladder_qc_metrics(deep_fsa)
+        deep_fsa = _finalize_auto_fit_metadata(deep_fsa)
+        print_green(f"[DEEP SEARCH] Suksess! Fant løsning med curvature={qc['max_curvature']:.3f}")
+        return _annotate_fit_qc_review(deep_fsa, qc)
+
+    if best_fallback_fsa is not None:
         return _annotate_fit_qc_review(best_fallback_fsa, compute_ladder_qc_metrics(best_fallback_fsa))
 
     print_warning(f"[ROX] Fant ingen gyldige size-standard kombinasjoner for {fsa_path.name}")
@@ -3451,6 +3615,25 @@ def estimate_running_baseline(
 # ================= LADDER-QC: METRIKKER ===========================
 # ==================================================================
 
+def _calculate_ladder_max_curvature(fsa: Any) -> float:
+    """Calculates the maximum absolute second derivative of the ladder fit."""
+    ladder_steps = np.asarray(fsa.ladder_steps, dtype=float)
+    best_combination = np.asarray(fsa.best_size_standard, dtype=float)
+    
+    if len(ladder_steps) < 4 or len(best_combination) < 4:
+        return 0.0
+        
+    try:
+        # We fit bp -> index to see how much the mapping 'curves' 
+        # This matches Willros/Fraggler logic
+        spline = UnivariateSpline(ladder_steps, best_combination, s=0)
+        der2 = spline.derivative(n=2)
+        curve_vals = np.abs(der2(ladder_steps))
+        return float(np.max(curve_vals))
+    except Exception:
+        return 0.0
+
+
 def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
     """Beregner QC-metrikker for ladder-fit using actual basepair mapping."""
     ladder_size = np.array(fsa.ladder_steps, dtype=float)
@@ -3480,6 +3663,7 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
             "r2": float("nan"),
             "mean_abs_error_bp": float("inf"),
             "max_abs_error_bp": float("inf"),
+            "max_curvature": 0.0,
             "n_ladder_steps": 0,
             "n_size_standard_peaks": 0,
         }
@@ -3489,6 +3673,7 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
             "r2": float("nan"),
             "mean_abs_error_bp": float("inf"),
             "max_abs_error_bp": float("inf"),
+            "max_curvature": 0.0,
             "n_ladder_steps": int(ladder_size.size),
             "n_size_standard_peaks": int(best_combination.size),
         }
@@ -3498,10 +3683,13 @@ def compute_ladder_qc_metrics(fsa: FsaFile) -> dict[str, float | int]:
     mean_abs_error = float(np.mean(abs_errors)) if abs_errors.size else float("inf")
     max_abs_error = float(np.max(abs_errors)) if abs_errors.size else float("inf")
 
+    max_curvature = _calculate_ladder_max_curvature(fsa)
+
     return {
         "r2": r2,
         "mean_abs_error_bp": mean_abs_error,
         "max_abs_error_bp": max_abs_error,
+        "max_curvature": max_curvature,
         "n_ladder_steps": int(ladder_size.size),
         "n_size_standard_peaks": int(best_combination.size),
     }
