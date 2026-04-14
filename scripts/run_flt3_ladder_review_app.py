@@ -149,6 +149,7 @@ class Flt3LadderReviewApp:
         self.preview_reason = "No file selected."
         self.status_text = "Ready."
         self.last_clicked_time: float | None = None
+        self.pending_record_path: str | None = None
 
         self.title = pn.pane.Markdown("## FLT3 Ladder Review")
         self.status = pn.pane.Markdown("")
@@ -198,6 +199,7 @@ class Flt3LadderReviewApp:
 
         self.prev_btn = pn.widgets.Button(name="Previous", button_type="default")
         self.next_btn = pn.widgets.Button(name="Next", button_type="default")
+        self.load_btn = pn.widgets.Button(name="Load Selected File", button_type="primary")
         self.reload_btn = pn.widgets.Button(name="Reload File", button_type="default")
         self.rescan_btn = pn.widgets.Button(name="Rescan Folder", button_type="default")
 
@@ -253,6 +255,7 @@ class Flt3LadderReviewApp:
         self.rank_btn.on_click(lambda _event: self._compute_qc_for_filtered_records())
         self.prev_btn.on_click(lambda _event: self._move_file(-1))
         self.next_btn.on_click(lambda _event: self._move_file(1))
+        self.load_btn.on_click(lambda _event: self._load_selected_record())
         self.reload_btn.on_click(lambda _event: self._reload_current_file())
         self.rescan_btn.on_click(lambda _event: self._rescan_files())
         self.assign_btn.on_click(lambda _event: self._assign_selected_candidate())
@@ -279,6 +282,7 @@ class Flt3LadderReviewApp:
             pn.Card(
                 self.file_select,
                 pn.Row(self.prev_btn, self.next_btn),
+                self.load_btn,
                 pn.Row(self.reload_btn, self.rescan_btn),
                 title="Current File",
                 collapsed=False,
@@ -328,13 +332,28 @@ class Flt3LadderReviewApp:
 
         self._update_filtered_records()
         if self.filtered_records:
-            first_path = str(self.filtered_records[0]["path"])
-            self.file_select.param.update(value=first_path)
-            selected = next(
-                (record for record in self.filtered_records if str(record["path"]) == first_path),
-                self.filtered_records[0],
-            )
-            self._load_record(selected)
+            if self.case_manifest:
+                self.file_select.param.update(value=None)
+                self.current_record = None
+                self.current_fsa = None
+                self.preview_fsa = None
+                self.current_meta = None
+                self.current_candidates = pd.DataFrame(columns=["time", "intensity", "source"])
+                self.ladder_steps = np.asarray([], dtype=float)
+                self.mapping_times = {}
+                self.manual_candidate_times = []
+                self.preview_metrics = None
+                self.preview_reason = "Select a file to load its ladder trace."
+                self._set_status("Select one of the queued FLT3 files to load the trace.", level="info")
+                self._refresh_views()
+            else:
+                first_path = str(self.filtered_records[0]["path"])
+                self.file_select.param.update(value=first_path)
+                selected = next(
+                    (record for record in self.filtered_records if str(record["path"]) == first_path),
+                    self.filtered_records[0],
+                )
+                self._load_record(selected)
         else:
             self._set_status("No FLT3 files found in this folder.", level="warning")
             self._refresh_views()
@@ -657,10 +676,25 @@ class Flt3LadderReviewApp:
         value = event.new
         if not value:
             return
+        self.pending_record_path = str(value)
+        if self.case_manifest:
+            self._set_status("Selection updated. Click 'Load Selected File' to open the trace.", level="info")
+            return
         for record in self.filtered_records:
             if str(record["path"]) == str(value):
                 self._load_record(record)
                 return
+
+    def _load_selected_record(self) -> None:
+        value = self.pending_record_path or self.file_select.value
+        if not value:
+            self._set_status("Select a file first.", level="warning")
+            return
+        for record in self.filtered_records:
+            if str(record["path"]) == str(value):
+                self._load_record(record)
+                return
+        self._set_status("Could not find the selected file in the current queue.", level="error")
 
     def _move_file(self, delta: int) -> None:
         if not self.filtered_records or not self.current_record:

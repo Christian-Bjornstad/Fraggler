@@ -2817,6 +2817,193 @@ def _template_review_scaffold_payload(
     }
 
 
+def _flt3_trace_peak_candidates(trace: np.ndarray) -> pd.DataFrame:
+    from scipy.signal import find_peaks
+
+    if trace.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "prominence", "source"])
+
+    try:
+        baseline = estimate_running_baseline(trace, bin_size=200, quantile=0.10)
+        corrected = np.clip(np.asarray(trace, dtype=float) - baseline, a_min=0, a_max=None)
+    except Exception:
+        corrected = np.asarray(trace, dtype=float)
+
+    peak_idx, props = find_peaks(
+        corrected,
+        distance=12,
+        prominence=35.0,
+        height=40.0,
+    )
+    if peak_idx.size == 0:
+        return pd.DataFrame(columns=["time", "intensity", "prominence", "source"])
+
+    rows = pd.DataFrame(
+        {
+            "time": peak_idx.astype(float),
+            "intensity": corrected[peak_idx].astype(float),
+            "prominence": np.asarray(props.get("prominences", []), dtype=float),
+            "source": "trace_bootstrap",
+        }
+    )
+    rows = rows[
+        (rows["time"].astype(float) >= 1350.0)
+        & (rows["time"].astype(float) <= 4400.0)
+    ].copy()
+    if rows.empty:
+        return pd.DataFrame(columns=["time", "intensity", "prominence", "source"])
+    rows["time_key"] = rows["time"].round().astype(int)
+    rows = (
+        rows.sort_values(["prominence", "intensity"], ascending=[False, False])
+        .drop_duplicates(subset=["time_key"], keep="first")
+        .sort_values("time")
+        .reset_index(drop=True)
+    )
+    return rows.loc[:, ["time", "intensity", "prominence", "source"]]
+
+
+def _attempt_flt3_d835_family_bootstrap_fit(
+    fsa: FsaFile,
+    assay: str,
+    analysis_type: str | None,
+) -> FsaFile | None:
+    if assay != "FLT3-D835" or str(analysis_type or "").strip().lower() not in {"", "standard"}:
+        return None
+
+    expected_steps = _flt3_expected_ladder_steps(fsa)
+    if expected_steps.size == 0:
+        return None
+
+    template_key = _resolved_flt3_template_key(fsa, assay, analysis_type)
+    if template_key is None:
+        return None
+    template_times = np.asarray(FLT3_TEMPLATE_TIMES[template_key], dtype=float)
+    if template_times.size != expected_steps.size:
+        return None
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    if trace.size == 0:
+        return None
+
+    candidate_df = _flt3_trace_peak_candidates(trace)
+    if candidate_df.empty or len(candidate_df) < int(expected_steps.size):
+        return None
+
+    candidate_times = candidate_df["time"].astype(float).tolist()
+    candidate_intensities = candidate_df["intensity"].astype(float).tolist()
+    ref_gaps = np.diff(template_times).astype(float)
+    start_min = float(template_times[0] - 140.0)
+    start_max = float(template_times[0] + 120.0)
+
+    best_trial: FsaFile | None = None
+    best_qc: dict[str, float | int] | None = None
+    best_score = float("inf")
+
+    for start_idx, start_time in enumerate(candidate_times):
+        if start_time < start_min or start_time > start_max:
+            continue
+
+        mapping_times = [float(start_time)]
+        picked_indices = [int(start_idx)]
+        prev_idx = int(start_idx)
+        prev_time = float(start_time)
+        ok = True
+        score = 0.0
+
+        for step_offset, ref_gap in enumerate(ref_gaps, start=1):
+            target_time = float(start_time + (template_times[step_offset] - template_times[0]))
+            low_gap = max(18.0, float(ref_gap) * 0.45)
+            high_gap = max(low_gap + 18.0, float(ref_gap) * 1.65)
+            chosen_idx: int | None = None
+            chosen_score = float("inf")
+            for candidate_idx in range(prev_idx + 1, len(candidate_times)):
+                candidate_time = float(candidate_times[candidate_idx])
+                gap = candidate_time - prev_time
+                if gap < low_gap:
+                    continue
+                if gap > high_gap:
+                    break
+                local_score = (
+                    abs(gap - float(ref_gap)) * 1.8
+                    + abs(candidate_time - target_time) * 0.35
+                    - min(float(candidate_intensities[candidate_idx]), 2500.0) * 0.002
+                )
+                if step_offset == 1 and candidate_time <= prev_time + 35.0:
+                    local_score += 200.0
+                if local_score < chosen_score:
+                    chosen_idx = int(candidate_idx)
+                    chosen_score = float(local_score)
+            if chosen_idx is None:
+                ok = False
+                break
+            prev_idx = int(chosen_idx)
+            prev_time = float(candidate_times[chosen_idx])
+            picked_indices.append(prev_idx)
+            mapping_times.append(prev_time)
+            score += chosen_score
+
+        if not ok or len(mapping_times) != int(expected_steps.size):
+            continue
+
+        try:
+            trial = copy.deepcopy(fsa)
+            trial.expected_ladder_steps = expected_steps.copy()
+            trial.ladder_steps = expected_steps.copy()
+            trial = apply_manual_ladder_mapping(
+                trial,
+                {
+                    "mapping": {},
+                    "mapping_times": {idx: float(value) for idx, value in enumerate(mapping_times)},
+                    "manual_candidates": [],
+                },
+            )
+        except Exception:
+            continue
+
+        qc = compute_ladder_qc_metrics(trial)
+        trial_r2 = float(qc.get("r2", float("-inf")))
+        trial_max = float(qc.get("max_abs_error_bp", float("inf")))
+        if not np.isfinite(trial_r2) or not np.isfinite(trial_max):
+            continue
+        if trial_r2 < 0.9992 or trial_max > 3.0:
+            continue
+
+        score += _flt3_mapping_shape_penalty(
+            {idx: float(value) for idx, value in enumerate(mapping_times)},
+            template_times,
+            trace,
+        )
+        if (
+            best_qc is None
+            or trial_max + 0.05 < float(best_qc.get("max_abs_error_bp", float("inf")))
+            or (
+                abs(trial_max - float(best_qc.get("max_abs_error_bp", float("inf")))) <= 0.05
+                and trial_r2 > float(best_qc.get("r2", float("-inf"))) + 1e-6
+            )
+            or (
+                abs(trial_max - float(best_qc.get("max_abs_error_bp", float("inf")))) <= 0.1
+                and abs(trial_r2 - float(best_qc.get("r2", float("-inf")))) <= 1e-6
+                and score < best_score
+            )
+        ):
+            best_trial = trial
+            best_qc = qc
+            best_score = float(score)
+
+    if best_trial is None:
+        return None
+
+    setattr(best_trial, "ladder_fit_strategy", "flt3_template_rescue")
+    setattr(
+        best_trial,
+        "ladder_fit_note",
+        "FLT3 D835 family bootstrap rescue selected a full GS500ROX ladder sequence from the raw trace.",
+    )
+    setattr(best_trial, "ladder_review_required", False)
+    setattr(best_trial, "ladder_missing_expected_steps", [])
+    return best_trial
+
+
 def _attempt_flt3_template_fit(
     fsa: FsaFile,
     assay: str,
@@ -3127,9 +3314,18 @@ def _attempt_lenient_rox_fit(
             )
             fsa = find_size_standard_peaks(fsa)
             ss_peaks = getattr(fsa, "size_standard_peaks", None)
-            if ss_peaks is None or getattr(ss_peaks, "shape", [0])[0] < 3:
+            ss_peak_count = 0 if ss_peaks is None else int(getattr(ss_peaks, "shape", [0])[0])
+            if ss_peak_count < 3:
+                rescued = _attempt_flt3_d835_family_bootstrap_fit(fsa, assay, analysis_type)
+                if rescued is not None:
+                    setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
+                    return rescued
+                trace_peak_count = len(_flt3_trace_peak_candidates(np.asarray(getattr(fsa, "size_standard", []), dtype=float)))
+                if trace_peak_count > best_seed_peak_count:
+                    best_seed_fsa = copy.deepcopy(fsa)
+                    best_seed_peak_count = trace_peak_count
                 continue
-            seed_peak_count = int(getattr(ss_peaks, "shape", [0])[0])
+            seed_peak_count = ss_peak_count
             if seed_peak_count > best_seed_peak_count:
                 best_seed_fsa = copy.deepcopy(fsa)
                 best_seed_peak_count = seed_peak_count
@@ -3146,6 +3342,10 @@ def _attempt_lenient_rox_fit(
                 rescued = _attempt_flt3_bootstrap_template_fit(fsa, assay, analysis_type)
                 if rescued is not None:
                     return rescued
+                rescued = _attempt_flt3_d835_family_bootstrap_fit(fsa, assay, analysis_type)
+                if rescued is not None:
+                    setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
+                    return rescued
                 continue
 
             selected_fit = _select_best_ladder_candidate(fsa)
@@ -3157,11 +3357,19 @@ def _attempt_lenient_rox_fit(
                     rescued = _attempt_flt3_bootstrap_template_fit(fsa, assay, analysis_type)
                     if rescued is not None:
                         return rescued
+                    rescued = _attempt_flt3_d835_family_bootstrap_fit(fsa, assay, analysis_type)
+                    if rescued is not None:
+                        setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
+                        return rescued
                     fsa = fit_size_standard_to_ladder(fsa)
 
             if not getattr(fsa, "fitted_to_model", False):
                 rescued = _attempt_flt3_bootstrap_template_fit(fsa, assay, analysis_type)
                 if rescued is not None:
+                    return rescued
+                rescued = _attempt_flt3_d835_family_bootstrap_fit(fsa, assay, analysis_type)
+                if rescued is not None:
+                    setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
                     return rescued
                 continue
 
@@ -3203,6 +3411,10 @@ def _attempt_lenient_rox_fit(
             continue
 
     if best_seed_fsa is not None:
+        rescued = _attempt_flt3_d835_family_bootstrap_fit(best_seed_fsa, assay, analysis_type)
+        if rescued is not None:
+            setattr(rescued, "_flt3_sizing_method", _infer_sizing_method(rescued))
+            return rescued
         expected_steps = _flt3_expected_ladder_steps(best_seed_fsa)
         review_payload = _template_review_scaffold_payload(
             best_seed_fsa,
