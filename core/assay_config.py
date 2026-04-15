@@ -134,6 +134,10 @@ def __getattr__(name: str) -> Any:
         return _get_analysis_attr("ASSAY_REFERENCE_LABEL", {})
     if name == "NONSPECIFIC_PEAKS":
         return _get_analysis_attr("NONSPECIFIC_PEAKS", {})
+    if name == "ASSAY_REARRANGEMENT_INFO":
+        return _get_analysis_attr("ASSAY_REARRANGEMENT_INFO", {})
+    if name == "CHANNEL_TEXT_COLORS":
+        return _get_analysis_attr("CHANNEL_TEXT_COLORS", {})
     if name == "REFERENCE_SHADE_COLOR":
         return _get_analysis_attr("REFERENCE_SHADE_COLOR", DEFAULT_REFERENCE_SHADE_COLOR)
     

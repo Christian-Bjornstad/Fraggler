@@ -3828,24 +3828,17 @@ def compute_sl_area_metrics(
     time_arr = raw_df["time"].astype(int).to_numpy()
     bp_arr = raw_df["basepairs"].to_numpy()
     
-    # Calculate baseline to avoid integrating background/negative noise
-    from core.analysis import estimate_running_baseline
-    baseline = estimate_running_baseline(trace, bin_size=5000, quantile=0.01)
-    trace_corr = np.maximum(trace - baseline, 0.0)
-
+    from core.area import compute_peak_area_gaussian
+    
     results = []
     for target_bp in targets_bp:
-        mask = (bp_arr >= (target_bp - window_bp)) & (bp_arr <= (target_bp + window_bp))
-        if not np.any(mask):
-            area_val = 0.0
-        else:
-            time_idx = time_arr[mask]
-            time_idx = time_idx[(time_idx >= 0) & (time_idx < len(trace))]
-            if time_idx.size == 0:
-                area_val = 0.0
-            else:
-                area_val = float(trace_corr[time_idx].sum())
-
+        area_val = compute_peak_area_gaussian(
+            trace,
+            time_arr,
+            bp_arr,
+            float(target_bp),
+            window_bp
+        )
         results.append({"bp": float(target_bp), "area": area_val})
 
     total_area = float(sum(r["area"] for r in results))

@@ -29,6 +29,73 @@ def _assay_reference_ranges() -> dict:
     return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
 
 
+def _is_ladder_channel(channel: str | None) -> bool:
+    return channel in {"DATA4", "DATA105"}
+
+
+def _smooth_signal(values: np.ndarray, window: int) -> np.ndarray:
+    if window <= 1 or values.size == 0:
+        return np.asarray(values, dtype=float)
+    kernel = np.ones(int(window), dtype=float) / float(window)
+    return np.convolve(np.asarray(values, dtype=float), kernel, mode="same")
+
+
+def _baseline_correct_trace_for_display(
+    trace: np.ndarray,
+    *,
+    channel: str | None,
+    assay: str | None,
+) -> np.ndarray:
+    """Baseline-correct a trace for display without letting low-frequency drift dominate."""
+    full_trace = np.asarray(trace, dtype=float)
+    if full_trace.size == 0:
+        return full_trace
+
+    try:
+        if assay == "SL":
+            baseline = estimate_running_baseline(
+                full_trace,
+                bin_size=5000,
+                quantile=0.01,
+                use_arpls=False,
+            )
+            corrected = full_trace - baseline
+            corrected[corrected < 0] = 0.0
+            return corrected
+
+        if _is_ladder_channel(channel):
+            primary_baseline = estimate_running_baseline(
+                full_trace,
+                bin_size=max(400, min(full_trace.size, 1200)),
+                quantile=0.20,
+                use_arpls=False,
+            )
+            corrected = full_trace - primary_baseline
+            corrected[corrected < 0] = 0.0
+
+            residual_baseline = estimate_running_baseline(
+                corrected,
+                bin_size=max(150, min(corrected.size, 500)),
+                quantile=0.05,
+                use_arpls=False,
+            )
+            corrected = corrected - residual_baseline
+            corrected[corrected < 0] = 0.0
+
+            smooth_window = max(5, min((corrected.size // 20) * 2 + 1, 151))
+            broad_trend = _smooth_signal(corrected, smooth_window)
+            corrected = corrected - broad_trend
+            corrected[corrected < 0] = 0.0
+            return corrected
+
+        baseline = estimate_running_baseline(full_trace, bin_size=200, quantile=0.10)
+        corrected = full_trace - baseline
+        corrected[corrected < 0] = 0.0
+        return corrected
+    except Exception:
+        return full_trace
+
+
 
 def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str | None:
     import plotly.graph_objects as go
@@ -88,6 +155,9 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     else:
         win_bp = (bp_trace >= bp_min) & (bp_trace <= bp_max)
 
+    # Bare beregn/legg til markører om vi faktisk har specs (dvs PK)
+    marker_specs = markers_for_entry(entry, rules)  # tom for ikke-PK
+
     fig = go.Figure()
 
     # Tegn traces (baseline-korrigert slik som i master). [1](https://hsorhf-my.sharepoint.com/personal/chrbj5_ous-hf_no/Documents/Microsoft%20Copilot%20Chat-filer/fraggler_master_assay_channels.py)
@@ -99,12 +169,11 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     for ch in channels_to_plot:
         full_trace = np.asarray(fsa.fsa[ch]).astype(float)
 
-        try:
-            baseline = estimate_running_baseline(full_trace, bin_size=200, quantile=0.10)
-            full_corr = full_trace - baseline
-            full_corr[full_corr < 0] = 0.0
-        except Exception:
-            full_corr = full_trace
+        full_corr = _baseline_correct_trace_for_display(
+            full_trace,
+            channel=ch,
+            assay=assay,
+        )
 
         y_corr = full_corr[time_all[mask]]
 
@@ -157,7 +226,6 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     # -----------------------------
     # MARKØRER: forventede sample-peaks + ladder-peaks
     # -----------------------------
-    marker_specs = markers_for_entry(entry, rules)  # tom for ikke-PK
     marker_results = []
 
     # Bare beregn/legg til markører om vi faktisk har specs (dvs PK)
@@ -338,8 +406,62 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
   if (!gd) return;
 
   var peaksTraceIndex = {peaks_trace_index};
+  var assayName = {json.dumps(assay)};
 
-  Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
+  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
+    function decodePlotlyArray(val) {{
+      if (Array.isArray(val)) return val;
+      if (ArrayBuffer.isView(val)) return Array.from(val);
+      if (!val || typeof val !== "object" || typeof val.length !== "number") return [];
+      try {{ return Array.from(val); }} catch(e) {{ return []; }}
+    }}
+
+    var traceXYCache = g.data.map(function(t) {{
+      return {{ x: decodePlotlyArray(t.x), y: decodePlotlyArray(t.y) }};
+    }});
+
+    function solve3x3(mat, vec) {{
+      var det = mat[0][0]*(mat[1][1]*mat[2][2] - mat[1][2]*mat[2][1]) -
+                mat[0][1]*(mat[1][0]*mat[2][2] - mat[1][2]*mat[2][0]) +
+                mat[0][2]*(mat[1][0]*mat[2][1] - mat[1][1]*mat[2][0]);
+      if (Math.abs(det) < 1e-12) return null;
+      function getDet(m, colIdx, v) {{
+        var nm = m.map(function(row) {{ return row.slice(); }});
+        for (var i = 0; i < 3; i++) nm[i][colIdx] = v[i];
+        return nm[0][0]*(nm[1][1]*nm[2][2] - nm[1][2]*nm[2][1]) -
+               nm[0][1]*(nm[1][0]*nm[2][2] - nm[1][2]*nm[2][0]) +
+               nm[0][2]*(nm[1][0]*nm[2][1] - nm[1][1]*nm[2][0]);
+      }}
+      return [getDet(mat,0,vec)/det, getDet(mat,1,vec)/det, getDet(mat,2,vec)/det];
+    }}
+
+    function computeGaussianArea(xCenter, traceIdx) {{
+      var data = traceXYCache[traceIdx] || traceXYCache[0] || {{ x: [], y: [] }};
+      var hw = (assayName === "SL") ? 20.0 : 5.0;
+      var pts = [];
+      for (var i = 0; i < data.x.length; i++) {{
+        if (Math.abs(data.x[i] - xCenter) <= hw && data.y[i] > 0.01) {{
+          pts.push({{ x: data.x[i], lny: Math.log(data.y[i]) }});
+        }}
+      }}
+      if (pts.length < 3) return 0;
+      var sx4=0, sx3=0, sx2=0, sx1=0, n=pts.length, sxy2=0, sxy1=0, sy=0;
+      for (var i=0; i<n; i++) {{
+        var xi = i;
+        var yi = pts[i].lny;
+        var xi2 = xi*xi;
+        sx4 += xi2*xi2; sx3 += xi2*xi; sx2 += xi2; sx1 += xi;
+        sxy2 += xi2*yi; sxy1 += xi*yi; sy += yi;
+      }}
+      var sol = solve3x3([[sx4, sx3, sx2], [sx3, sx2, sx1], [sx2, sx1, n]], [sxy2, sxy1, sy]);
+      if (!sol || sol[0] >= 0) return 0;
+      var sigma2 = -1.0 / (2.0 * sol[0]);
+      var mu = sol[1] * sigma2;
+      var amp = Math.exp(sol[2] + (mu*mu)/(2.0*sigma2));
+      if (mu < -1 || mu > (n + 1)) return 0;
+      return amp * Math.sqrt(sigma2) * Math.sqrt(2.0 * Math.PI);
+    }}
+
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
 
@@ -361,7 +483,9 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
       var ys = peaks.map(function(p) {{ return p.y; }});
       var op = peaks.map(function(p) {{ return p.active ? 1.0 : 0.3; }});
       var col = peaks.map(function(p) {{ return p.active ? "red" : "gray"; }});
-      var texts = peaks.map(function(p) {{ return p.active ? p.x.toFixed(1) : ""; }});
+      var texts = peaks.map(function(p) {{ 
+        return p.active ? (p.x.toFixed(1) + (p.area ? " (A=" + p.area.toFixed(0) + ")" : "")) : ""; 
+      }});
 
       Plotly.restyle(g, {{
         x: [xs],
@@ -412,7 +536,8 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
         return;
       }}
 
-      peaks.push({{ x: xVal, y: yVal, active: true }});
+      var area = computeGaussianArea(xVal, pt.curveNumber || 0);
+      peaks.push({{ x: xVal, y: yVal, active: true, area: area }});
       rebuild();
     }});
   }});

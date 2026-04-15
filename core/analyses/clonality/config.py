@@ -182,7 +182,7 @@ ASSAY_REFERENCE_RANGES: dict[str, list[tuple[float, float]]] = {
     "IKZF1": [(100.0, 300.0)],
     "Ktr-albumin": [(100.0, 300.0)],
 
-    "IGK": [(120.0, 300.0)],
+    "IGK": [(120.0, 160.0), (190.0, 300.0)],
     "KDE": [(210.0, 390.0)],
 
     "DHJH_D": [(110.0, 290.0), (390.0, 420.0)],
@@ -196,26 +196,131 @@ ASSAY_REFERENCE_RANGES: dict[str, list[tuple[float, float]]] = {
     "TCRbC": [(170.0, 210.0), (285.0, 325.0)],
 }
 
+# Channel → text color mapping for rearrangement info tables
+CHANNEL_TEXT_COLORS: dict[str, str] = {
+    "DATA1": "#2563eb",   # blue
+    "DATA2": "#16a34a",   # green
+    "DATA3": "#1e293b",   # black (orange trace, dark text)
+}
+
+# ============================================================
+# Rearrangement info per assay (for DIT report tables)
+# - "title": assay header line
+# - "rows": list of rearrangement entries
+#   - "name": rearrangement name
+#   - "range": bp range string
+#   - "channel": single channel (DATA1/DATA2/DATA3)
+#   - "channels": list of channels (for dual-channel assays)
+# - "prefix_parts": for IGK-style split-color prefix
+# ============================================================
+ASSAY_REARRANGEMENT_INFO: dict[str, dict] = {
+    "FR1": {
+        "title": "FR1 (IgH): 310–360 bp",
+        "rows": [
+            {"name": "FR1-JH", "range": "310–360", "channel": "DATA1"},
+        ],
+    },
+    "FR2": {
+        "title": "FR2 (IgH): 250–295 bp",
+        "rows": [
+            {"name": "FR2-JH", "range": "250–295", "channel": "DATA1"},
+        ],
+    },
+    "FR3": {
+        "title": "FR3 (IgH): 100–170 bp",
+        "rows": [
+            {"name": "FR3-JH", "range": "100–170", "channel": "DATA2"},
+        ],
+    },
+    "DHJH_D": {
+        "title": "DHJH mix D: 110–290, 390–420 bp",
+        "rows": [
+            {"name": "IGHD1-IGHJ", "range": "260–290", "channel": "DATA2"},
+            {"name": "IGHD2-IGHJ", "range": "230–260", "channel": "DATA2"},
+            {"name": "IGHD3-IGHJ", "range": "390–420", "channel": "DATA2"},
+            {"name": "IGHD4-IGHJ", "range": "175–205", "channel": "DATA2"},
+            {"name": "IGHD5-IGHJ", "range": "225–255", "channel": "DATA2"},
+            {"name": "IGHD6-IGHJ", "range": "110–150", "channel": "DATA2"},
+        ],
+    },
+    "DHJH_E": {
+        "title": "DHJH mix E: 100–130 bp",
+        "rows": [
+            {"name": "IGHD7-IGHJ", "range": "100–130", "channel": "DATA1"},
+        ],
+    },
+    "IGK": {
+        "title": "IgK: 120–160, 190–300 bp",
+        "prefix_parts": [("Jk1-4", "DATA2"), ("Jk5", "DATA1")],
+        "rows": [
+            {"name": "Vk1f/6", "range": "140–160"},
+            {"name": "Vk2f", "range": "280–300"},
+            {"name": "Vk3f", "range": "190–210"},
+            {"name": "Vk4", "range": "275–295"},
+            {"name": "Vk5", "range": "260–280"},
+            {"name": "Vk7", "range": "120–140"},
+        ],
+    },
+    "KDE": {
+        "title": "Kde: 210–390 bp",
+        "rows": [
+            {"name": "Vk1f/6-Kde", "range": "225–245", "channel": "DATA3"},
+            {"name": "Vk2f-Kde", "range": "360–390", "channel": "DATA3"},
+            {"name": "Vk3f-Kde", "range": "279–300", "channel": "DATA3"},
+            {"name": "Vk4-Kde", "range": "255–385", "channel": "DATA3"},
+            {"name": "Vk5-Kde", "range": "350–380", "channel": "DATA3"},
+            {"name": "Vk7-Kde", "range": "210–230", "channel": "DATA3"},
+            {"name": "IntronRSS-Kde", "range": "270–300", "channel": "DATA3"},
+        ],
+    },
+    "TCRgA": {
+        "title": "TCRγ mix A: 145–255 bp",
+        "rows": [
+            {"name": "Vg1-8 + Jg1,1/2,1", "range": "230–255", "channel": "DATA1"},
+            {"name": "Vg1-8 + Jg1,3/2,3", "range": "195–230", "channel": "DATA2"},
+            {"name": "Vg10 + Jg1,1/2,1", "range": "175–195", "channel": "DATA1"},
+            {"name": "Vg10 + Jg1,3/2,3", "range": "145–175", "channel": "DATA2"},
+        ],
+    },
+    "TCRgB": {
+        "title": "TCRγ mix B: 80–220 bp",
+        "rows": [
+            {"name": "Vg9 + Jg1,1/2,1", "range": "195–220", "channel": "DATA1"},
+            {"name": "Vg9 + Jg1,3/2,3", "range": "160–195", "channel": "DATA2"},
+            {"name": "Vg11 + Jg1,1/2,1", "range": "110–140", "channel": "DATA1"},
+            {"name": "Vg11 + Jg1,3/2,3", "range": "80–110", "channel": "DATA2"},
+        ],
+    },
+    "TCRbA": {
+        "title": "TCRβ mix A: 240–285 bp",
+        "prefix_parts": [("Jβ1.X", "DATA2"), ("Jβ2.X", "DATA1")],
+        "rows": [
+            {"name": "Vβ+Jβ1/2", "range": "240–285"},
+        ],
+    },
+    "TCRbB": {
+        "title": "TCRβ mix B: 240–285 bp",
+        "prefix_parts": [("Jβ1.X", "DATA2"), ("Jβ2.X", "DATA1")],
+        "rows": [
+            {"name": "Vβ+Jβ2", "range": "240–285"},
+        ],
+    },
+    "TCRbC": {
+        "title": "TCRβ mix C: 170–210, 285–325 bp",
+        "prefix_parts": [("Jβ1.X", "DATA2"), ("Jβ2.X", "DATA1")],
+        "rows": [
+            {"name": "Dβ1+Jβ1/2", "range": "285–325"},
+            {"name": "Dβ2 + Jβ2", "range": "170–210"},
+        ],
+    },
+}
+
+# Keep backward-compat simple label for assays without rearrangement info
 ASSAY_REFERENCE_LABEL: dict[str, str] = {
-    "FR1": "FR1 (IgH): 310–360 bp (VH–JH)",
-    "FR2": "FR2 (IgH): 250–295 bp (VH–JH)",
-    "FR3": "FR3 (IgH): 100–170 bp (VH–JH)",
     "IKZF1": "IKZF1 (IKAROS): 100–300 bp",
     "Ktr-albumin": "Ktr-albumin kontroll: 100–300 bp",
-
-    "IGK": "IgK: 120–160, 190–210, 260–300 bp (Vκ–Jκ)",
-    "KDE": "Kde: 210–250, 270–300, 350–390 bp (Kde–involveringer)",
-
-    "DHJH_D": "DHJH mix D: 110–290 og 390–420 bp (DH–JH)",
-    "DHJH_E": "DHJH mix E: 100–130 bp (DH7–JH)",
-
-    "TCRgA": "TCRγ mix A (Vγ1–8/10): 145–255 bp",
-    "TCRgB": "TCRγ mix B (Vγ9/11): 80–220 bp",
-
-    "TCRbA": "TCRβ mix A: 240–285 bp (Vβ–Jβ1/2)",
-    "TCRbB": "TCRβ mix B: 240–285 bp (Vβ–Jβ2)",
-    "TCRbC": "TCRβ mix C: 170–210 og 285–325 bp (Dβ–Jβ)",
 }
+
 
 # --------------------------------------------------
 # Non-specific peaks (bp) per assay

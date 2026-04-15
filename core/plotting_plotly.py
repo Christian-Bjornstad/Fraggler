@@ -347,7 +347,10 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
 
     for ch in channels_to_plot:
         full_trace = np.asarray(fsa.fsa[ch])
-        baseline = estimate_running_baseline(full_trace, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
+        if assay_name == "SL":
+            baseline = estimate_running_baseline(full_trace, bin_size=5000, quantile=0.01, use_arpls=False)
+        else:
+            baseline = estimate_running_baseline(full_trace, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
         full_corr = np.maximum(full_trace - baseline, 0.0)
         y_corr = full_corr[time_all[mask]]
         
@@ -563,7 +566,7 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
   var gd = document.getElementById(divId);
   if (!gd) return;
 
-  var areaWindowBp = 5.0;
+  var areaWindowBp = (assayName === "SL") ? 20.0 : 5.0;
   var peaksTraceIndex = {final_peaks_trace_index};
   var primaryTraceIndex = {primary_trace_index};
   var assayName = {json.dumps(data["assay_name"])};
@@ -648,19 +651,75 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
       return areaWindowBp;
     }}
 
-    function computePeakArea(xCenter, traceIndex) {{
-      var traceData = traceXYCache[Number.isFinite(traceIndex) ? traceIndex : primaryTraceIndex] || traceXYCache[primaryTraceIndex] || {{}};
-      var traceX = Array.isArray(traceData.x) ? traceData.x : [];
-      var traceY = Array.isArray(traceData.y) ? traceData.y : [];
-      var halfWidth = peakHalfWidthBp(xCenter);
+    function solve3x3(mat, vec) {{
+      var det = mat[0][0]*(mat[1][1]*mat[2][2] - mat[1][2]*mat[2][1]) -
+                mat[0][1]*(mat[1][0]*mat[2][2] - mat[1][2]*mat[2][0]) +
+                mat[0][2]*(mat[1][0]*mat[2][1] - mat[1][1]*mat[2][0]);
+      if (Math.abs(det) < 1e-12) return null;
+
+      function getDet(m, colIdx, v) {{
+        var nm = m.map(function(row) {{ return row.slice(); }});
+        for (var i = 0; i < 3; i++) nm[i][colIdx] = v[i];
+        return nm[0][0]*(nm[1][1]*nm[2][2] - nm[1][2]*nm[2][1]) -
+               nm[0][1]*(nm[1][0]*nm[2][2] - nm[1][2]*nm[2][0]) +
+               nm[0][2]*(nm[1][0]*nm[2][1] - nm[1][1]*nm[2][0]);
+      }}
+      return [getDet(mat,0,vec)/det, getDet(mat,1,vec)/det, getDet(mat,2,vec)/det];
+    }}
+
+    function computeGaussianArea(xCenter, traceIndex) {{
+      var traceData = traceXYCache[Number.isFinite(traceIndex) ? traceIndex : primaryTraceIndex] || traceXYCache[primaryTraceIndex] || {{ x: [], y: [] }};
+      var tx = decodePlotlyArray(traceData.x);
+      var ty = decodePlotlyArray(traceData.y);
+      var hw = peakHalfWidthBp(xCenter);
+      
+      var points = [];
+      for (var i = 0; i < tx.length; i++) {{
+        var dx = Math.abs(tx[i] - xCenter);
+        if (dx <= hw && ty[i] > 0.01) {{
+          points.push({{ x: tx[i], lny: Math.log(ty[i]) }});
+        }}
+      }}
+      if (points.length < 3) return computeSumArea(xCenter, traceIndex);
+
+      var sx4=0, sx3=0, sx2=0, sx1=0, n=points.length, sxy2=0, sxy1=0, sy=0;
+      for (var i=0; i<n; i++) {{
+        var xi = i; 
+        var yi = points[i].lny;
+        var xi2 = xi*xi;
+        sx4 += xi2*xi2; sx3 += xi2*xi; sx2 += xi2; sx1 += xi;
+        sxy2 += xi2*yi; sxy1 += xi*yi; sy += yi;
+      }}
+      var mat = [[sx4, sx3, sx2], [sx3, sx2, sx1], [sx2, sx1, n]];
+      var vec = [sxy2, sxy1, sy];
+      var sol = solve3x3(mat, vec);
+      if (!sol || sol[0] >= 0) return computeSumArea(xCenter, traceIndex);
+
+      var a = sol[0], b = sol[1], c = sol[2];
+      var sigma2 = -1.0 / (2.0 * a);
+      var mu = b * sigma2;
+      var amp = Math.exp(c + (mu*mu)/(2.0*sigma2));
+      var sigma = Math.sqrt(sigma2);
+      var area = amp * sigma * Math.sqrt(2.0 * Math.PI);
+      
+      if (mu < -1 || mu > (n + 1) || !Number.isFinite(area)) return computeSumArea(xCenter, traceIndex);
+      return area;
+    }}
+
+    function computeSumArea(xCenter, traceIndex) {{
+      var traceData = traceXYCache[Number.isFinite(traceIndex) ? traceIndex : primaryTraceIndex] || traceXYCache[primaryTraceIndex] || {{ x: [], y: [] }};
+      var traceX = decodePlotlyArray(traceData.x);
+      var traceY = decodePlotlyArray(traceData.y);
+      var hw = peakHalfWidthBp(xCenter);
       var total = 0.0;
       for (var i = 0; i < traceX.length; i++) {{
-        var x = Number(traceX[i]);
-        var y = Number(traceY[i]);
-        if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-        if (Math.abs(x - xCenter) <= halfWidth) total += y;
+        if (Math.abs(traceX[i] - xCenter) <= hw) total += traceY[i];
       }}
       return total;
+    }}
+
+    function computePeakArea(xCenter, traceIndex) {{
+      return computeGaussianArea(xCenter, traceIndex);
     }}
 
     function channelLabel(channel) {{
@@ -1667,7 +1726,7 @@ def build_interactive_assay_batch_plot_html(
     }}
   }}
 
-  Plotly.newPlot(gd, fig.data, fig.layout).then(function(g) {{
+  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
     if (window.ReportPlotManager) {{ window.ReportPlotManager.register(g); }}
     var primaryTrace = g.data[0] || {{}};
 

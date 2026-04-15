@@ -11,6 +11,7 @@ import numpy as np
 
 from core.qc.qc_rules import QCRules, normalize_assay_qc
 from core.analysis import estimate_running_baseline
+from core.area import compute_peak_area_gaussian
 from core.utils import strip_stage_prefix, CONTROL_PREFIX_RE
 
 
@@ -447,7 +448,15 @@ def _direct_peak_candidate_near_bp(
     j = int(np.nanargmax(y))
     found_bp = float(bpw[j])
     height = float(y[j])
-    area = float(np.nansum(y))
+    
+    # Use Gaussian area instead of nansum
+    area = compute_peak_area_gaussian(
+        trace,
+        t,
+        bp,
+        found_bp,
+        window_bp
+    )
 
     return {
         "ok": True,
@@ -516,7 +525,7 @@ def find_local_peak_candidates_near_bp(
                 "ok": True,
                 "found_bp": float(bpw[idx]),
                 "height": float(y[idx]),
-                "area": area,
+                "area": compute_peak_area_gaussian(trace, t, bp, float(bpw[idx]), window_bp),
                 "search_window_bp": float(window_bp),
                 "search_mode": "primary",
             }
@@ -531,7 +540,7 @@ def find_local_peak_candidates_near_bp(
             "ok": True,
             "found_bp": float(bpw[j]),
             "height": float(y[j]),
-            "area": area,
+            "area": compute_peak_area_gaussian(trace, t, bp, float(bpw[j]), window_bp),
             "search_window_bp": float(window_bp),
             "search_mode": "primary",
         }

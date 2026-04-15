@@ -57,6 +57,94 @@ def _assay_reference_ranges() -> dict:
 def _assay_reference_label() -> dict:
     return merged_analysis_attr("ASSAY_REFERENCE_LABEL")
 
+
+def _assay_rearrangement_info() -> dict:
+    return merged_analysis_attr("ASSAY_REARRANGEMENT_INFO")
+
+
+def _channel_text_colors() -> dict:
+    return merged_analysis_attr("CHANNEL_TEXT_COLORS") or {
+        "DATA1": "#2563eb",
+        "DATA2": "#16a34a",
+        "DATA3": "#1e293b",
+    }
+
+
+def _render_rearrangement_info_html(assay_name: str) -> str:
+    """Build a compact, color-coded rearrangement info block for a clonality assay."""
+    info = _assay_rearrangement_info().get(assay_name)
+    if not info:
+        # Fall back to simple label if available
+        label = _assay_reference_label().get(assay_name)
+        if label:
+            ref_ranges = _assay_reference_ranges().get(assay_name)
+            ranges_str = ", ".join(f"{int(a)}–{int(b)} bp" for (a, b) in ref_ranges) if ref_ranges else ""
+            return (
+                f"<p class='small'><strong>Referanseområde:</strong> {escape(ranges_str)}"
+                f"<br>{escape(label)}</p>"
+            )
+        return ""
+
+    colors = _channel_text_colors()
+    title = info.get("title", assay_name)
+    rows = info.get("rows", [])
+    prefix_parts = info.get("prefix_parts")  # e.g. IGK: [("Jk1-4", "DATA2"), ("Jk5", "DATA1")]
+
+    lines: list[str] = []
+    lines.append(
+        "<div class='rearrangement-info' style='"
+        "background:#f8fafc; border:1px solid #e2e8f0; border-radius:8px; "
+        "padding:8px 14px; margin-bottom:6px; font-size:0.82rem; line-height:1.5;"
+        "'>"
+    )
+    lines.append(f"<strong style='color:#334155;'>{escape(title)}</strong>")
+
+    should_render_rows = bool(rows)
+
+    if rows and should_render_rows:
+        lines.append("<div style='margin-top:4px;'>")
+        for row in rows:
+            name = row.get("name", "")
+            bp_range = row.get("range", "")
+            channel = row.get("channel")
+            channels = row.get("channels")  # for dual-channel (TCRb)
+
+            if prefix_parts:
+                # IGK-style: "Jk1-4/Jk5: Vk1f/6: 120–140"
+                prefix_html = "/".join(
+                    f"<span style='color:{colors.get(ch, '#334155')}; font-weight:600;'>{escape(part)}</span>"
+                    for part, ch in prefix_parts
+                )
+                lines.append(
+                    f"<div>{prefix_html}: "
+                    f"<span style='color:#334155;'>{escape(name)}: {escape(bp_range)}</span></div>"
+                )
+            elif channels:
+                # Dual-channel (TCRb): show colored dots
+                dots = " ".join(
+                    f"<span style='color:{colors.get(ch, '#334155')};'>●</span>"
+                    for ch in channels
+                )
+                lines.append(
+                    f"<div>{dots} "
+                    f"<span style='color:#334155; font-weight:500;'>{escape(name)}: {escape(bp_range)}</span></div>"
+                )
+            elif channel:
+                # Single-channel: color the whole row
+                color = colors.get(channel, "#334155")
+                lines.append(
+                    f"<div style='color:{color}; font-weight:500;'>"
+                    f"{escape(name)}: {escape(bp_range)}</div>"
+                )
+            else:
+                lines.append(
+                    f"<div style='color:#334155;'>{escape(name)}: {escape(bp_range)}</div>"
+                )
+        lines.append("</div>")
+
+    lines.append("</div>")
+    return "\n".join(lines)
+
 REPORT_STYLE = """
 <style>
 /* ── Base Typography ── */
@@ -343,6 +431,7 @@ def _build_plotly_reflow_script() -> str:
 window.ReportPlotManager = (function() {
     var plots = {};
     var initialStates = {};
+    var refreshTimer = null;
 
     function loadInitialStates() {
         if (Object.keys(initialStates).length) return;
@@ -368,9 +457,11 @@ window.ReportPlotManager = (function() {
         if (!gd || !window.Plotly) return;
         if (typeof gd.isConnected === 'boolean' && !gd.isConnected) return;
         var width = gd.clientWidth || (gd.parentElement && gd.parentElement.clientWidth) || 0;
-        if (width <= 0) return;
+        var height = gd.clientHeight || (gd.parentElement && gd.parentElement.clientHeight) || 0;
+        if (width <= 0 || height <= 0) return false;
         try { Plotly.Plots.resize(gd); } catch (e) {}
         try { Plotly.relayout(gd, {autosize: true}); } catch (e) {}
+        return true;
     }
 
     function refreshAll() {
@@ -391,12 +482,32 @@ window.ReportPlotManager = (function() {
     }
 
     function scheduleRefresh() {
+        if (refreshTimer) {
+            clearTimeout(refreshTimer);
+            refreshTimer = null;
+        }
         var delays = [0, 80, 250, 750];
         for (var i = 0; i < delays.length; i++) {
             setTimeout(refreshAll, delays[i]);
         }
         if (window.requestAnimationFrame) {
             window.requestAnimationFrame(function() { refreshAll(); });
+        }
+        refreshTimer = setTimeout(function() {
+            refreshAll();
+            refreshTimer = null;
+        }, 1600);
+    }
+
+    function stabilizePlot(gd) {
+        var delays = [0, 40, 120, 300, 700, 1400, 2600];
+        for (var i = 0; i < delays.length; i++) {
+            (function(delay) {
+                setTimeout(function() {
+                    if (!gd || !plots[gd.id]) return;
+                    resizeOne(gd);
+                }, delay);
+            })(delays[i]);
         }
     }
 
@@ -427,6 +538,17 @@ window.ReportPlotManager = (function() {
                 gd.__fragglerIntersectionObserver = io;
             } catch (e) {}
         }
+
+        if (typeof MutationObserver === 'function' && gd.parentElement) {
+            try {
+                var mo = new MutationObserver(function() { scheduleRefresh(); });
+                mo.observe(gd.parentElement, {
+                    attributes: true,
+                    attributeFilter: ['style', 'class'],
+                });
+                gd.__fragglerMutationObserver = mo;
+            } catch (e) {}
+        }
     }
 
     window.addEventListener('load', scheduleRefresh);
@@ -436,6 +558,9 @@ window.ReportPlotManager = (function() {
     document.addEventListener('visibilitychange', function() {
         if (document.visibilityState === 'visible') scheduleRefresh();
     });
+    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+        document.fonts.ready.then(scheduleRefresh).catch(function() {});
+    }
 
     loadInitialStates();
 
@@ -445,6 +570,7 @@ window.ReportPlotManager = (function() {
             plots[gd.id] = gd;
             attachObservers(gd);
             scheduleRefresh();
+            stabilizePlot(gd);
         },
         getInitialStateForPlot: function(id) {
             loadInitialStates();
@@ -1054,11 +1180,11 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
 
     html_lines.append("<div class='assay-block'>")
     html_lines.append(f"<h3>{escape(display_name)}</h3>")
-    ref_ranges = _assay_reference_ranges().get(reference_assay)
-    if ref_ranges:
-        ranges_str = ", ".join(f"{int(a)}–{int(b)} bp" for (a, b) in ref_ranges)
-        label_txt = _assay_reference_label().get(reference_assay, ranges_str)
-        html_lines.append(f"<p class='small'><strong>Referanseområde:</strong> {escape(ranges_str)}<br>{escape(label_txt)}</p>")
+
+    # Rearrangement info once per assay block keeps replicate sections compact.
+    rearrangement_html = _render_rearrangement_info_html(reference_assay)
+    if rearrangement_html:
+        html_lines.append(rearrangement_html)
 
     sort_key = _flt3_display_sort_key if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"} else (lambda x: x["fsa"].file_name)
     for e in sorted(assay_entries, key=sort_key):
@@ -1115,6 +1241,9 @@ def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: 
         
         html_lines.append("<div class='combo-item'>")
         html_lines.append(f"<p class='sample-header'>{escape(e_combo['assay'])} – {escape(fsa.file_name)}</p>")
+        rearrangement_html = _render_rearrangement_info_html(e_combo['assay'])
+        if rearrangement_html:
+            html_lines.append(rearrangement_html)
         try:
             frag = build_interactive_peak_plot_for_entry(e_combo)
             html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
@@ -1143,6 +1272,9 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
         
         html_lines.append("<div class='combo-item'>")
         html_lines.append(f"<p class='sample-header'>{escape(e_combo['assay'])} – {escape(fsa.file_name)}</p>")
+        rearrangement_html = _render_rearrangement_info_html(e_combo['assay'])
+        if rearrangement_html:
+            html_lines.append(rearrangement_html)
         try:
             frag = build_interactive_peak_plot_for_entry(e_combo)
             html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
