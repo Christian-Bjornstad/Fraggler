@@ -526,7 +526,7 @@ def run_batch_jobs(
                         needle=assay_filter,
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
-                        tracking_excel_path=tracking_excel_path if active_analysis == "clonality" else None,
+                        tracking_excel_path=tracking_excel_path,
                         progress_callback=_job_progress,
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
@@ -613,7 +613,8 @@ def run_batch_jobs(
                         out_folder_name=resolved_out_folder,
                         scope=pipeline_scope,
                         needle=assay_filter,
-                        files=job_files
+                        files=job_files,
+                        tracking_excel_path=tracking_excel_path,
                     )
             
             elif job_type == "qc":
@@ -694,7 +695,7 @@ def run_batch_jobs(
                         needle=assay_filter,
                         files=job_files,
                         chunk_files=(active_analysis != "flt3"),
-                        tracking_excel_path=tracking_excel_path if active_analysis == "clonality" else None,
+                        tracking_excel_path=tracking_excel_path,
                         progress_callback=_job_progress,
                     )
                     if stream_aggregated_dit and agg_outdir is not None:

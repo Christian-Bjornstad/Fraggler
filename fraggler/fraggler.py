@@ -1,3 +1,5 @@
+"""Local Fraggler runtime derived and heavily modified from upstream `willros/fraggler` (MIT)."""
+
 import sys
 import os
 import tempfile

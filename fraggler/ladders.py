@@ -1,3 +1,5 @@
+"""Ladder definitions derived in part from upstream `willros/fraggler` (MIT)."""
+
 import numpy as np
 
 LADDERS = {

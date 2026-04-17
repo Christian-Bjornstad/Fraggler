@@ -38,6 +38,8 @@ def _specimen_id_from_name(name: str) -> str:
     upper = name.upper()
     if "IVS-0000" in upper:
         return "IVS-0000"
+    if "IVS-P0001" in upper:
+        return "IVS-P001"
     if "IVS-P001" in upper:
         return "IVS-P001"
     if "NTC" in upper:
@@ -145,7 +147,7 @@ def classify_fsa(fsa_path: Path) -> dict | None:
         group = "negative_control"
     elif "ivs-0000" in lower:
         group = "reactive_control"
-    elif "ivs-p001" in lower:
+    elif "ivs-p001" in lower or "ivs-p0001" in lower:
         group = "positive_control"
         
     analysis_type = "standard"

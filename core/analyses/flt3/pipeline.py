@@ -39,6 +39,17 @@ from core.analyses.flt3.config import (
     PREFERRED_INJECTION_TIME,
     ROX_LADDER as FLT3_ROX_LADDER,
 )
+from core.analyses.flt3.qc_tracker import (
+    CONTROL_RUN_SHEET_COLUMNS,
+    FLT3_NPM1_QC_TRACKER_FILENAME,
+    PATIENT_RUN_SHEET_COLUMNS,
+    PEAK_SHEET_COLUMNS,
+    build_tracking_base_row,
+    control_code_for_entry,
+    is_tracking_control_entry,
+    marker_specs_for_entry,
+    update_flt3_npm1_qc_tracker,
+)
 from core.analyses.shared_pipeline import finalize_pipeline_run, normalize_pipeline_paths, scan_fsa_files
 from core.html_reports import extract_dit_from_name
 from core.area import compute_peak_area_gaussian
@@ -4102,6 +4113,227 @@ def _build_flt3_qc_trend_frames(entries: list[dict]) -> tuple[pd.DataFrame, pd.D
     return pd.DataFrame(run_rows), pd.DataFrame(peak_rows)
 
 
+def _infer_flt3_instrument(entry: dict) -> str:
+    run_name = str(entry.get("run_name") or "").lower()
+    injection_protocol = str(entry.get("injection_protocol") or "").lower()
+    source_run_dir = str(entry.get("source_run_dir") or "").lower()
+    haystack = " ".join([run_name, injection_protocol, source_run_dir])
+    if "3730" in haystack:
+        return "3730"
+    if "3130" in haystack:
+        return "3130"
+    return ""
+
+
+def _tracker_peak_row(entry: dict, peak_label: str) -> pd.Series | None:
+    peaks = entry.get("peaks_by_channel", {}).get(entry.get("primary_peak_channel"), pd.DataFrame())
+    if peaks is None or peaks.empty:
+        return None
+    labels = [str(peak_label or "").upper()]
+    if str(peak_label or "").upper() == "MUT":
+        labels = ["MUT", "ITD"]
+    rows = peaks[peaks["label"].isin(labels)].sort_values("area", ascending=False)
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def _tracker_control_marker_row(entry: dict, marker_spec: dict, peak_summary: dict, base_row: dict) -> dict:
+    peak_label = str(marker_spec.get("peak_label") or "WT").upper()
+    observed_bp = np.nan
+    height = np.nan
+    area = np.nan
+
+    if peak_label == "WT":
+        observed_bp = float(peak_summary.get("wt_bp", np.nan))
+        area = float(peak_summary.get("wt_area", np.nan))
+    elif peak_label == "MUT":
+        observed_bp = float(peak_summary.get("mut_main_bp", np.nan))
+        area = float(peak_summary.get("mut_main_area", np.nan))
+
+    peak_row = _tracker_peak_row(entry, peak_label)
+    if peak_row is not None:
+        if observed_bp != observed_bp:
+            observed_bp = float(peak_row.get("basepairs", np.nan))
+        peak_height = float(peak_row.get("peaks", np.nan))
+        peak_area = float(peak_row.get("area", np.nan))
+        if not np.isfinite(height) or height <= 0:
+            height = peak_height
+        if not np.isfinite(area) or area <= 0:
+            area = peak_area
+
+    expected_bp = float(marker_spec["expected_bp"])
+    delta_bp = observed_bp - expected_bp if observed_bp == observed_bp else np.nan
+    status = "MISSING"
+    reason = "Expected control peak not found"
+    if observed_bp == observed_bp:
+        status = "FOUND" if abs(delta_bp) <= float(marker_spec["delta_threshold_bp"]) else "SHIFTED"
+        reason = "" if status == "FOUND" else f"Delta {delta_bp:.2f} bp exceeds {float(marker_spec['delta_threshold_bp']):.2f} bp"
+
+    return {
+        "IdentityKey": base_row["IdentityKey"],
+        "File": base_row["File"],
+        "SourceRunDir": base_row["SourceRunDir"],
+        "DIT": base_row["DIT"],
+        "Assay": base_row["Assay"],
+        "Control": base_row["Control"],
+        "RunDate": base_row["RunDate"],
+        "RunCode": base_row["RunCode"],
+        "Well": base_row["Well"],
+        "Batch": base_row["Batch"],
+        "MarkerName": marker_spec["name"],
+        "Kind": "sample",
+        "Channel": entry.get("primary_peak_channel") if marker_spec.get("channel") == "primary" else marker_spec.get("channel", ""),
+        "ExpectedBP": round(expected_bp, 2),
+        "WindowBP": float(marker_spec["window_bp"]),
+        "SearchMode": "selected_peak",
+        "SearchWindowBP": float(marker_spec["window_bp"]),
+        "FoundBP": round(float(observed_bp), 2) if observed_bp == observed_bp else "",
+        "DeltaBP": round(float(delta_bp), 2) if delta_bp == delta_bp else "",
+        "Height": round(float(height), 2) if height == height else "",
+        "Area": round(float(area), 2) if area == area else "",
+        "OK": bool(status == "FOUND"),
+        "Reason": reason,
+        "AbsDeltaBP": round(abs(float(delta_bp)), 2) if delta_bp == delta_bp else "",
+    }
+
+
+def _tracker_run_row(entry: dict, base_row: dict, peak_summary: dict, interpretation: str) -> dict:
+    row = dict(base_row)
+    wt_bp = peak_summary.get("wt_bp", np.nan)
+    wt_area = peak_summary.get("wt_area", np.nan)
+    mut_bp = peak_summary.get("mut_main_bp", np.nan)
+    mut_area = peak_summary.get("mut_main_area", np.nan)
+    ratio = float(entry.get("ratio", np.nan))
+    row.update(
+        {
+            "PeakQC": str(entry.get("peak_qc_status") or ""),
+            "RatioMode": str(peak_summary.get("ratio_mode") or ""),
+            "WT_BP": round(float(wt_bp), 2) if np.isfinite(wt_bp) else "",
+            "WT_Area": round(float(wt_area), 2) if np.isfinite(wt_area) and float(wt_area) > 0 else "",
+            "MutantMain_BP": round(float(mut_bp), 2) if np.isfinite(mut_bp) else "",
+            "MutantMain_Area": round(float(mut_area), 2) if np.isfinite(mut_area) and float(mut_area) > 0 else "",
+            "Ratio": round(ratio, 4) if np.isfinite(ratio) else "",
+            "Interpretation": interpretation,
+        }
+    )
+    return row
+
+
+def _tracker_ladder_marker_row(entry: dict, marker_spec: dict, base_row: dict) -> dict:
+    fsa = entry.get("fsa")
+    expected_bp = float(marker_spec["expected_bp"])
+    ladder_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+    peak_times = np.asarray(getattr(fsa, "best_size_standard", []), dtype=float)
+    observed_bp = np.nan
+    datapoint = np.nan
+    height = np.nan
+    area = np.nan
+
+    if ladder_steps.size and peak_times.size and ladder_steps.size == peak_times.size:
+        matches = np.where(np.isclose(ladder_steps, expected_bp, atol=1e-6))[0]
+        if matches.size:
+            match_index = int(matches[0])
+            datapoint = float(peak_times[match_index])
+            sample_data = getattr(fsa, "sample_data_with_basepairs", None)
+            if sample_data is not None and not sample_data.empty and {"time", "basepairs"}.issubset(sample_data.columns):
+                closest_index = int((sample_data["time"].astype(float) - datapoint).abs().idxmin())
+                observed_bp = float(sample_data.loc[closest_index, "basepairs"])
+            else:
+                observed_bp = expected_bp
+
+            size_standard = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+            peak_idx = int(round(datapoint))
+            if 0 <= peak_idx < size_standard.size:
+                height = float(size_standard[peak_idx])
+                lo = max(0, peak_idx - 3)
+                hi = min(size_standard.size, peak_idx + 4)
+                area = float(np.nansum(size_standard[lo:hi]))
+
+    delta_bp = observed_bp - expected_bp if observed_bp == observed_bp else np.nan
+    status = "MISSING"
+    reason = "Expected ladder anchor not found"
+    if observed_bp == observed_bp:
+        status = "FOUND" if abs(delta_bp) <= float(marker_spec["delta_threshold_bp"]) else "SHIFTED"
+        reason = "" if status == "FOUND" else f"Delta {delta_bp:.2f} bp exceeds {float(marker_spec['delta_threshold_bp']):.2f} bp"
+
+    return {
+        "IdentityKey": base_row["IdentityKey"],
+        "File": base_row["File"],
+        "SourceRunDir": base_row["SourceRunDir"],
+        "DIT": base_row["DIT"],
+        "Assay": base_row["Assay"],
+        "Control": base_row["Control"],
+        "RunDate": base_row["RunDate"],
+        "RunCode": base_row["RunCode"],
+        "Well": base_row["Well"],
+        "Batch": base_row["Batch"],
+        "MarkerName": marker_spec["name"],
+        "Kind": "ladder",
+        "Channel": marker_spec.get("channel", ""),
+        "ExpectedBP": round(expected_bp, 2),
+        "WindowBP": float(marker_spec["window_bp"]),
+        "SearchMode": "mapped_ladder",
+        "SearchWindowBP": float(marker_spec["window_bp"]),
+        "FoundBP": round(float(observed_bp), 2) if observed_bp == observed_bp else "",
+        "DeltaBP": round(float(delta_bp), 2) if delta_bp == delta_bp else "",
+        "Height": round(float(height), 2) if height == height else "",
+        "Area": round(float(area), 2) if area == area else "",
+        "OK": bool(status == "FOUND"),
+        "Reason": reason,
+        "AbsDeltaBP": round(abs(float(delta_bp)), 2) if delta_bp == delta_bp else "",
+    }
+
+
+def _build_flt3_npm1_tracker_frames(entries: list[dict]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    patient_rows: list[dict] = []
+    control_rows: list[dict] = []
+    peak_rows: list[dict] = []
+
+    for entry in entries:
+        base_row = build_tracking_base_row(entry)
+        if not base_row:
+            continue
+        peak_summary = _summarize_detected_peaks(entry)
+        interpretation = _interpret_entry(entry)
+        run_row = _tracker_run_row(entry, base_row, peak_summary, interpretation)
+
+        if is_tracking_control_entry(entry):
+            control_rows.append({key: run_row.get(key, "") for key in CONTROL_RUN_SHEET_COLUMNS})
+        else:
+            patient_rows.append({key: run_row.get(key, "") for key in PATIENT_RUN_SHEET_COLUMNS})
+            continue
+
+        control_code = control_code_for_entry(entry)
+        if control_code not in {"RK", "PK"}:
+            continue
+
+        for marker_spec in marker_specs_for_entry(entry):
+            if marker_spec.get("kind") == "sample":
+                peak_rows.append(_tracker_control_marker_row(entry, marker_spec, peak_summary, base_row))
+            else:
+                peak_rows.append(_tracker_ladder_marker_row(entry, marker_spec, base_row))
+
+    return (
+        pd.DataFrame(patient_rows, columns=PATIENT_RUN_SHEET_COLUMNS),
+        pd.DataFrame(control_rows, columns=CONTROL_RUN_SHEET_COLUMNS),
+        pd.DataFrame(peak_rows, columns=PEAK_SHEET_COLUMNS),
+    )
+
+
+def update_flt3_npm1_qc_tracker_workbook(
+    excel_path: Path,
+    entries: list[dict],
+) -> None:
+    patient_df, control_df, peaks_df = _build_flt3_npm1_tracker_frames(entries)
+    update_flt3_npm1_qc_tracker(
+        excel_path,
+        patient_df,
+        control_df,
+        peaks_df,
+    )
+
+
 def update_flt3_qc_trends(excel_path: Path, entries: list[dict]) -> None:
     excel_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -4273,8 +4505,13 @@ def run_pipeline(
         assay_dir,
         FLT3_QC_TRENDS_FILENAME,
     )
+    resolved_tracker_excel_path = resolved_tracking_excel_path.parent / FLT3_NPM1_QC_TRACKER_FILENAME
     if update_tracking_workbook:
         update_flt3_qc_trends(resolved_tracking_excel_path, entries)
+        update_flt3_npm1_qc_tracker_workbook(
+            resolved_tracker_excel_path,
+            entries,
+        )
 
     return finalize_pipeline_run(
         entries,

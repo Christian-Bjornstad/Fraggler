@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import shutil
 import sys
+from collections import defaultdict
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +17,9 @@ from openpyxl import load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
+from config import APP_SETTINGS
+from core.analyses.flt3.qc_tracker import FLT3_NPM1_QC_TRACKER_FILENAME
+from core.runner import run_pipeline_job_collect
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -348,6 +353,72 @@ def build_excel_workbook(run_dir: Path, residual_summary: dict[str, Any], valida
     return workbook_path
 
 
+def _archive_metric_paths(metrics_csv: Path) -> list[Path]:
+    if not metrics_csv.exists():
+        return []
+
+    discovered: list[Path] = []
+    seen: set[Path] = set()
+    with metrics_csv.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            raw_path = str(row.get("path") or "").strip()
+            if not raw_path:
+                continue
+            candidate = Path(raw_path).expanduser()
+            if not candidate.exists() or candidate in seen:
+                continue
+            seen.add(candidate)
+            discovered.append(candidate)
+    return discovered
+
+
+def build_tracking_workbook(run_dir: Path, *, status_callback=None) -> Path | None:
+    metrics_csv = run_dir / "flt3_ladder_metrics.csv"
+    tracker_path = run_dir / FLT3_NPM1_QC_TRACKER_FILENAME
+    selected_files = _archive_metric_paths(metrics_csv)
+    if not selected_files:
+        return None
+
+    grouped_files: dict[Path, list[Path]] = defaultdict(list)
+    for path in selected_files:
+        grouped_files[path.parent].append(path)
+
+    tracker_tmp_root = run_dir / "_tracker_build_tmp"
+    if tracker_path.exists():
+        tracker_path.unlink()
+    if tracker_tmp_root.exists():
+        shutil.rmtree(tracker_tmp_root, ignore_errors=True)
+    tracker_tmp_root.mkdir(parents=True, exist_ok=True)
+
+    active_analysis_backup = APP_SETTINGS.get("active_analysis", "")
+    APP_SETTINGS["active_analysis"] = "flt3"
+    try:
+        folder_total = len(grouped_files)
+        for idx, folder in enumerate(sorted(grouped_files), start=1):
+            if status_callback is not None:
+                message = f"Building FLT3 tracker workbook ({idx}/{folder_total} folders)"
+                try:
+                    status_callback.emit(message)
+                except AttributeError:
+                    status_callback(message)
+            run_pipeline_job_collect(
+                fsa_dir=folder,
+                base_outdir=tracker_tmp_root,
+                out_folder_name="TRACKER_BUILD",
+                scope="all",
+                needle="",
+                files=sorted(grouped_files[folder]),
+                chunk_files=False,
+                tracking_excel_path=tracker_path,
+                update_tracking_workbook=True,
+            )
+    finally:
+        APP_SETTINGS["active_analysis"] = active_analysis_backup
+        shutil.rmtree(tracker_tmp_root, ignore_errors=True)
+
+    return tracker_path if tracker_path.exists() else None
+
+
 def build_residual_bundle(run_dir: Path) -> dict[str, Any]:
     metrics_csv = run_dir / "flt3_ladder_metrics.csv"
     rows = _load_metrics_rows(metrics_csv)
@@ -446,13 +517,16 @@ def run_backfill_validation(
     )
 
     residual_summary = build_residual_bundle(run_dir)
-    workbook_path = build_excel_workbook(run_dir, residual_summary, summary)
+    residual_workbook_path = build_excel_workbook(run_dir, residual_summary, summary)
+    tracking_workbook_path = build_tracking_workbook(run_dir, status_callback=status_callback)
     payload = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "run_dir": str(run_dir),
         "summary_json": str(run_dir / "summary.json"),
         "residual_summary_json": str(run_dir / "residual_summary.json"),
-        "workbook_path": str(workbook_path),
+        "workbook_path": str(tracking_workbook_path or residual_workbook_path),
+        "tracking_workbook_path": str(tracking_workbook_path) if tracking_workbook_path else "",
+        "residual_workbook_path": str(residual_workbook_path),
         "validator_summary": summary,
         "residual_summary": residual_summary,
     }

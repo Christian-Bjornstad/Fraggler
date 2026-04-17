@@ -35,6 +35,7 @@ TRACKING_IDENTITY_SALT_ENV = "FRAGGLER_TRACKING_IDENTITY_SALT"
 TRACKING_IDENTITY_SALT_PATH_ENV = "FRAGGLER_TRACKING_IDENTITY_SALT_PATH"
 DEFAULT_TRACKING_IDENTITY_SALT_PATH = Path.home() / ".config" / "fraggler" / "tracking_identity_salt.txt"
 PATIENT_RUN_SHEET_COLUMNS = [
+    "Month",
     "IdentityKey",
     "SourceRunDir",
     "Assay",
@@ -48,8 +49,13 @@ PATIENT_RUN_SHEET_COLUMNS = [
     "LadderExpectedStepCount",
     "LadderFittedStepCount",
     "LadderR2",
+    "Spacer1",
+    "Spacer2",
+    "Spacer3",
+    "Spacer4",
 ]
 CONTROL_RUN_SHEET_COLUMNS = [
+    "Month",
     "IdentityKey",
     "File",
     "SourceRunDir",
@@ -69,6 +75,7 @@ CONTROL_RUN_SHEET_COLUMNS = [
     "LadderR2",
 ]
 PEAK_SHEET_COLUMNS = [
+    "Month",
     "IdentityKey",
     "File",
     "SourceRunDir",
@@ -228,6 +235,7 @@ def update_clonality_tracking_workbook(
             all_patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
             all_control.to_excel(writer, sheet_name="Control_Runs", index=False)
             all_peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
+        _apply_reference_tracking_headers(excel_path)
         if refresh_dashboard:
             refresh_clonality_tracking_dashboard(excel_path)
         print_green(f"Clonality tracking workbook updated in {excel_path}")
@@ -350,6 +358,7 @@ def _build_run_row(entry: dict) -> dict:
         ladder_r2 = ""
 
     return {
+        "Month": _month_bucket(join_fields["run_date"]),
         "IdentityKey": join_fields["identity_key"],
         "File": join_fields["file_name"],
         "SourceRunDir": join_fields["source_run_dir"],
@@ -368,6 +377,10 @@ def _build_run_row(entry: dict) -> dict:
         "LadderExpectedStepCount": int(entry.get("ladder_expected_step_count", 0) or 0),
         "LadderFittedStepCount": int(entry.get("ladder_fitted_step_count", 0) or 0),
         "LadderR2": ladder_r2,
+        "Spacer1": "",
+        "Spacer2": "",
+        "Spacer3": "",
+        "Spacer4": "",
     }
 
 
@@ -397,6 +410,7 @@ def _build_pk_peak_rows(entry: dict, rules: QCRules, base_row: dict) -> list[dic
             )
 
         row = {
+            "Month": _month_bucket(base_row["RunDate"]),
             "IdentityKey": base_row["IdentityKey"],
             "File": base_row["File"],
             "SourceRunDir": base_row["SourceRunDir"],
@@ -484,6 +498,7 @@ def sanitize_clonality_tracking_workbook(excel_path: Path, *, refresh_dashboard:
             patient.to_excel(writer, sheet_name="Patient_Runs", index=False)
             control.to_excel(writer, sheet_name="Control_Runs", index=False)
             peaks.to_excel(writer, sheet_name="PK_Peaks", index=False)
+        _apply_reference_tracking_headers(excel_path)
 
         if refresh_dashboard:
             refresh_clonality_tracking_dashboard(excel_path)
@@ -568,3 +583,21 @@ def _legacy_file_name_from_identity_key(identity_key: str) -> str:
     if "::" in value:
         return value.split("::", 1)[1].strip()
     return value.strip()
+
+
+def _month_bucket(run_date: str) -> str:
+    value = str(run_date or "").strip()
+    if len(value) >= 7 and value[4:5] == "-" and value[7:8] == "-":
+        return value[:7].replace("-", "_")
+    return ""
+
+
+def _apply_reference_tracking_headers(excel_path: Path) -> None:
+    from openpyxl import load_workbook
+
+    wb = load_workbook(excel_path)
+    if "Patient_Runs" in wb.sheetnames:
+        ws = wb["Patient_Runs"]
+        for col in range(15, 19):
+            ws.cell(1, col).value = None
+    wb.save(excel_path)

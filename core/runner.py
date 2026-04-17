@@ -175,6 +175,7 @@ def run_pipeline_job(
     needle: str,
     files: Optional[List[Path]] = None,
     *,
+    tracking_excel_path: Path | None = None,
     update_tracking_workbook: bool = True,
 ) -> Optional[list]:
     """
@@ -204,6 +205,7 @@ def run_pipeline_job(
                 base_outdir=base_outdir,
                 assay_folder_name=out_folder_name,
                 mode=effective_mode,
+                tracking_excel_path=tracking_excel_path,
                 update_tracking_workbook=update_tracking_workbook,
             )
         finally:
@@ -232,6 +234,7 @@ def run_pipeline_job(
                 base_outdir=base_outdir,
                 assay_folder_name=out_folder_name,
                 mode=effective_mode,
+                tracking_excel_path=tracking_excel_path,
                 update_tracking_workbook=update_tracking_workbook,
             )
         finally:
@@ -252,6 +255,7 @@ def run_pipeline_job(
                 mode=effective_mode,
                 return_entries=True,
                 make_dit_reports=False,
+                tracking_excel_path=tracking_excel_path,
                 update_tracking_workbook=update_tracking_workbook,
             )
         finally:
@@ -275,6 +279,7 @@ def run_pipeline_job(
                 mode=effective_mode,
                 return_entries=True,
                 make_dit_reports=False,
+                tracking_excel_path=tracking_excel_path,
                 update_tracking_workbook=update_tracking_workbook,
             )
             collected_entries.extend(chunk_entries or [])

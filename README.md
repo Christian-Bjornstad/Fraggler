@@ -59,6 +59,15 @@ Spins up an isolated Debian-slim Python Docker container, compiling the PyInstal
 - **Data Engineering**: Pandas, Numpy, Scikit-Learn (peak parsing and sequence alignments)
 - **Visualization**: Plotly, Jinja2, HTML (interactive browser-facing diagnostics matrices)
 
+## Third-Party Licensing
+Fraggler Diagnostics includes and builds on MIT-licensed upstream components from
+[`willros/fraggler`](https://github.com/willros/fraggler).
+
+- Repository notice: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)
+- Upstream MIT license text: [LICENSES/fraggler_MIT.txt](LICENSES/fraggler_MIT.txt)
+
+The repository as a whole is not currently published under a single root open-source license.
+
 ## Troubleshooting
 **"IndexError: tuple index out of range" during Build**
 > During `PyInstaller` parsing, the build uses an internal monkey-patch embedded into `build_qt.py` to bypass a known Python 3.10.0 bytecode compilation `match` bug inside the overarching Plotly/Pandas dependencies. This acts as a silent failsafe that swallows the bug and permits the EXE to wrap correctly. 

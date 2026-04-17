@@ -3,6 +3,9 @@ Fraggler Diagnostics — Analysis Functions.
 
 Ladder fitting (LIZ / ROX), SL peak detection, ladder QC metrics,
 SL area metrics, local-maxima helpers, and running-baseline estimation.
+
+This module builds on the local `fraggler` runtime, which includes upstream-derived
+MIT-licensed components from `willros/fraggler`.
 """
 from __future__ import annotations
 

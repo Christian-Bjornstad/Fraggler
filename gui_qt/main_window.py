@@ -12,6 +12,7 @@ from gui_qt.tabs.tab_archive_runner import TabArchiveRunner
 from gui_qt.tabs.tab_flt3_validation import TabFlt3Validation
 from gui_qt.tabs.tab_ladder import TabLadder
 from gui_qt.tabs.tab_log import TabLog
+from gui_qt.tabs.tab_about import TabAbout
 from gui_qt.tabs.tab_settings import TabAnalysisSettings
 from config import APP_SETTINGS, get_analysis_settings, save_settings
 
@@ -142,8 +143,12 @@ class MainWindow(QMainWindow):
         for g in self.groups:
             sidebar_layout.addWidget(g)
             g.header.clicked.connect(lambda _, grp=g: self.on_group_clicked(grp))
-            
+
         sidebar_layout.addStretch()
+
+        self.btn_about = SidebarButton("About")
+        self.btn_about.clicked.connect(self.on_about_clicked)
+        sidebar_layout.addWidget(self.btn_about)
         
         # --- Stacked Widget (Content) ---
         self.stacked_widget = QStackedWidget()
@@ -154,6 +159,7 @@ class MainWindow(QMainWindow):
         self.tab_archive_runner = TabArchiveRunner()
         self.tab_flt3_validation = TabFlt3Validation()
         self.tab_log = TabLog()
+        self.tab_about = TabAbout()
         self.tab_settings_clonality = TabAnalysisSettings("clonality")
         self.tab_settings_flt3 = TabAnalysisSettings("flt3")
         self.tab_settings_general = TabAnalysisSettings("general")
@@ -173,6 +179,7 @@ class MainWindow(QMainWindow):
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_archive_runner))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_flt3_validation))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_log))
+        self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_about))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_clonality))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_flt3))
         self.stacked_widget.addWidget(self._wrap_scroll_page(self.tab_settings_general))
@@ -201,6 +208,17 @@ class MainWindow(QMainWindow):
         start_group.btn_run.setChecked(True)
         self.stacked_widget.setCurrentIndex(0)
 
+    def _clear_sidebar_selection(self) -> None:
+        self.btn_about.setChecked(False)
+        for group in self.groups:
+            for button in group.sub_buttons:
+                button.setChecked(False)
+
+    def on_about_clicked(self) -> None:
+        self._clear_sidebar_selection()
+        self.btn_about.setChecked(True)
+        self.stacked_widget.setCurrentIndex(5)
+
     def _wrap_scroll_page(self, page: QWidget) -> QScrollArea:
         scroll = QScrollArea()
         scroll.setObjectName("TabScrollArea")
@@ -224,6 +242,7 @@ class MainWindow(QMainWindow):
         return True
         
     def on_group_clicked(self, group):
+        self.btn_about.setChecked(False)
         # Update active analysis in core
         new_ana = group.internal_id
         changed = self._activate_analysis(new_ana)
@@ -256,21 +275,22 @@ class MainWindow(QMainWindow):
             self.tab_flt3_validation.set_analysis(analysis_id)
             
         if analysis_id == "clonality":
-            page_map = {0: 0, 1: 1, 2: 2, 3: 4, 4: 5}
+            page_map = {0: 0, 1: 1, 2: 2, 3: 4, 4: 6}
             page_idx = page_map.get(tab_idx, 0)
         elif analysis_id == "flt3":
-            page_map = {0: 0, 1: 1, 2: 3, 3: 4, 4: 6}
+            page_map = {0: 0, 1: 1, 2: 3, 3: 4, 4: 7}
             page_idx = page_map.get(tab_idx, 0)
         else:
             if tab_idx == 3:
                 page_map = {
-                    "general": 7,
+                    "general": 8,
                 }
-                page_idx = page_map.get(analysis_id, 7)
+                page_idx = page_map.get(analysis_id, 8)
             elif tab_idx == 2:
                 page_idx = 4
             else:
                 page_idx = tab_idx
+        self.btn_about.setChecked(False)
         self.stacked_widget.setCurrentIndex(page_idx)
 
     def _on_settings_saved(self, analysis_id):
