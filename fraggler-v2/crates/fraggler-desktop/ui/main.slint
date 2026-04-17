@@ -1,0 +1,79 @@
+import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+
+export component MainWindow inherits Window {
+    in-out property <string> status_text: "Fraggler v2 desktop scaffold ready.";
+    in-out property <string> log_text: "Rust + Slint desktop shell scaffolded.\n";
+
+    callback show_contract();
+    callback run_demo();
+    callback open_docs();
+
+    title: "Fraggler v2";
+    width: 980px;
+    height: 720px;
+
+    VerticalBox {
+        padding: 16px;
+        spacing: 12px;
+
+        Text {
+            text: "Fraggler v2";
+            font-size: 28px;
+        }
+
+        Text {
+            text: "Rust-first rewrite scaffold for offline desktop Fraggler.";
+            wrap: word-wrap;
+        }
+
+        HorizontalBox {
+            spacing: 8px;
+
+            Button {
+                text: "Show Contract";
+                clicked => { root.show_contract(); }
+            }
+
+            Button {
+                text: "Run Stub";
+                clicked => { root.run_demo(); }
+            }
+
+            Button {
+                text: "Open Docs";
+                clicked => { root.open_docs(); }
+            }
+        }
+
+        Rectangle {
+            background: #f3f4f6;
+            border-width: 1px;
+            border-color: #d1d5db;
+            height: 52px;
+            Text {
+                x: 12px;
+                y: 14px;
+                text: root.status_text;
+                wrap: word-wrap;
+                width: parent.width - 24px;
+            }
+        }
+
+        Rectangle {
+            background: #111827;
+            border-radius: 8px;
+            border-width: 1px;
+            border-color: #374151;
+            height: 520px;
+
+            Text {
+                x: 12px;
+                y: 12px;
+                width: parent.width - 24px;
+                text: root.log_text;
+                color: #f9fafb;
+                wrap: word-wrap;
+            }
+        }
+    }
+}

@@ -1,0 +1,67 @@
+# Fraggler v2
+
+`fraggler-v2` is the Rust-first rewrite track for Fraggler.
+
+Current scope in this scaffold:
+- establish the new workspace layout
+- define the first version of the engine/desktop JSON contract
+- stand up the CLI and desktop shell entrypoints
+- freeze Python reference timings and outputs before engine porting begins
+
+## Workspace layout
+
+- `crates/fraggler-core`
+  - shared contract types
+  - engine boundary
+  - report payload types
+- `crates/fraggler-cli`
+  - headless commands for `analyze`, `qc`, `validate-flt3`, `build-report`
+- `crates/fraggler-desktop`
+  - Slint desktop shell scaffold
+- `schemas/fraggler-contract-v1.schema.json`
+  - v1 JSON contract for desktop ↔ core/CLI communication
+- `baselines/scenarios.example.json`
+  - example baseline-freeze scenarios for the Python reference implementation
+
+## Product rules
+
+- Offline-first desktop delivery
+- Native support for macOS, Windows, and Linux
+- Standalone HTML/Plotly reports remain the report model
+- Python remains the reference implementation until Rust passes parity + performance gates
+
+## Expected development flow
+
+1. Freeze baseline outputs and timings with the Python implementation.
+2. Port the engine into `fraggler-core`.
+3. Drive the engine through `fraggler-cli`.
+4. Attach the Slint shell after the engine reaches parity.
+
+## Baseline freeze
+
+Use the existing Python application to freeze reference timings and artifacts:
+
+```bash
+python3 scripts/freeze_v2_baseline.py \
+  --scenario-file fraggler-v2/baselines/scenarios.example.json \
+  --output-dir validation_outputs/fraggler_v2_baseline
+```
+
+The script writes:
+- `baseline_manifest.json`
+- per-scenario summaries
+- copied artifacts when configured by the scenario
+
+## Build intent
+
+Once Rust is available on the machine, the expected commands are:
+
+```bash
+cd fraggler-v2
+cargo fmt
+cargo check
+cargo run -p fraggler-cli -- analyze --help
+cargo run -p fraggler-desktop
+```
+
+Rust is not installed on the current workstation yet, so this scaffold has been added without local `cargo check`.

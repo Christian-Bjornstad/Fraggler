@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fraggler.local/schemas/fraggler-contract-v1.schema.json",
+  "title": "Fraggler v2 Engine Contract",
+  "type": "object",
+  "required": [
+    "contract_version",
+    "run_kind",
+    "correlation_id",
+    "inputs",
+    "output",
+    "options"
+  ],
+  "properties": {
+    "contract_version": {
+      "type": "object",
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "type": "integer", "minimum": 1 },
+        "minor": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "run_kind": {
+      "type": "string",
+      "enum": ["analyze", "qc", "validate_flt3", "build_report"]
+    },
+    "analysis_kind": {
+      "type": ["string", "null"],
+      "enum": ["clonality", "flt3", "general", null]
+    },
+    "correlation_id": {
+      "type": "string",
+      "format": "uuid"
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["paths"],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "manifest_path": {
+          "type": ["string", "null"]
+        },
+        "report_source_path": {
+          "type": ["string", "null"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["root_dir"],
+      "properties": {
+        "root_dir": { "type": "string" },
+        "report_dir": { "type": ["string", "null"] },
+        "artifacts_dir": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "options": {
+      "type": "object",
+      "required": [
+        "deterministic",
+        "emit_compact_json",
+        "open_reports_in_browser",
+        "shadow_reference_python"
+      ],
+      "properties": {
+        "max_workers": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "deterministic": { "type": "boolean" },
+        "emit_compact_json": { "type": "boolean" },
+        "open_reports_in_browser": { "type": "boolean" },
+        "shadow_reference_python": { "type": "boolean" },
+        "extra": {
+          "type": "object"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

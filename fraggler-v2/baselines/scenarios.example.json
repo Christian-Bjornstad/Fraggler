@@ -1,0 +1,36 @@
+{
+  "scenarios": [
+    {
+      "name": "heavy_liz_clonality_file",
+      "kind": "clonality_file_analysis",
+      "analysis_kind": "clonality",
+      "input_file": "/Volumes/T7 Shield/DATA/2026/2026_03_27_TCRg_IGK_KDE_CFB_H9H1DI2F_2026-03-27_0652/26OUM04817_IGK_270326_B05_H9H1DI2F.fsa"
+    },
+    {
+      "name": "bounded_rox_clonality_file",
+      "kind": "clonality_file_analysis",
+      "analysis_kind": "clonality",
+      "input_file": "/Volumes/T7 Shield/DATA/2026/2026_03_27_TCRg_IGK_KDE_CFB_H9H1DI2F_2026-03-27_0652/26OUM04817_TCRg_A_270326_C01_H9H1DI2F.fsa"
+    },
+    {
+      "name": "real_qc_dit_combined",
+      "kind": "combined_qc_dit",
+      "source_dir": "/Volumes/T7 Shield/DATA/2026/2026_03_27_TCRg_IGK_KDE_CFB_H9H1DI2F_2026-03-27_0652",
+      "patient_prefixes": ["26OUM04817_"],
+      "control_prefixes": ["PK_", "PK1_", "PK2_", "NK_", "RK_"],
+      "output_folder_name": "fraggler_v2_real_qc_dit_baseline"
+    },
+    {
+      "name": "flt3_validation_subset",
+      "kind": "command",
+      "argv": [
+        "python3",
+        "scripts/run_flt3_backfill_validation.py",
+        "--year",
+        "2026",
+        "--limit",
+        "25"
+      ]
+    }
+  ]
+}

@@ -42,3 +42,7 @@ Notes.txt
 # Tests & scratch
 tests/
 tmp/
+
+# Rust v2 workspace
+/fraggler-v2/target/
+/fraggler-v2/.slint/
