@@ -7,6 +7,21 @@ Current scope in this scaffold:
 - define the first version of the engine/desktop JSON contract
 - stand up the CLI and desktop shell entrypoints
 - freeze Python reference timings and outputs before engine porting begins
+- start Phase 2 engine porting in `fraggler-core`
+
+## Phase 2 status
+
+Implemented in Rust so far:
+- native ABIF/FSA directory parsing
+- raw signal extraction for `DATA*` channels and `DyeN*` metadata
+- baseline correction primitives
+- peak detection primitives
+- first-pass ladder candidate generation and curvature scoring
+- multi-file `analyze` request handling in the core engine
+
+Current limitation:
+- the engine does not yet reproduce the full Python ladder-fit/refinement/rescue workflow
+- QC, FLT3 validation, and report generation remain scaffold-only in Rust
 
 ## Workspace layout
 
@@ -68,14 +83,13 @@ cargo run -p fraggler-cli -- analyze --json-request examples/analyze_request.jso
 
 ## Build intent
 
-Once Rust is available on the machine, the expected commands are:
+Current local verification commands:
 
 ```bash
 cd fraggler-v2
 cargo fmt
 cargo check
+cargo test -p fraggler-core
 cargo run -p fraggler-cli -- analyze --help
 cargo run -p fraggler-desktop
 ```
-
-Rust is not installed on the current workstation yet, so this scaffold has been added without local `cargo check`.

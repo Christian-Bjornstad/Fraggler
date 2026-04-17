@@ -51,13 +51,11 @@ fn contract_round_trip_serializes_cleanly() {
 
 #[test]
 fn run_request_emits_expected_stub_lifecycle() {
-    let request = sample_request();
+    let mut request = sample_request();
+    request.run_kind = RunKind::Qc;
     let mut sink = CollectingSink::default();
     let result = run_request(&request, &mut sink);
-    assert!(
-        result.is_err(),
-        "stub engine should still return not implemented"
-    );
+    assert!(result.is_err(), "qc should still return not implemented");
     assert_eq!(sink.messages.len(), 4);
 
     assert!(matches!(
@@ -90,4 +88,26 @@ fn run_request_rejects_missing_inputs_without_emitting_events() {
     let result = run_request(&request, &mut sink);
     assert!(result.is_err());
     assert!(sink.messages.is_empty());
+}
+
+#[test]
+fn analyze_request_emits_bootstrap_before_io_failure() {
+    let request = sample_request();
+    let mut sink = CollectingSink::default();
+    let result = run_request(&request, &mut sink);
+    assert!(result.is_err());
+    assert_eq!(sink.messages.len(), 3);
+
+    assert!(matches!(
+        sink.messages[0].payload,
+        EnginePayload::RequestAccepted(_)
+    ));
+    assert!(matches!(
+        sink.messages[1].payload,
+        EnginePayload::Progress(_)
+    ));
+    assert!(matches!(
+        sink.messages[2].payload,
+        EnginePayload::Progress(_)
+    ));
 }

@@ -1,16 +1,31 @@
 use std::collections::BTreeMap;
 
+use camino::Utf8PathBuf;
 use thiserror::Error;
 
 use crate::contract::{
     EngineMessage, EnginePayload, ProgressEvent, RunKind, RunRequest, RunStatus, RunSummary,
     WarningEvent, WarningSeverity,
 };
+use crate::primitives::analyze_fsa_primitives;
 
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("run request is missing at least one input path")]
     MissingInputs,
+    #[error("I/O error while trying to {context} at {path}: {source}")]
+    Io {
+        path: Utf8PathBuf,
+        context: &'static str,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid ABIF/FSA file at {path}: {message}")]
+    InvalidAbif { path: Utf8PathBuf, message: String },
+    #[error("signal math error: {0}")]
+    SignalMath(String),
+    #[error("primitive analysis failed: {message}")]
+    PrimitiveAnalysis { message: String },
     #[error("run kind `{run_kind:?}` is not implemented yet in fraggler-core")]
     NotYetImplemented { run_kind: RunKind },
     #[error("event sink failed: {0}")]
@@ -53,13 +68,94 @@ pub fn run_request<S: EventSink>(request: &RunRequest, sink: &mut S) -> EngineRe
         }),
     ))?;
 
+    match request.run_kind {
+        RunKind::Analyze => run_analyze_primitives(request, sink),
+        _ => run_not_implemented(request, sink),
+    }
+}
+
+fn run_analyze_primitives<S: EventSink>(
+    request: &RunRequest,
+    sink: &mut S,
+) -> EngineResult<RunSummary> {
+    let mut primitive_results = Vec::with_capacity(request.inputs.paths.len());
+    for (index, input_path) in request.inputs.paths.iter().enumerate() {
+        sink.emit(EngineMessage::new(
+            request.correlation_id,
+            EnginePayload::Progress(ProgressEvent {
+                phase: "abif_parse".to_owned(),
+                file: Some(input_path.to_string()),
+                files_done: Some(index),
+                files_total: Some(request.inputs.paths.len()),
+                note: Some(
+                    "phase 2 primitives: parsing ABIF and running native signal analysis"
+                        .to_owned(),
+                ),
+            }),
+        ))?;
+
+        let primitive_result = analyze_fsa_primitives(input_path, request.analysis_kind.as_ref())?;
+        primitive_results.push(primitive_result);
+    }
+    sink.emit(EngineMessage::new(
+        request.correlation_id,
+        EnginePayload::Warning(WarningEvent {
+            severity: WarningSeverity::Warn,
+            code: "partial_phase2_engine".to_owned(),
+            message: "Native Rust ABIF parsing, baseline correction, ladder peak detection, and first-pass ladder candidate scoring are active; full ladder fitting is not ported yet."
+                .to_owned(),
+        }),
+    ))?;
+
+    let mut details = BTreeMap::from([
+        (
+            "run_kind".to_owned(),
+            serde_json::to_value(&request.run_kind).unwrap_or_default(),
+        ),
+        (
+            "analysis_kind".to_owned(),
+            serde_json::to_value(&request.analysis_kind).unwrap_or_default(),
+        ),
+        (
+            "primitive_stage".to_owned(),
+            serde_json::Value::String("abif_baseline_peak_detection_ladder_candidates".to_owned()),
+        ),
+        (
+            "primitive_results".to_owned(),
+            serde_json::to_value(&primitive_results).unwrap_or_default(),
+        ),
+    ]);
+    if let Some(first_result) = primitive_results.first() {
+        details.insert(
+            "primitive_result".to_owned(),
+            serde_json::to_value(first_result).unwrap_or_default(),
+        );
+    }
+
+    let summary = RunSummary {
+        status: RunStatus::Succeeded,
+        timings_ms: BTreeMap::from([("bootstrap".to_owned(), 0_u64)]),
+        artifact_manifest: Vec::new(),
+        details,
+    };
+
+    sink.emit(EngineMessage::new(
+        request.correlation_id,
+        EnginePayload::Summary(summary.clone()),
+    ))?;
+    Ok(summary)
+}
+
+fn run_not_implemented<S: EventSink>(
+    request: &RunRequest,
+    sink: &mut S,
+) -> EngineResult<RunSummary> {
     sink.emit(EngineMessage::new(
         request.correlation_id,
         EnginePayload::Warning(WarningEvent {
             severity: WarningSeverity::Warn,
             code: "engine_not_implemented".to_owned(),
-            message: "fraggler-core is scaffolded, but the Rust engine port has not started yet."
-                .to_owned(),
+            message: "fraggler-core is scaffolded, but this run kind is not ported yet.".to_owned(),
         }),
     ))?;
 
