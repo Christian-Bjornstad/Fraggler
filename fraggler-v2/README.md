@@ -52,6 +52,20 @@ The script writes:
 - per-scenario summaries
 - copied artifacts when configured by the scenario
 
+## Example requests
+
+Example v1 request payloads live in `fraggler-v2/examples/`:
+- `analyze_request.json`
+- `qc_request.json`
+- `build_report_request.json`
+
+Use them with:
+
+```bash
+cd fraggler-v2
+cargo run -p fraggler-cli -- analyze --json-request examples/analyze_request.json
+```
+
 ## Build intent
 
 Once Rust is available on the machine, the expected commands are:

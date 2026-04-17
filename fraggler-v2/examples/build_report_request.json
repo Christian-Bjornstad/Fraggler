@@ -1,0 +1,27 @@
+{
+  "contract_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "run_kind": "build_report",
+  "analysis_kind": "clonality",
+  "correlation_id": "33333333-3333-4333-8333-333333333333",
+  "inputs": {
+    "paths": [],
+    "manifest_path": "/tmp/fraggler-v2/report/input_manifest.json",
+    "report_source_path": "/tmp/fraggler-v2/report/payloads"
+  },
+  "output": {
+    "root_dir": "/tmp/fraggler-v2/report",
+    "report_dir": "/tmp/fraggler-v2/report/REPORTS",
+    "artifacts_dir": "/tmp/fraggler-v2/report/artifacts"
+  },
+  "options": {
+    "max_workers": 2,
+    "deterministic": true,
+    "emit_compact_json": true,
+    "open_reports_in_browser": true,
+    "shadow_reference_python": false,
+    "extra": {}
+  }
+}

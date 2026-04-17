@@ -46,3 +46,5 @@ tmp/
 # Rust v2 workspace
 /fraggler-v2/target/
 /fraggler-v2/.slint/
+!/fraggler-v2/crates/*/tests/
+!/fraggler-v2/crates/*/tests/**

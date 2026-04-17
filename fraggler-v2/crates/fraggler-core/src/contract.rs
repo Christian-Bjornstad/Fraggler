@@ -18,6 +18,12 @@ impl Default for ContractVersion {
     }
 }
 
+impl ContractVersion {
+    pub fn current() -> Self {
+        Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunKind {

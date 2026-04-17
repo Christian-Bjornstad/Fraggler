@@ -11,7 +11,11 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 #[derive(Debug, Parser)]
-#[command(name = "fraggler-cli", version, about = "Fraggler v2 Rust CLI scaffold")]
+#[command(
+    name = "fraggler-cli",
+    version,
+    about = "Fraggler v2 Rust CLI scaffold"
+)]
 struct Cli {
     #[arg(long, global = true, default_value = "info")]
     log_filter: String,

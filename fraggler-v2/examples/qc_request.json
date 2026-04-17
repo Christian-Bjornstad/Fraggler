@@ -1,0 +1,30 @@
+{
+  "contract_version": {
+    "major": 1,
+    "minor": 0
+  },
+  "run_kind": "qc",
+  "analysis_kind": "clonality",
+  "correlation_id": "22222222-2222-4222-8222-222222222222",
+  "inputs": {
+    "paths": [
+      "/path/to/run/PK_IGK_270326_D05_H9H1DI2F.fsa",
+      "/path/to/run/NK_IGK_270326_F05_H9H1DI2F.fsa"
+    ],
+    "manifest_path": null,
+    "report_source_path": null
+  },
+  "output": {
+    "root_dir": "/tmp/fraggler-v2/qc",
+    "report_dir": "/tmp/fraggler-v2/qc/reports",
+    "artifacts_dir": "/tmp/fraggler-v2/qc/artifacts"
+  },
+  "options": {
+    "max_workers": 4,
+    "deterministic": true,
+    "emit_compact_json": true,
+    "open_reports_in_browser": true,
+    "shadow_reference_python": true,
+    "extra": {}
+  }
+}
