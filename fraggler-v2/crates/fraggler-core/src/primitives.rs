@@ -23,6 +23,23 @@ pub struct LadderFitPreview {
     pub best_scan_indices: Vec<usize>,
     pub best_curvature_score: Option<f64>,
     pub best_quadratic_r2: Option<f64>,
+    pub sizing_model: Option<SizingModelPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SizingModelPreview {
+    pub degree: usize,
+    pub coefficients: Vec<f64>,
+    pub predicted_ladder_basepairs: Vec<f64>,
+    pub qc_metrics: LadderQcMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LadderQcMetrics {
+    pub r2: f64,
+    pub mean_abs_error_bp: f64,
+    pub max_abs_error_bp: f64,
+    pub monotonic_on_ladder: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -324,10 +341,14 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
             best_scan_indices: Vec::new(),
             best_curvature_score: None,
             best_quadratic_r2: None,
+            sizing_model: None,
         });
     }
     let ladder_sizes = ladder.sizes();
     let best = select_best_combination(&combinations, ladder_sizes);
+    let sizing_model = best
+        .as_ref()
+        .and_then(|entry| fit_best_sizing_model(&entry.indices, ladder_sizes));
 
     Some(LadderFitPreview {
         max_allowed_peak_gap,
@@ -341,6 +362,7 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
             .unwrap_or_default(),
         best_curvature_score: best.as_ref().map(|entry| entry.curvature_score),
         best_quadratic_r2: best.as_ref().map(|entry| entry.quadratic_r2),
+        sizing_model,
     })
 }
 
@@ -559,10 +581,158 @@ fn curvature_score(ladder_sizes: &[f64], scans: &[usize]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
+fn fit_best_sizing_model(scans: &[usize], ladder_sizes: &[f64]) -> Option<SizingModelPreview> {
+    if scans.len() != ladder_sizes.len() || scans.len() < 2 {
+        return None;
+    }
+
+    let x = scans.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    let max_degree = (scans.len().saturating_sub(1)).min(3);
+    for degree in (1..=max_degree).rev() {
+        let Some(coefficients) = fit_polynomial_least_squares(&x, ladder_sizes, degree) else {
+            continue;
+        };
+        let predicted = x
+            .iter()
+            .map(|value| eval_polynomial(&coefficients, *value))
+            .collect::<Vec<_>>();
+        let qc_metrics = compute_ladder_qc_metrics(ladder_sizes, &predicted);
+        if qc_metrics.monotonic_on_ladder {
+            return Some(SizingModelPreview {
+                degree,
+                coefficients,
+                predicted_ladder_basepairs: predicted,
+                qc_metrics,
+            });
+        }
+    }
+    None
+}
+
+fn fit_polynomial_least_squares(x: &[f64], y: &[f64], degree: usize) -> Option<Vec<f64>> {
+    if x.len() != y.len() || x.is_empty() {
+        return None;
+    }
+    let order = degree + 1;
+    let mut normal = vec![vec![0.0; order]; order];
+    let mut rhs = vec![0.0; order];
+
+    for row in 0..order {
+        for col in 0..order {
+            let power = (row + col) as i32;
+            normal[row][col] = x.iter().map(|value| value.powi(power)).sum::<f64>();
+        }
+        rhs[row] = x
+            .iter()
+            .zip(y.iter())
+            .map(|(x_value, y_value)| y_value * x_value.powi(row as i32))
+            .sum::<f64>();
+    }
+
+    solve_linear_system(normal, rhs)
+}
+
+fn solve_linear_system(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<Vec<f64>> {
+    let n = rhs.len();
+    if matrix.len() != n || matrix.iter().any(|row| row.len() != n) {
+        return None;
+    }
+
+    for pivot_index in 0..n {
+        let (best_row, best_value) = (pivot_index..n)
+            .map(|row| (row, matrix[row][pivot_index].abs()))
+            .max_by(|left, right| {
+                left.1
+                    .partial_cmp(&right.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })?;
+        if best_value <= f64::EPSILON {
+            return None;
+        }
+        if best_row != pivot_index {
+            matrix.swap(best_row, pivot_index);
+            rhs.swap(best_row, pivot_index);
+        }
+
+        let pivot = matrix[pivot_index][pivot_index];
+        for col in pivot_index..n {
+            matrix[pivot_index][col] /= pivot;
+        }
+        rhs[pivot_index] /= pivot;
+
+        for row in 0..n {
+            if row == pivot_index {
+                continue;
+            }
+            let factor = matrix[row][pivot_index];
+            if factor.abs() <= f64::EPSILON {
+                continue;
+            }
+            for col in pivot_index..n {
+                matrix[row][col] -= factor * matrix[pivot_index][col];
+            }
+            rhs[row] -= factor * rhs[pivot_index];
+        }
+    }
+
+    Some(rhs)
+}
+
+fn eval_polynomial(coefficients: &[f64], x: f64) -> f64 {
+    coefficients
+        .iter()
+        .enumerate()
+        .map(|(power, coefficient)| coefficient * x.powi(power as i32))
+        .sum::<f64>()
+}
+
+fn compute_ladder_qc_metrics(expected: &[f64], predicted: &[f64]) -> LadderQcMetrics {
+    if expected.len() != predicted.len() || expected.is_empty() {
+        return LadderQcMetrics {
+            r2: f64::NEG_INFINITY,
+            mean_abs_error_bp: f64::INFINITY,
+            max_abs_error_bp: f64::INFINITY,
+            monotonic_on_ladder: false,
+        };
+    }
+
+    let mean_expected = expected.iter().sum::<f64>() / expected.len() as f64;
+    let ss_tot = expected
+        .iter()
+        .map(|value| {
+            let delta = value - mean_expected;
+            delta * delta
+        })
+        .sum::<f64>();
+    let residuals = expected
+        .iter()
+        .zip(predicted.iter())
+        .map(|(exp, pred)| exp - pred)
+        .collect::<Vec<_>>();
+    let ss_res = residuals.iter().map(|value| value * value).sum::<f64>();
+    let abs_errors = residuals
+        .iter()
+        .map(|value| value.abs())
+        .collect::<Vec<_>>();
+    let monotonic_on_ladder = predicted.windows(2).all(|window| window[1] > window[0]);
+
+    LadderQcMetrics {
+        r2: if ss_tot <= f64::EPSILON {
+            f64::NEG_INFINITY
+        } else {
+            1.0 - (ss_res / ss_tot)
+        },
+        mean_abs_error_bp: abs_errors.iter().sum::<f64>() / abs_errors.len() as f64,
+        max_abs_error_bp: abs_errors.into_iter().fold(0.0, f64::max),
+        monotonic_on_ladder,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        curvature_score, estimate_combination_count_capped, generate_peak_combinations,
+        compute_ladder_qc_metrics, curvature_score, estimate_combination_count_capped,
+        eval_polynomial, fit_polynomial_least_squares, generate_peak_combinations,
         quadratic_fit_r2, select_best_combination, select_ladder_peaks,
     };
 
@@ -605,5 +775,21 @@ mod tests {
         let peaks = select_ladder_peaks(&raw, &corrected, 100.0, 2, 10);
         let indices = peaks.iter().map(|peak| peak.index).collect::<Vec<_>>();
         assert_eq!(indices, vec![2, 6]);
+    }
+
+    #[test]
+    fn polynomial_fit_recovers_linear_mapping() {
+        let x = vec![100.0, 200.0, 300.0, 400.0];
+        let y = vec![50.0, 100.0, 150.0, 200.0];
+        let coeffs =
+            fit_polynomial_least_squares(&x, &y, 1).expect("linear least squares should succeed");
+        let predicted = x
+            .iter()
+            .map(|value| eval_polynomial(&coeffs, *value))
+            .collect::<Vec<_>>();
+        let qc = compute_ladder_qc_metrics(&y, &predicted);
+        assert!(qc.r2 > 0.999999);
+        assert!(qc.mean_abs_error_bp < 1e-6);
+        assert!(qc.monotonic_on_ladder);
     }
 }
