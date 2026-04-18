@@ -35,6 +35,7 @@ pub struct LadderFitPreview {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SizingModelPreview {
+    pub strategy: String,
     pub degree: usize,
     pub coefficients: Vec<f64>,
     pub predicted_ladder_basepairs: Vec<f64>,
@@ -728,6 +729,10 @@ fn fit_best_sizing_model(
     }
 
     let x = scans.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    if let Some(model) = fit_monotone_spline_sizing_model(&x, ladder_sizes, sample_trace) {
+        return Some(model);
+    }
+
     let max_degree = (scans.len().saturating_sub(1)).min(3);
     for degree in (1..=max_degree).rev() {
         let Some(coefficients) = fit_polynomial_least_squares(&x, ladder_sizes, degree) else {
@@ -739,8 +744,12 @@ fn fit_best_sizing_model(
             .collect::<Vec<_>>();
         let qc_metrics = compute_ladder_qc_metrics(ladder_sizes, &predicted);
         if qc_metrics.monotonic_on_ladder {
-            let sample_mapping = build_sample_mapping_preview(sample_trace, &coefficients);
+            let sample_basepairs = (0..sample_trace.len())
+                .map(|time| eval_polynomial(&coefficients, time as f64))
+                .collect::<Vec<_>>();
+            let sample_mapping = build_sample_mapping_preview(sample_trace, &sample_basepairs);
             return Some(SizingModelPreview {
+                strategy: "polynomial_fallback".to_owned(),
                 degree,
                 coefficients,
                 predicted_ladder_basepairs: predicted,
@@ -750,6 +759,36 @@ fn fit_best_sizing_model(
         }
     }
     None
+}
+
+fn fit_monotone_spline_sizing_model(
+    x: &[f64],
+    ladder_sizes: &[f64],
+    sample_trace: &[f64],
+) -> Option<SizingModelPreview> {
+    let tangents = monotone_cubic_tangents(x, ladder_sizes)?;
+    let predicted = x
+        .iter()
+        .map(|value| eval_monotone_cubic_spline(x, ladder_sizes, &tangents, *value))
+        .collect::<Vec<_>>();
+    let qc_metrics = compute_ladder_qc_metrics(ladder_sizes, &predicted);
+    if !qc_metrics.monotonic_on_ladder {
+        return None;
+    }
+
+    let sample_basepairs = (0..sample_trace.len())
+        .map(|time| eval_monotone_cubic_spline(x, ladder_sizes, &tangents, time as f64))
+        .collect::<Vec<_>>();
+    let sample_mapping = build_sample_mapping_preview(sample_trace, &sample_basepairs);
+
+    Some(SizingModelPreview {
+        strategy: "willros_monotone_spline".to_owned(),
+        degree: 3,
+        coefficients: tangents,
+        predicted_ladder_basepairs: predicted,
+        qc_metrics,
+        sample_mapping,
+    })
 }
 
 fn fit_polynomial_least_squares(x: &[f64], y: &[f64], degree: usize) -> Option<Vec<f64>> {
@@ -821,6 +860,70 @@ fn solve_linear_system(mut matrix: Vec<Vec<f64>>, mut rhs: Vec<f64>) -> Option<V
     Some(rhs)
 }
 
+fn monotone_cubic_tangents(x: &[f64], y: &[f64]) -> Option<Vec<f64>> {
+    if x.len() != y.len() || x.len() < 2 {
+        return None;
+    }
+
+    let n = x.len();
+    let mut h = Vec::with_capacity(n - 1);
+    let mut delta = Vec::with_capacity(n - 1);
+    for index in 0..n - 1 {
+        let step = x[index + 1] - x[index];
+        if step <= f64::EPSILON {
+            return None;
+        }
+        h.push(step);
+        delta.push((y[index + 1] - y[index]) / step);
+    }
+
+    let mut tangents = vec![0.0; n];
+    tangents[0] = delta[0];
+    tangents[n - 1] = delta[n - 2];
+
+    for index in 1..n - 1 {
+        if delta[index - 1] == 0.0
+            || delta[index] == 0.0
+            || delta[index - 1].signum() != delta[index].signum()
+        {
+            tangents[index] = 0.0;
+            continue;
+        }
+
+        let w1 = 2.0 * h[index] + h[index - 1];
+        let w2 = h[index] + 2.0 * h[index - 1];
+        tangents[index] = (w1 + w2) / ((w1 / delta[index - 1]) + (w2 / delta[index]));
+    }
+
+    Some(tangents)
+}
+
+fn eval_monotone_cubic_spline(x: &[f64], y: &[f64], tangents: &[f64], xq: f64) -> f64 {
+    if x.len() == 1 {
+        return y[0];
+    }
+    if xq <= x[0] {
+        return y[0] + tangents[0] * (xq - x[0]);
+    }
+    if xq >= x[x.len() - 1] {
+        return y[y.len() - 1] + tangents[tangents.len() - 1] * (xq - x[x.len() - 1]);
+    }
+
+    let upper = x.partition_point(|value| *value <= xq);
+    let index = upper.saturating_sub(1).min(x.len() - 2);
+    let h = x[index + 1] - x[index];
+    let t = (xq - x[index]) / h;
+    let t2 = t * t;
+    let t3 = t2 * t;
+
+    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
+    let h10 = t3 - 2.0 * t2 + t;
+    let h01 = -2.0 * t3 + 3.0 * t2;
+    let h11 = t3 - t2;
+
+    h00 * y[index] + h10 * h * tangents[index] + h01 * y[index + 1] + h11 * h * tangents[index + 1]
+}
+
 fn eval_polynomial(coefficients: &[f64], x: f64) -> f64 {
     coefficients
         .iter()
@@ -873,15 +976,18 @@ fn compute_ladder_qc_metrics(expected: &[f64], predicted: &[f64]) -> LadderQcMet
 
 fn build_sample_mapping_preview(
     sample_trace: &[f64],
-    coefficients: &[f64],
+    predicted_basepairs: &[f64],
 ) -> Option<SampleMappingPreview> {
     if sample_trace.is_empty() {
+        return None;
+    }
+    if sample_trace.len() != predicted_basepairs.len() {
         return None;
     }
 
     let mut mapped = Vec::with_capacity(sample_trace.len());
     for (time, intensity) in sample_trace.iter().enumerate() {
-        let basepair = eval_polynomial(coefficients, time as f64);
+        let basepair = predicted_basepairs[time];
         if !basepair.is_finite() || basepair < 0.0 {
             continue;
         }
@@ -1285,17 +1391,20 @@ fn refine_best_combination(
         return None;
     }
 
-    let derivative_coeffs = derivative_coefficients(&current_model.coefficients);
     let mut option_buckets = Vec::new();
     let mut changed_indices = Vec::new();
 
     for (step_index, _) in ranked_steps {
         let current_scan = current_scans[step_index] as f64;
-        let derivative = eval_polynomial(&derivative_coeffs, current_scan);
-        if !derivative.is_finite() || derivative.abs() <= 1e-6 {
+        let slope = local_bp_per_scan(
+            current_scans,
+            &current_model.predicted_ladder_basepairs,
+            step_index,
+        );
+        if !slope.is_finite() || slope.abs() <= 1e-6 {
             continue;
         }
-        let target_scan = current_scan + (residuals[step_index] / derivative);
+        let target_scan = current_scan + (residuals[step_index] / slope);
         let lower_bound = if step_index == 0 {
             f64::NEG_INFINITY
         } else {
@@ -1446,13 +1555,23 @@ fn refinement_options(
     }
 }
 
-fn derivative_coefficients(coefficients: &[f64]) -> Vec<f64> {
-    coefficients
-        .iter()
-        .enumerate()
-        .skip(1)
-        .map(|(power, coefficient)| *coefficient * power as f64)
-        .collect()
+fn local_bp_per_scan(scans: &[usize], predicted_bps: &[f64], index: usize) -> f64 {
+    if scans.len() != predicted_bps.len() || scans.len() < 2 {
+        return f64::NAN;
+    }
+
+    if index == 0 {
+        let dx = scans[1] as f64 - scans[0] as f64;
+        return (predicted_bps[1] - predicted_bps[0]) / dx;
+    }
+    if index + 1 >= scans.len() {
+        let last = scans.len() - 1;
+        let dx = scans[last] as f64 - scans[last - 1] as f64;
+        return (predicted_bps[last] - predicted_bps[last - 1]) / dx;
+    }
+
+    let dx = scans[index + 1] as f64 - scans[index - 1] as f64;
+    (predicted_bps[index + 1] - predicted_bps[index - 1]) / dx
 }
 
 fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
@@ -1535,6 +1654,7 @@ mod tests {
         let ladder_sizes = vec![35.0, 50.0, 75.0, 100.0];
         let scans = vec![100, 200, 320, 405];
         let model = SizingModelPreview {
+            strategy: "test".to_owned(),
             degree: 1,
             coefficients: fit_polynomial_least_squares(
                 &scans.iter().map(|value| *value as f64).collect::<Vec<_>>(),
@@ -1558,8 +1678,8 @@ mod tests {
     #[test]
     fn sample_mapping_preview_filters_negative_basepairs_and_stays_monotonic() {
         let trace = vec![10.0, 20.0, 30.0, 40.0, 50.0];
-        let coeffs = vec![-1.0, 2.0];
-        let preview = build_sample_mapping_preview(&trace, &coeffs)
+        let predicted = vec![-1.0, 1.0, 3.0, 5.0, 7.0];
+        let preview = build_sample_mapping_preview(&trace, &predicted)
             .expect("sample mapping preview should be created");
         assert_eq!(preview.points_retained, 4);
         assert_eq!(preview.min_basepair, 1.0);
@@ -1571,8 +1691,10 @@ mod tests {
         let trace = vec![
             0.0, 10.0, 200.0, 15.0, 0.0, 5.0, 0.0, 4.0, 0.0, 20.0, 250.0, 10.0, 0.0,
         ];
-        let coeffs = vec![0.0, 1.0];
-        let preview = build_sample_mapping_preview(&trace, &coeffs)
+        let predicted = (0..trace.len())
+            .map(|value| value as f64)
+            .collect::<Vec<_>>();
+        let preview = build_sample_mapping_preview(&trace, &predicted)
             .expect("sample mapping preview should be created");
         assert_eq!(preview.sample_peak_preview.len(), 2);
         assert_eq!(preview.sample_peak_preview[0].time, 2);
