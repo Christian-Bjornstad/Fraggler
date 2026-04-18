@@ -22,7 +22,7 @@ Implemented in Rust so far:
 - sample-trace to basepair mapping preview from the fitted sizing model
 - sample-peak preview in basepair space from the mapped sample trace
 - assay-agnostic sample peak grouping preview in basepair space
-- first-pass clonality assay matching using filename, channel compatibility, and bp overlap
+- first-pass clonality assay matching using filename, channel compatibility, bp overlap, and group-level dominance signals
 - Willros-style monotone spline ladder sizing as the primary Rust sizing strategy, with polynomial fallback
 - multi-file `analyze` request handling in the core engine
 

@@ -16,8 +16,10 @@ const MAX_REFINEMENT_STEPS: usize = 3;
 const MAX_REFINEMENT_OPTIONS_PER_STEP: usize = 5;
 const MIN_REFINEMENT_TRIGGER_BP: f64 = 0.75;
 const MAX_REFINEMENT_RADIUS_SCANS: f64 = 120.0;
-const SAMPLE_ASSAY_GROUP_DISTANCE_BP: f64 = 15.0;
-const SAMPLE_ASSAY_MIN_RATIO: f64 = 0.33;
+const SAMPLE_ASSAY_GROUP_DISTANCE_BP: f64 = 12.0;
+const SAMPLE_ASSAY_MIN_RATIO: f64 = 0.40;
+const CLONAL_MAX_LABELLED_PEAKS: usize = 3;
+const CLONAL_DOMINANCE_RATIO: f64 = 1.7;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LadderFitPreview {
@@ -82,8 +84,13 @@ pub struct SamplePeakGroupPreview {
     pub group_id: usize,
     pub start_basepair: f64,
     pub end_basepair: f64,
+    pub cluster_width_bp: f64,
     pub max_intensity: f64,
+    pub dominant_peak_basepair: f64,
+    pub dominant_peak_intensity: f64,
+    pub dominant_ratio_vs_second: Option<f64>,
     pub kept_peak_count: usize,
+    pub clonal_candidate: bool,
     pub peaks: Vec<SamplePeakPreview>,
 }
 
@@ -122,6 +129,8 @@ pub struct ClonalityAssayMatch {
     pub matched_by_filename: bool,
     pub compatible_channel: bool,
     pub score: f64,
+    pub clonal_group_count: usize,
+    pub best_dominant_ratio: Option<f64>,
     pub matched_groups: Vec<ClonalityGroupMatch>,
 }
 
@@ -131,6 +140,11 @@ pub struct ClonalityGroupMatch {
     pub overlap_start_bp: f64,
     pub overlap_end_bp: f64,
     pub peak_count: usize,
+    pub cluster_width_bp: f64,
+    pub dominant_peak_basepair: f64,
+    pub dominant_peak_intensity: f64,
+    pub dominant_ratio_vs_second: Option<f64>,
+    pub clonal_candidate: bool,
 }
 
 pub fn analyze_fsa_primitives(
@@ -1155,12 +1169,40 @@ fn build_assay_group_preview(peaks: &[SamplePeakPreview]) -> Vec<SamplePeakGroup
                 .last()
                 .map(|peak| peak.basepair)
                 .unwrap_or(start_basepair);
+            let cluster_width_bp = round2((end_basepair - start_basepair).max(0.0));
+            let dominant_peak = kept
+                .iter()
+                .max_by(|left, right| {
+                    left.intensity
+                        .partial_cmp(&right.intensity)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .cloned()?;
+            let mut sorted_by_intensity = kept.clone();
+            sorted_by_intensity.sort_by(|left, right| {
+                right
+                    .intensity
+                    .partial_cmp(&left.intensity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let dominant_ratio_vs_second = sorted_by_intensity
+                .get(1)
+                .map(|second| dominant_peak.intensity / second.intensity.max(1.0));
+            let clonal_candidate = kept.len() <= CLONAL_MAX_LABELLED_PEAKS
+                && dominant_ratio_vs_second
+                    .map(|ratio| ratio >= CLONAL_DOMINANCE_RATIO)
+                    .unwrap_or(true);
             Some(SamplePeakGroupPreview {
                 group_id: index + 1,
                 start_basepair,
                 end_basepair,
+                cluster_width_bp,
                 max_intensity: round2(max_intensity),
+                dominant_peak_basepair: round2(dominant_peak.basepair),
+                dominant_peak_intensity: round2(dominant_peak.intensity),
+                dominant_ratio_vs_second: dominant_ratio_vs_second.map(round2),
                 kept_peak_count: kept.len(),
+                clonal_candidate,
                 peaks: kept,
             })
         })
@@ -1291,6 +1333,11 @@ fn build_clonality_preview(
                         overlap_start_bp: round2(overlap_start),
                         overlap_end_bp: round2(overlap_end),
                         peak_count: group.kept_peak_count,
+                        cluster_width_bp: group.cluster_width_bp,
+                        dominant_peak_basepair: group.dominant_peak_basepair,
+                        dominant_peak_intensity: group.dominant_peak_intensity,
+                        dominant_ratio_vs_second: group.dominant_ratio_vs_second,
+                        clonal_candidate: group.clonal_candidate,
                     })
                 })
                 .collect::<Vec<_>>();
@@ -1307,6 +1354,18 @@ fn build_clonality_preview(
                 score += 3.0;
             }
             score += matched_groups.len() as f64 * 2.0;
+            let clonal_group_count = matched_groups
+                .iter()
+                .filter(|group| group.clonal_candidate)
+                .count();
+            score += clonal_group_count as f64 * 1.5;
+            let best_dominant_ratio = matched_groups
+                .iter()
+                .filter_map(|group| group.dominant_ratio_vs_second)
+                .max_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+            if let Some(ratio) = best_dominant_ratio {
+                score += (ratio - 1.0).max(0.0).min(4.0);
+            }
             score += matched_groups
                 .iter()
                 .map(|group| group.overlap_end_bp - group.overlap_start_bp)
@@ -1318,6 +1377,8 @@ fn build_clonality_preview(
                 matched_by_filename,
                 compatible_channel,
                 score: round2(score),
+                clonal_group_count,
+                best_dominant_ratio: best_dominant_ratio.map(round2),
                 matched_groups,
             })
         })
@@ -1729,6 +1790,10 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].kept_peak_count, 1);
         assert_eq!(groups[1].kept_peak_count, 2);
+        assert!(groups[0].clonal_candidate);
+        assert_eq!(groups[0].dominant_ratio_vs_second, None);
+        assert_eq!(groups[1].dominant_ratio_vs_second, Some(1.67));
+        assert!(!groups[1].clonal_candidate);
     }
 
     #[test]
@@ -1737,8 +1802,13 @@ mod tests {
             group_id: 1,
             start_basepair: 120.0,
             end_basepair: 150.0,
+            cluster_width_bp: 30.0,
             max_intensity: 3000.0,
+            dominant_peak_basepair: 140.0,
+            dominant_peak_intensity: 3000.0,
+            dominant_ratio_vs_second: Some(2.2),
             kept_peak_count: 1,
+            clonal_candidate: true,
             peaks: vec![SamplePeakPreview {
                 time: 100,
                 intensity: 3000.0,
@@ -1750,5 +1820,8 @@ mod tests {
         assert!(!preview.ranked_assays.is_empty());
         assert_eq!(preview.ranked_assays[0].assay_name, "IGK");
         assert!(preview.ranked_assays[0].matched_by_filename);
+        assert_eq!(preview.ranked_assays[0].clonal_group_count, 1);
+        assert_eq!(preview.ranked_assays[0].best_dominant_ratio, Some(2.2));
+        assert!(preview.ranked_assays[0].matched_groups[0].clonal_candidate);
     }
 }
