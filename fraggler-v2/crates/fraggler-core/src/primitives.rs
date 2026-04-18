@@ -106,6 +106,30 @@ pub struct PrimitiveAnalysisResult {
     pub ladder_peak_count: usize,
     pub ladder_peak_preview: Vec<Peak>,
     pub ladder_fit_preview: Option<LadderFitPreview>,
+    pub clonality_preview: Option<ClonalityPreview>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClonalityPreview {
+    pub sample_channel: String,
+    pub ranked_assays: Vec<ClonalityAssayMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClonalityAssayMatch {
+    pub assay_name: String,
+    pub matched_by_filename: bool,
+    pub compatible_channel: bool,
+    pub score: f64,
+    pub matched_groups: Vec<ClonalityGroupMatch>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ClonalityGroupMatch {
+    pub group_id: usize,
+    pub overlap_start_bp: f64,
+    pub overlap_end_bp: f64,
+    pub peak_count: usize,
 }
 
 pub fn analyze_fsa_primitives(
@@ -162,6 +186,23 @@ pub fn analyze_fsa_primitives(
     let file_name = record.file_name.clone();
     let dye_names = dye_names(&record);
     let ladder_fit_preview = build_ladder_fit_preview(&ladder_peaks, &sample_trace, ladder);
+    let clonality_preview = if matches!(analysis_kind, Some(AnalysisKind::Clonality)) {
+        ladder_fit_preview.as_ref().and_then(|preview| {
+            preview
+                .sizing_model
+                .as_ref()
+                .and_then(|model| model.sample_mapping.as_ref())
+                .map(|mapping| {
+                    build_clonality_preview(
+                        &file_name,
+                        &sample_channel,
+                        &mapping.assay_group_preview,
+                    )
+                })
+        })
+    } else {
+        None
+    };
 
     Ok(PrimitiveAnalysisResult {
         file_name,
@@ -174,6 +215,7 @@ pub fn analyze_fsa_primitives(
         ladder_peak_count: ladder_peaks.len(),
         ladder_peak_preview: ladder_peaks.into_iter().take(8).collect(),
         ladder_fit_preview,
+        clonality_preview,
     })
 }
 
@@ -1019,6 +1061,190 @@ fn build_assay_group_preview(peaks: &[SamplePeakPreview]) -> Vec<SamplePeakGroup
         .collect()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ClonalityAssayDef {
+    name: &'static str,
+    channels: &'static [&'static str],
+    bp_min: f64,
+    bp_max: f64,
+    aliases: &'static [&'static str],
+}
+
+const CLONALITY_ASSAYS: &[ClonalityAssayDef] = &[
+    ClonalityAssayDef {
+        name: "FR1",
+        channels: &["DATA1"],
+        bp_min: 280.0,
+        bp_max: 420.0,
+        aliases: &["FR1"],
+    },
+    ClonalityAssayDef {
+        name: "FR2",
+        channels: &["DATA1"],
+        bp_min: 200.0,
+        bp_max: 400.0,
+        aliases: &["FR2"],
+    },
+    ClonalityAssayDef {
+        name: "FR3",
+        channels: &["DATA2"],
+        bp_min: 60.0,
+        bp_max: 220.0,
+        aliases: &["FR3"],
+    },
+    ClonalityAssayDef {
+        name: "IGK",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 90.0,
+        bp_max: 330.0,
+        aliases: &["IGK"],
+    },
+    ClonalityAssayDef {
+        name: "KDE",
+        channels: &["DATA3"],
+        bp_min: 190.0,
+        bp_max: 410.0,
+        aliases: &["KDE"],
+    },
+    ClonalityAssayDef {
+        name: "TCRgA",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 110.0,
+        bp_max: 290.0,
+        aliases: &["TCRGA", "TCRG"],
+    },
+    ClonalityAssayDef {
+        name: "TCRgB",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 60.0,
+        bp_max: 250.0,
+        aliases: &["TCRGB", "TCRG"],
+    },
+    ClonalityAssayDef {
+        name: "DHJH_D",
+        channels: &["DATA2"],
+        bp_min: 90.0,
+        bp_max: 440.0,
+        aliases: &["DHJHD", "DHJH"],
+    },
+    ClonalityAssayDef {
+        name: "DHJH_E",
+        channels: &["DATA1"],
+        bp_min: 65.0,
+        bp_max: 160.0,
+        aliases: &["DHJHE", "DHJH"],
+    },
+    ClonalityAssayDef {
+        name: "TCRbA",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 210.0,
+        bp_max: 310.0,
+        aliases: &["TCRBA", "TCRB"],
+    },
+    ClonalityAssayDef {
+        name: "TCRbB",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 210.0,
+        bp_max: 310.0,
+        aliases: &["TCRBB", "TCRB"],
+    },
+    ClonalityAssayDef {
+        name: "TCRbC",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 140.0,
+        bp_max: 360.0,
+        aliases: &["TCRBC", "TCRB"],
+    },
+];
+
+fn build_clonality_preview(
+    file_name: &str,
+    sample_channel: &str,
+    assay_groups: &[SamplePeakGroupPreview],
+) -> ClonalityPreview {
+    let normalized_file_name = normalize_assay_token(file_name);
+    let mut ranked_assays = CLONALITY_ASSAYS
+        .iter()
+        .filter_map(|assay| {
+            let compatible_channel = assay.channels.contains(&sample_channel);
+            let matched_by_filename = assay
+                .aliases
+                .iter()
+                .any(|alias| normalized_file_name.contains(&normalize_assay_token(alias)));
+
+            let matched_groups = assay_groups
+                .iter()
+                .filter_map(|group| {
+                    let overlap_start = group.start_basepair.max(assay.bp_min);
+                    let overlap_end = group.end_basepair.min(assay.bp_max);
+                    if overlap_end < overlap_start {
+                        return None;
+                    }
+                    Some(ClonalityGroupMatch {
+                        group_id: group.group_id,
+                        overlap_start_bp: round2(overlap_start),
+                        overlap_end_bp: round2(overlap_end),
+                        peak_count: group.kept_peak_count,
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            if !matched_by_filename && matched_groups.is_empty() && !compatible_channel {
+                return None;
+            }
+
+            let mut score = 0.0;
+            if compatible_channel {
+                score += 1.0;
+            }
+            if matched_by_filename {
+                score += 3.0;
+            }
+            score += matched_groups.len() as f64 * 2.0;
+            score += matched_groups
+                .iter()
+                .map(|group| group.overlap_end_bp - group.overlap_start_bp)
+                .sum::<f64>()
+                / 100.0;
+
+            Some(ClonalityAssayMatch {
+                assay_name: assay.name.to_owned(),
+                matched_by_filename,
+                compatible_channel,
+                score: round2(score),
+                matched_groups,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    ranked_assays.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.assay_name.cmp(&right.assay_name))
+    });
+    ranked_assays.truncate(5);
+
+    ClonalityPreview {
+        sample_channel: sample_channel.to_owned(),
+        ranked_assays,
+    }
+}
+
+fn normalize_assay_token(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| {
+            ch.to_ascii_uppercase()
+                .to_string()
+                .chars()
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RefinementCandidate {
     changed_step_indices: Vec<usize>,
@@ -1240,11 +1466,11 @@ fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        SamplePeakPreview, SizingModelPreview, build_assay_group_preview,
-        build_sample_mapping_preview, compute_ladder_qc_metrics, curvature_score,
-        estimate_combination_count_capped, eval_polynomial, fit_polynomial_least_squares,
-        generate_peak_combinations, quadratic_fit_r2, refine_best_combination,
-        select_best_combination, select_ladder_peaks,
+        SamplePeakGroupPreview, SamplePeakPreview, SizingModelPreview, build_assay_group_preview,
+        build_clonality_preview, build_sample_mapping_preview, compute_ladder_qc_metrics,
+        curvature_score, estimate_combination_count_capped, eval_polynomial,
+        fit_polynomial_least_squares, generate_peak_combinations, quadratic_fit_r2,
+        refine_best_combination, select_best_combination, select_ladder_peaks,
     };
 
     #[test]
@@ -1381,5 +1607,26 @@ mod tests {
         assert_eq!(groups.len(), 2);
         assert_eq!(groups[0].kept_peak_count, 1);
         assert_eq!(groups[1].kept_peak_count, 2);
+    }
+
+    #[test]
+    fn clonality_preview_prefers_filename_and_group_overlap_matches() {
+        let groups = vec![SamplePeakGroupPreview {
+            group_id: 1,
+            start_basepair: 120.0,
+            end_basepair: 150.0,
+            max_intensity: 3000.0,
+            kept_peak_count: 1,
+            peaks: vec![SamplePeakPreview {
+                time: 100,
+                intensity: 3000.0,
+                basepair: 140.0,
+            }],
+        }];
+        let preview =
+            build_clonality_preview("26OUM04817_IGK_270326_B05_H9H1DI2F.fsa", "DATA1", &groups);
+        assert!(!preview.ranked_assays.is_empty());
+        assert_eq!(preview.ranked_assays[0].assay_name, "IGK");
+        assert!(preview.ranked_assays[0].matched_by_filename);
     }
 }
