@@ -10,6 +10,7 @@ build = "build.rs"
 anyhow.workspace = true
 camino.workspace = true
 open.workspace = true
+rfd = "0.15"
 slint.workspace = true
 uuid.workspace = true
 

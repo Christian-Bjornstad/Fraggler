@@ -7,10 +7,15 @@ export component MainWindow inherits Window {
     in-out property <string> input_path: "";
     in-out property <string> output_path: "";
     in-out property <string> last_artifact_path: "";
+    in-out property <string> last_run_summary: "No runs yet.";
+    in-out property <string> active_hint: "Clonality: use .fsa from IGK/KDE/TCRg-style workflows.";
 
     callback show_contract();
     callback select_analysis(string);
     callback run_analysis();
+    callback browse_input();
+    callback browse_output();
+    callback clear_log();
     callback open_output();
     callback open_last_artifact();
     callback open_docs();
@@ -77,20 +82,53 @@ export component MainWindow inherits Window {
                     }
                 }
 
+                Rectangle {
+                    background: #eef2ff;
+                    border-width: 1px;
+                    border-color: #c7d2fe;
+                    border-radius: 8px;
+                    height: 42px;
+                    Text {
+                        x: 10px;
+                        y: 11px;
+                        text: root.active_hint;
+                        wrap: word-wrap;
+                        width: parent.width - 20px;
+                    }
+                }
+
                 Text {
                     text: "Input .fsa file";
                 }
 
-                LineEdit {
-                    text <=> root.input_path;
+                HorizontalBox {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.input_path;
+                    }
+
+                    Button {
+                        text: "Browse";
+                        clicked => { root.browse_input(); }
+                    }
                 }
 
                 Text {
                     text: "Output directory";
                 }
 
-                LineEdit {
-                    text <=> root.output_path;
+                HorizontalBox {
+                    spacing: 8px;
+
+                    LineEdit {
+                        text <=> root.output_path;
+                    }
+
+                    Button {
+                        text: "Browse";
+                        clicked => { root.browse_output(); }
+                    }
                 }
             }
         }
@@ -122,6 +160,11 @@ export component MainWindow inherits Window {
                 text: "Open Artifact";
                 clicked => { root.open_last_artifact(); }
             }
+
+            Button {
+                text: "Clear Log";
+                clicked => { root.clear_log(); }
+            }
         }
 
         Rectangle {
@@ -133,6 +176,20 @@ export component MainWindow inherits Window {
                 x: 12px;
                 y: 14px;
                 text: root.status_text;
+                wrap: word-wrap;
+                width: parent.width - 24px;
+            }
+        }
+
+        Rectangle {
+            background: #ecfeff;
+            border-width: 1px;
+            border-color: #a5f3fc;
+            height: 44px;
+            Text {
+                x: 12px;
+                y: 12px;
+                text: "Last run: " + root.last_run_summary;
                 wrap: word-wrap;
                 width: parent.width - 24px;
             }

@@ -28,6 +28,7 @@ Implemented in Rust so far:
 - Willros-style monotone spline ladder sizing as the primary Rust sizing strategy, with polynomial fallback
 - multi-file `analyze` request handling in the core engine
 - desktop shell fields for analysis, input path, output path, and live Rust engine log/status updates
+- desktop shell browse buttons for input/output selection, run summary, clear-log action, and direct open-output/open-artifact actions
 - persisted analyze artifacts (`analyze_summary.json`, `primitive_result_preview.json`) with desktop open-output/open-artifact actions
 
 Current limitation:

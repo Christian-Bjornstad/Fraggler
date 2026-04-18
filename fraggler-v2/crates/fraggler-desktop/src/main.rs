@@ -25,6 +25,8 @@ fn main() -> Result<()> {
         default_output.to_string_lossy().to_string(),
     ));
     app.set_last_artifact_path(SharedString::from(""));
+    app.set_last_run_summary(SharedString::from("No runs yet."));
+    app.set_active_hint(SharedString::from(analysis_hint("clonality")));
 
     {
         let weak = app.as_weak();
@@ -45,9 +47,41 @@ fn main() -> Result<()> {
         app.on_select_analysis(move |analysis| {
             if let Some(app) = weak.upgrade() {
                 app.set_analysis_kind(analysis.clone());
+                app.set_active_hint(SharedString::from(analysis_hint(&analysis)));
             }
             append_log(&weak, &format!("[desktop] analysis set to {analysis}"));
             set_status(&weak, &format!("Selected analysis: {analysis}"));
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        app.on_browse_input(move || {
+            if let Some(path) = rfd::FileDialog::new()
+                .add_filter("FSA/ABI", &["fsa", "FSA", "abi", "ABI"])
+                .pick_file()
+            {
+                set_input_path(&weak, &path.to_string_lossy());
+                append_log(
+                    &weak,
+                    &format!("[desktop] selected input {}", path.display()),
+                );
+                set_status(&weak, "Input file selected.");
+            }
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        app.on_browse_output(move || {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                set_output_path(&weak, &path.to_string_lossy());
+                append_log(
+                    &weak,
+                    &format!("[desktop] selected output {}", path.display()),
+                );
+                set_status(&weak, "Output directory selected.");
+            }
         });
     }
 
@@ -102,6 +136,10 @@ fn main() -> Result<()> {
                 &format!("Running Rust analysis for {}", file_name(&input_path)),
             );
             set_last_artifact_path(&weak, "");
+            set_last_run_summary(
+                &weak,
+                &format!("Running {} on {}", analysis_kind, file_name(&input_path)),
+            );
             append_log(
                 &weak,
                 &format!(
@@ -126,13 +164,38 @@ fn main() -> Result<()> {
                             &weak_for_thread,
                             &format!("Rust analysis finished with status {:?}", summary.status),
                         );
+                        set_last_run_summary(
+                            &weak_for_thread,
+                            &format!(
+                                "{} | {} | {} artifacts",
+                                file_name(&input_path),
+                                format!("{:?}", summary.status).to_lowercase(),
+                                summary.artifact_manifest.len()
+                            ),
+                        );
                     }
                     Err(err) => {
                         append_log(&weak_for_thread, &format!("[error] {err}"));
                         set_status(&weak_for_thread, &format!("Run failed: {err}"));
+                        set_last_run_summary(
+                            &weak_for_thread,
+                            &format!("{} | failed | {}", file_name(&input_path), err),
+                        );
                     }
                 }
             });
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        app.on_clear_log(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_log_text(SharedString::from(
+                    "Rust + Slint desktop shell connected to fraggler-core.\n",
+                ));
+                set_status(&weak, "Log cleared.");
+            }
         });
     }
 
@@ -294,11 +357,49 @@ fn set_last_artifact_path(weak: &Weak<MainWindow>, path: &str) {
     });
 }
 
+fn set_last_run_summary(weak: &Weak<MainWindow>, summary: &str) {
+    let weak = weak.clone();
+    let summary = summary.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_last_run_summary(SharedString::from(summary));
+        }
+    });
+}
+
+fn set_input_path(weak: &Weak<MainWindow>, path: &str) {
+    let weak = weak.clone();
+    let path = path.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_input_path(SharedString::from(path));
+        }
+    });
+}
+
+fn set_output_path(weak: &Weak<MainWindow>, path: &str) {
+    let weak = weak.clone();
+    let path = path.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_output_path(SharedString::from(path));
+        }
+    });
+}
+
 fn parse_analysis_kind(value: &str) -> AnalysisKind {
     match value.to_ascii_lowercase().as_str() {
         "flt3" => AnalysisKind::Flt3,
         "general" => AnalysisKind::General,
         _ => AnalysisKind::Clonality,
+    }
+}
+
+fn analysis_hint(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "flt3" => "FLT3: use FLT3-ITD / D835 / NPM1-labelled .fsa files when available.",
+        "general" => "General: useful for smoke tests and neutral signal exploration.",
+        _ => "Clonality: use .fsa from IGK / KDE / TCRg-style workflows.",
     }
 }
 
