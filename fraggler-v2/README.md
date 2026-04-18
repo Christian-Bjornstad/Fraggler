@@ -19,6 +19,7 @@ Implemented in Rust so far:
 - first-pass ladder candidate generation and curvature scoring
 - first-pass sizing-model fit and ladder QC metrics for the best candidate
 - conservative local refinement around the best ladder candidate when QC suggests it
+- sample-trace to basepair mapping preview from the fitted sizing model
 - multi-file `analyze` request handling in the core engine
 
 Current limitation:

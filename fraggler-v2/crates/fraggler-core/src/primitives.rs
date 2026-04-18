@@ -37,6 +37,7 @@ pub struct SizingModelPreview {
     pub coefficients: Vec<f64>,
     pub predicted_ladder_basepairs: Vec<f64>,
     pub qc_metrics: LadderQcMetrics,
+    pub sample_mapping: Option<SampleMappingPreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -46,6 +47,22 @@ pub struct RefinementPreview {
     pub refined_scan_indices: Vec<usize>,
     pub refined_curvature_score: f64,
     pub refined_quadratic_r2: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SampleMappingPreview {
+    pub points_retained: usize,
+    pub min_basepair: f64,
+    pub max_basepair: f64,
+    pub monotonic_unique: bool,
+    pub preview: Vec<SampleMappingPoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SampleMappingPoint {
+    pub time: usize,
+    pub intensity: f64,
+    pub basepair: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -107,6 +124,12 @@ pub fn analyze_fsa_primitives(
                 "size-standard channel {size_standard_channel} is missing numeric data"
             ),
         })?;
+    let sample_trace =
+        record
+            .channel_values(&sample_channel)
+            .ok_or_else(|| EngineError::PrimitiveAnalysis {
+                message: format!("sample channel {sample_channel} is missing numeric data"),
+            })?;
     let corrected = baseline_correct_nonnegative(&size_standard_trace, 0.01, 100.0, 50)?;
     let ladder_peaks = select_ladder_peaks(
         &size_standard_trace,
@@ -117,7 +140,7 @@ pub fn analyze_fsa_primitives(
     );
     let file_name = record.file_name.clone();
     let dye_names = dye_names(&record);
-    let ladder_fit_preview = build_ladder_fit_preview(&ladder_peaks, ladder);
+    let ladder_fit_preview = build_ladder_fit_preview(&ladder_peaks, &sample_trace, ladder);
 
     Ok(PrimitiveAnalysisResult {
         file_name,
@@ -304,7 +327,11 @@ fn top_peak_candidates(
     peaks
 }
 
-fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option<LadderFitPreview> {
+fn build_ladder_fit_preview(
+    ladder_peaks: &[Peak],
+    sample_trace: &[f64],
+    ladder: LadderKind,
+) -> Option<LadderFitPreview> {
     let target_len = ladder.expected_peak_count();
     if ladder_peaks.len() < 2 || target_len < 2 {
         return None;
@@ -363,7 +390,7 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
     let mut best = select_best_combination(&combinations, ladder_sizes);
     let mut sizing_model = best
         .as_ref()
-        .and_then(|entry| fit_best_sizing_model(&entry.indices, ladder_sizes));
+        .and_then(|entry| fit_best_sizing_model(&entry.indices, ladder_sizes, sample_trace));
     let mut refinement = None;
 
     if let (Some(best_entry), Some(model)) = (best.as_ref(), sizing_model.as_ref()) {
@@ -384,7 +411,8 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
                 curvature_score: refined_curvature,
                 quadratic_r2: refined_qr2,
             });
-            sizing_model = fit_best_sizing_model(&refined.refined_scan_indices, ladder_sizes);
+            sizing_model =
+                fit_best_sizing_model(&refined.refined_scan_indices, ladder_sizes, sample_trace);
             refinement = Some(RefinementPreview {
                 changed_step_indices: refined.changed_step_indices,
                 original_scan_indices: refined.original_scan_indices,
@@ -627,7 +655,11 @@ fn curvature_score(ladder_sizes: &[f64], scans: &[usize]) -> f64 {
         .fold(0.0_f64, f64::max)
 }
 
-fn fit_best_sizing_model(scans: &[usize], ladder_sizes: &[f64]) -> Option<SizingModelPreview> {
+fn fit_best_sizing_model(
+    scans: &[usize],
+    ladder_sizes: &[f64],
+    sample_trace: &[f64],
+) -> Option<SizingModelPreview> {
     if scans.len() != ladder_sizes.len() || scans.len() < 2 {
         return None;
     }
@@ -644,11 +676,13 @@ fn fit_best_sizing_model(scans: &[usize], ladder_sizes: &[f64]) -> Option<Sizing
             .collect::<Vec<_>>();
         let qc_metrics = compute_ladder_qc_metrics(ladder_sizes, &predicted);
         if qc_metrics.monotonic_on_ladder {
+            let sample_mapping = build_sample_mapping_preview(sample_trace, &coefficients);
             return Some(SizingModelPreview {
                 degree,
                 coefficients,
                 predicted_ladder_basepairs: predicted,
                 qc_metrics,
+                sample_mapping,
             });
         }
     }
@@ -774,6 +808,66 @@ fn compute_ladder_qc_metrics(expected: &[f64], predicted: &[f64]) -> LadderQcMet
     }
 }
 
+fn build_sample_mapping_preview(
+    sample_trace: &[f64],
+    coefficients: &[f64],
+) -> Option<SampleMappingPreview> {
+    if sample_trace.is_empty() {
+        return None;
+    }
+
+    let mut mapped = Vec::with_capacity(sample_trace.len());
+    for (time, intensity) in sample_trace.iter().enumerate() {
+        let basepair = eval_polynomial(coefficients, time as f64);
+        if !basepair.is_finite() || basepair < 0.0 {
+            continue;
+        }
+        mapped.push(SampleMappingPoint {
+            time,
+            intensity: *intensity,
+            basepair: round2(basepair),
+        });
+    }
+
+    if mapped.is_empty() {
+        return None;
+    }
+
+    let monotonic_unique = mapped
+        .windows(2)
+        .all(|window| window[1].basepair > window[0].basepair);
+    let preview = sample_mapping_preview_points(&mapped);
+    let min_basepair = mapped.first().map(|point| point.basepair).unwrap_or(0.0);
+    let max_basepair = mapped.last().map(|point| point.basepair).unwrap_or(0.0);
+
+    Some(SampleMappingPreview {
+        points_retained: mapped.len(),
+        min_basepair,
+        max_basepair,
+        monotonic_unique,
+        preview,
+    })
+}
+
+fn sample_mapping_preview_points(mapped: &[SampleMappingPoint]) -> Vec<SampleMappingPoint> {
+    if mapped.len() <= 12 {
+        return mapped.to_vec();
+    }
+
+    let mut preview = Vec::with_capacity(12);
+    preview.extend_from_slice(&mapped[..4]);
+    let mid = mapped.len() / 2;
+    let middle_start = mid.saturating_sub(2);
+    let middle_end = (middle_start + 4).min(mapped.len());
+    preview.extend_from_slice(&mapped[middle_start..middle_end]);
+    preview.extend_from_slice(&mapped[mapped.len().saturating_sub(4)..]);
+    preview
+}
+
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct RefinementCandidate {
     changed_step_indices: Vec<usize>,
@@ -887,7 +981,7 @@ fn try_refinement_combinations(
         if !trial_scans.windows(2).all(|window| window[1] > window[0]) {
             return;
         }
-        let Some(model) = fit_best_sizing_model(trial_scans, ladder_sizes) else {
+        let Some(model) = fit_best_sizing_model(trial_scans, ladder_sizes, &[]) else {
             return;
         };
         let score = model_score(&model.qc_metrics);
@@ -995,10 +1089,10 @@ fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        SizingModelPreview, compute_ladder_qc_metrics, curvature_score,
-        estimate_combination_count_capped, eval_polynomial, fit_polynomial_least_squares,
-        generate_peak_combinations, quadratic_fit_r2, refine_best_combination,
-        select_best_combination, select_ladder_peaks,
+        SizingModelPreview, build_sample_mapping_preview, compute_ladder_qc_metrics,
+        curvature_score, estimate_combination_count_capped, eval_polynomial,
+        fit_polynomial_least_squares, generate_peak_combinations, quadratic_fit_r2,
+        refine_best_combination, select_best_combination, select_ladder_peaks,
     };
 
     #[test]
@@ -1072,6 +1166,7 @@ mod tests {
             .expect("fit should work"),
             predicted_ladder_basepairs: scans.iter().map(|value| *value as f64).collect::<Vec<_>>(),
             qc_metrics: compute_ladder_qc_metrics(&ladder_sizes, &[35.0, 50.0, 80.0, 101.5]),
+            sample_mapping: None,
         };
         let peak_pool = vec![100, 200, 300, 320, 405];
         let refined = refine_best_combination(&peak_pool, &scans, &ladder_sizes, &model)
@@ -1080,5 +1175,16 @@ mod tests {
         assert!(
             refined.sizing_model.qc_metrics.max_abs_error_bp < model.qc_metrics.max_abs_error_bp
         );
+    }
+
+    #[test]
+    fn sample_mapping_preview_filters_negative_basepairs_and_stays_monotonic() {
+        let trace = vec![10.0, 20.0, 30.0, 40.0, 50.0];
+        let coeffs = vec![-1.0, 2.0];
+        let preview = build_sample_mapping_preview(&trace, &coeffs)
+            .expect("sample mapping preview should be created");
+        assert_eq!(preview.points_retained, 4);
+        assert_eq!(preview.min_basepair, 1.0);
+        assert!(preview.monotonic_unique);
     }
 }
