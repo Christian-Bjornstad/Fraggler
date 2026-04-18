@@ -24,6 +24,7 @@ fn main() -> Result<()> {
     app.set_output_path(SharedString::from(
         default_output.to_string_lossy().to_string(),
     ));
+    app.set_last_artifact_path(SharedString::from(""));
 
     {
         let weak = app.as_weak();
@@ -100,6 +101,7 @@ fn main() -> Result<()> {
                 &weak,
                 &format!("Running Rust analysis for {}", file_name(&input_path)),
             );
+            set_last_artifact_path(&weak, "");
             append_log(
                 &weak,
                 &format!(
@@ -134,6 +136,36 @@ fn main() -> Result<()> {
         });
     }
 
+    {
+        let weak = app.as_weak();
+        app.on_open_output(move || {
+            if let Some(app) = weak.upgrade() {
+                let path = app.get_output_path().to_string();
+                if let Err(err) = open::that(&path) {
+                    append_log(&weak, &format!("[error] failed to open output path: {err}"));
+                    set_status(&weak, &format!("Failed to open output path: {err}"));
+                }
+            }
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        app.on_open_last_artifact(move || {
+            if let Some(app) = weak.upgrade() {
+                let path = app.get_last_artifact_path().to_string();
+                if path.trim().is_empty() {
+                    set_status(&weak, "No artifact has been produced yet.");
+                    return;
+                }
+                if let Err(err) = open::that(&path) {
+                    append_log(&weak, &format!("[error] failed to open artifact: {err}"));
+                    set_status(&weak, &format!("Failed to open artifact: {err}"));
+                }
+            }
+        });
+    }
+
     app.on_open_docs(move || {
         if let Err(err) = open::that(&readme_path) {
             eprintln!("failed to open docs: {err}");
@@ -159,6 +191,9 @@ impl EventSink for DesktopEventSink {
         let (status, line) = summarize_engine_message(&message);
         if let Some(status) = status {
             set_status(&self.weak, &status);
+        }
+        if let EnginePayload::Artifact(artifact) = &message.payload {
+            set_last_artifact_path(&self.weak, artifact.path.as_str());
         }
         append_log(&self.weak, &line);
         Ok(())
@@ -245,6 +280,16 @@ fn set_status(weak: &Weak<MainWindow>, status: &str) {
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
             app.set_status_text(SharedString::from(status));
+        }
+    });
+}
+
+fn set_last_artifact_path(weak: &Weak<MainWindow>, path: &str) {
+    let weak = weak.clone();
+    let path = path.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = weak.upgrade() {
+            app.set_last_artifact_path(SharedString::from(path));
         }
     });
 }

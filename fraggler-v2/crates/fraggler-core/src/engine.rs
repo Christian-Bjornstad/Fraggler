@@ -1,13 +1,14 @@
 use std::collections::BTreeMap;
+use std::fs;
 
 use camino::Utf8PathBuf;
 use thiserror::Error;
 
 use crate::contract::{
-    EngineMessage, EnginePayload, ProgressEvent, RunKind, RunRequest, RunStatus, RunSummary,
-    WarningEvent, WarningSeverity,
+    EngineMessage, EnginePayload, ProgressEvent, ReportArtifact, RunKind, RunRequest, RunStatus,
+    RunSummary, WarningEvent, WarningSeverity,
 };
-use crate::primitives::analyze_fsa_primitives;
+use crate::primitives::{PrimitiveAnalysisResult, analyze_fsa_primitives};
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -97,6 +98,7 @@ fn run_analyze_primitives<S: EventSink>(
         let primitive_result = analyze_fsa_primitives(input_path, request.analysis_kind.as_ref())?;
         primitive_results.push(primitive_result);
     }
+    let artifact_manifest = persist_analyze_artifacts(request, &primitive_results, sink)?;
     sink.emit(EngineMessage::new(
         request.correlation_id,
         EnginePayload::Warning(WarningEvent {
@@ -135,7 +137,7 @@ fn run_analyze_primitives<S: EventSink>(
     let summary = RunSummary {
         status: RunStatus::Succeeded,
         timings_ms: BTreeMap::from([("bootstrap".to_owned(), 0_u64)]),
-        artifact_manifest: Vec::new(),
+        artifact_manifest,
         details,
     };
 
@@ -144,6 +146,73 @@ fn run_analyze_primitives<S: EventSink>(
         EnginePayload::Summary(summary.clone()),
     ))?;
     Ok(summary)
+}
+
+fn persist_analyze_artifacts<S: EventSink>(
+    request: &RunRequest,
+    primitive_results: &[PrimitiveAnalysisResult],
+    sink: &mut S,
+) -> EngineResult<Vec<ReportArtifact>> {
+    fs::create_dir_all(request.output.root_dir.as_std_path()).map_err(|source| {
+        EngineError::Io {
+            path: request.output.root_dir.clone(),
+            context: "create output directory",
+            source,
+        }
+    })?;
+
+    let mut artifacts = Vec::new();
+
+    let summary_path = request.output.root_dir.join("analyze_summary.json");
+    let summary_json = serde_json::to_vec_pretty(primitive_results).map_err(|err| {
+        EngineError::PrimitiveAnalysis {
+            message: format!("failed to serialize analyze summary artifact: {err}"),
+        }
+    })?;
+    fs::write(summary_path.as_std_path(), &summary_json).map_err(|source| EngineError::Io {
+        path: summary_path.clone(),
+        context: "write analyze summary artifact",
+        source,
+    })?;
+    let summary_artifact = ReportArtifact {
+        path: summary_path,
+        kind: "analyze_summary_json".to_owned(),
+        size_bytes: Some(summary_json.len() as u64),
+    };
+    sink.emit(EngineMessage::new(
+        request.correlation_id,
+        EnginePayload::Artifact(summary_artifact.clone()),
+    ))?;
+    artifacts.push(summary_artifact);
+
+    if let Some(first_result) = primitive_results.first() {
+        let preview_path = request
+            .output
+            .root_dir
+            .join("primitive_result_preview.json");
+        let preview_json = serde_json::to_vec_pretty(first_result).map_err(|err| {
+            EngineError::PrimitiveAnalysis {
+                message: format!("failed to serialize primitive preview artifact: {err}"),
+            }
+        })?;
+        fs::write(preview_path.as_std_path(), &preview_json).map_err(|source| EngineError::Io {
+            path: preview_path.clone(),
+            context: "write primitive preview artifact",
+            source,
+        })?;
+        let preview_artifact = ReportArtifact {
+            path: preview_path,
+            kind: "primitive_result_preview_json".to_owned(),
+            size_bytes: Some(preview_json.len() as u64),
+        };
+        sink.emit(EngineMessage::new(
+            request.correlation_id,
+            EnginePayload::Artifact(preview_artifact.clone()),
+        ))?;
+        artifacts.push(preview_artifact);
+    }
+
+    Ok(artifacts)
 }
 
 fn run_not_implemented<S: EventSink>(

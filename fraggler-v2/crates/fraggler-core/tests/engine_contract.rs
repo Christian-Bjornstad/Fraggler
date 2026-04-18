@@ -3,6 +3,8 @@ use fraggler_core::{
     AnalysisKind, ContractVersion, EngineMessage, EnginePayload, EventSink, InputSpec, OutputSpec,
     RunKind, RunOptions, RunRequest, RunStatus, run_request,
 };
+use std::fs;
+use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Default)]
@@ -110,4 +112,50 @@ fn analyze_request_emits_bootstrap_before_io_failure() {
         sink.messages[2].payload,
         EnginePayload::Progress(_)
     ));
+}
+
+#[test]
+fn analyze_request_writes_artifact_files_when_real_input_exists() {
+    let real_input = Path::new(
+        "/Volumes/T7 Shield/DATA/2026/2026_03_27_TCRg_IGK_KDE_CFB_H9H1DI2F_2026-03-27_0652/26OUM04817_IGK_270326_B05_H9H1DI2F.fsa",
+    );
+    if !real_input.exists() {
+        return;
+    }
+
+    let temp_root =
+        std::env::temp_dir().join(format!("fraggler_v2_artifact_test_{}", Uuid::new_v4()));
+    let mut request = sample_request();
+    request.inputs.paths = vec![Utf8PathBuf::from(real_input.to_string_lossy().to_string())];
+    request.output.root_dir = Utf8PathBuf::from(temp_root.to_string_lossy().to_string());
+
+    let mut sink = CollectingSink::default();
+    let summary =
+        run_request(&request, &mut sink).expect("analyze request should succeed for real input");
+    assert_eq!(summary.status, RunStatus::Succeeded);
+    assert!(!summary.artifact_manifest.is_empty());
+
+    let artifact_paths = summary
+        .artifact_manifest
+        .iter()
+        .map(|artifact| artifact.path.as_str().to_owned())
+        .collect::<Vec<_>>();
+    assert!(
+        artifact_paths
+            .iter()
+            .any(|path| path.ends_with("analyze_summary.json"))
+    );
+    assert!(
+        artifact_paths
+            .iter()
+            .any(|path| path.ends_with("primitive_result_preview.json"))
+    );
+    for path in artifact_paths {
+        assert!(
+            Path::new(&path).exists(),
+            "expected artifact file {path} to exist"
+        );
+    }
+
+    let _ = fs::remove_dir_all(temp_root);
 }

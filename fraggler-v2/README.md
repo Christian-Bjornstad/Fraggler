@@ -24,9 +24,11 @@ Implemented in Rust so far:
 - sample-peak preview in basepair space from the mapped sample trace
 - assay-agnostic sample peak grouping preview in basepair space
 - first-pass clonality assay matching using filename, channel compatibility, bp overlap, and group-level dominance signals
+- first-pass FLT3 assay preview using filename-aware assay detection, preferred channel selection, and WT/mutant peak preview
 - Willros-style monotone spline ladder sizing as the primary Rust sizing strategy, with polynomial fallback
 - multi-file `analyze` request handling in the core engine
 - desktop shell fields for analysis, input path, output path, and live Rust engine log/status updates
+- persisted analyze artifacts (`analyze_summary.json`, `primitive_result_preview.json`) with desktop open-output/open-artifact actions
 
 Current limitation:
 - the engine does not yet reproduce the full Python ladder-fit/refinement/rescue workflow

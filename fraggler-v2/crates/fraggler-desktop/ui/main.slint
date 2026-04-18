@@ -6,10 +6,13 @@ export component MainWindow inherits Window {
     in-out property <string> analysis_kind: "clonality";
     in-out property <string> input_path: "";
     in-out property <string> output_path: "";
+    in-out property <string> last_artifact_path: "";
 
     callback show_contract();
     callback select_analysis(string);
     callback run_analysis();
+    callback open_output();
+    callback open_last_artifact();
     callback open_docs();
 
     title: "Fraggler v2";
@@ -109,6 +112,16 @@ export component MainWindow inherits Window {
                 text: "Open Docs";
                 clicked => { root.open_docs(); }
             }
+
+            Button {
+                text: "Open Output";
+                clicked => { root.open_output(); }
+            }
+
+            Button {
+                text: "Open Artifact";
+                clicked => { root.open_last_artifact(); }
+            }
         }
 
         Rectangle {
@@ -120,6 +133,20 @@ export component MainWindow inherits Window {
                 x: 12px;
                 y: 14px;
                 text: root.status_text;
+                wrap: word-wrap;
+                width: parent.width - 24px;
+            }
+        }
+
+        Rectangle {
+            background: #eef2ff;
+            border-width: 1px;
+            border-color: #c7d2fe;
+            height: 44px;
+            Text {
+                x: 12px;
+                y: 12px;
+                text: "Last artifact: " + root.last_artifact_path;
                 wrap: word-wrap;
                 width: parent.width - 24px;
             }

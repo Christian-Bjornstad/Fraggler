@@ -115,6 +115,7 @@ pub struct PrimitiveAnalysisResult {
     pub ladder_peak_preview: Vec<Peak>,
     pub ladder_fit_preview: Option<LadderFitPreview>,
     pub clonality_preview: Option<ClonalityPreview>,
+    pub flt3_preview: Option<Flt3Preview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -147,6 +148,33 @@ pub struct ClonalityGroupMatch {
     pub clonal_candidate: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Flt3Preview {
+    pub assay_name: String,
+    pub matched_by_filename: bool,
+    pub compatible_channel: bool,
+    pub assay_bp_min: f64,
+    pub assay_bp_max: f64,
+    pub wt_peak: Option<SamplePeakPreview>,
+    pub mutant_peaks: Vec<SamplePeakPreview>,
+    pub strongest_mutant_ratio: Option<f64>,
+    pub positive_call: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct Flt3AssayDef {
+    name: &'static str,
+    channels: &'static [&'static str],
+    bp_min: f64,
+    bp_max: f64,
+    wt_bp: f64,
+    wt_tolerance_bp: f64,
+    mutant_bp_min: f64,
+    mutant_bp_max: f64,
+    positive_ratio: f64,
+    aliases: &'static [&'static str],
+}
+
 pub fn analyze_fsa_primitives(
     path: &Utf8Path,
     analysis_kind: Option<&AnalysisKind>,
@@ -159,11 +187,20 @@ pub fn analyze_fsa_primitives(
                 message: "no usable size-standard channel was found in the ABIF record".to_owned(),
             }
         })?;
-    let sample_channel = data_channels
-        .iter()
-        .find(|channel| channel.as_str() != size_standard_channel)
-        .cloned()
-        .unwrap_or_else(|| size_standard_channel.clone());
+    let file_name = record.file_name.clone();
+    let sample_channel = preferred_sample_channel(
+        &data_channels,
+        &size_standard_channel,
+        &file_name,
+        analysis_kind,
+    )
+    .unwrap_or_else(|| {
+        data_channels
+            .iter()
+            .find(|channel| channel.as_str() != size_standard_channel)
+            .cloned()
+            .unwrap_or_else(|| size_standard_channel.clone())
+    });
 
     let ladder = suggested_ladder_kind(&record, &size_standard_channel, analysis_kind);
     let min_height = match ladder {
@@ -198,7 +235,6 @@ pub fn analyze_fsa_primitives(
         min_distance,
         ladder.expected_peak_count() + 15,
     );
-    let file_name = record.file_name.clone();
     let dye_names = dye_names(&record);
     let ladder_fit_preview = build_ladder_fit_preview(&ladder_peaks, &sample_trace, ladder);
     let clonality_preview = if matches!(analysis_kind, Some(AnalysisKind::Clonality)) {
@@ -218,6 +254,19 @@ pub fn analyze_fsa_primitives(
     } else {
         None
     };
+    let flt3_preview = if matches!(analysis_kind, Some(AnalysisKind::Flt3)) {
+        ladder_fit_preview.as_ref().and_then(|preview| {
+            preview
+                .sizing_model
+                .as_ref()
+                .and_then(|model| model.sample_mapping.as_ref())
+                .map(|mapping| {
+                    build_flt3_preview(&file_name, &sample_channel, &mapping.sample_peak_preview)
+                })
+        })
+    } else {
+        None
+    };
 
     Ok(PrimitiveAnalysisResult {
         file_name,
@@ -231,6 +280,7 @@ pub fn analyze_fsa_primitives(
         ladder_peak_preview: ladder_peaks.into_iter().take(8).collect(),
         ladder_fit_preview,
         clonality_preview,
+        flt3_preview,
     })
 }
 
@@ -368,6 +418,34 @@ fn suggested_ladder_kind(
         _ if record.tags.contains_key("DATA105") => LadderKind::Liz500250,
         _ => LadderKind::Rox400Hd,
     }
+}
+
+fn preferred_sample_channel(
+    data_channels: &[String],
+    size_standard_channel: &str,
+    file_name: &str,
+    analysis_kind: Option<&AnalysisKind>,
+) -> Option<String> {
+    if matches!(analysis_kind, Some(AnalysisKind::Flt3)) {
+        if let Some(assay) = detect_flt3_assay(file_name) {
+            return assay
+                .channels
+                .iter()
+                .find_map(|channel| {
+                    data_channels
+                        .iter()
+                        .find(|candidate| candidate.as_str() == *channel)
+                        .cloned()
+                })
+                .or_else(|| {
+                    data_channels
+                        .iter()
+                        .find(|channel| channel.as_str() != size_standard_channel)
+                        .cloned()
+                });
+        }
+    }
+    None
 }
 
 fn select_ladder_peaks(
@@ -1305,6 +1383,45 @@ const CLONALITY_ASSAYS: &[ClonalityAssayDef] = &[
     },
 ];
 
+const FLT3_ASSAYS: &[Flt3AssayDef] = &[
+    Flt3AssayDef {
+        name: "FLT3-ITD",
+        channels: &["DATA1", "DATA2"],
+        bp_min: 50.0,
+        bp_max: 1000.0,
+        wt_bp: 330.0,
+        wt_tolerance_bp: 8.0,
+        mutant_bp_min: 335.0,
+        mutant_bp_max: 1000.0,
+        positive_ratio: 0.02,
+        aliases: &["FLT3ITD", "ITD", "ITDR", "RATIO"],
+    },
+    Flt3AssayDef {
+        name: "FLT3-D835",
+        channels: &["DATA3"],
+        bp_min: 50.0,
+        bp_max: 250.0,
+        wt_bp: 80.0,
+        wt_tolerance_bp: 4.0,
+        mutant_bp_min: 121.0,
+        mutant_bp_max: 130.5,
+        positive_ratio: 0.05,
+        aliases: &["FLT3D835", "D835", "TKD", "KUTTING"],
+    },
+    Flt3AssayDef {
+        name: "NPM1",
+        channels: &["DATA3"],
+        bp_min: 50.0,
+        bp_max: 1000.0,
+        wt_bp: 300.0,
+        wt_tolerance_bp: 3.0,
+        mutant_bp_min: 303.0,
+        mutant_bp_max: 305.0,
+        positive_ratio: 0.01,
+        aliases: &["NPM1", "NPM"],
+    },
+];
+
 fn build_clonality_preview(
     file_name: &str,
     sample_channel: &str,
@@ -1396,6 +1513,90 @@ fn build_clonality_preview(
     ClonalityPreview {
         sample_channel: sample_channel.to_owned(),
         ranked_assays,
+    }
+}
+
+fn detect_flt3_assay(file_name: &str) -> Option<&'static Flt3AssayDef> {
+    let token = normalize_assay_token(file_name);
+    FLT3_ASSAYS.iter().find(|assay| {
+        assay
+            .aliases
+            .iter()
+            .any(|alias| token.contains(&normalize_assay_token(alias)))
+    })
+}
+
+fn build_flt3_preview(
+    file_name: &str,
+    sample_channel: &str,
+    sample_peaks: &[SamplePeakPreview],
+) -> Flt3Preview {
+    let assay = detect_flt3_assay(file_name)
+        .copied()
+        .unwrap_or(FLT3_ASSAYS[0]);
+    let compatible_channel = assay.channels.contains(&sample_channel);
+    let matched_by_filename = detect_flt3_assay(file_name)
+        .map(|detected| detected.name == assay.name)
+        .unwrap_or(false);
+
+    let assay_peaks = sample_peaks
+        .iter()
+        .filter(|peak| peak.basepair >= assay.bp_min && peak.basepair <= assay.bp_max)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let wt_peak = assay_peaks
+        .iter()
+        .filter(|peak| (peak.basepair - assay.wt_bp).abs() <= assay.wt_tolerance_bp)
+        .min_by(|left, right| {
+            (left.basepair - assay.wt_bp)
+                .abs()
+                .partial_cmp(&(right.basepair - assay.wt_bp).abs())
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    right
+                        .intensity
+                        .partial_cmp(&left.intensity)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+        })
+        .cloned();
+
+    let mut mutant_peaks = assay_peaks
+        .into_iter()
+        .filter(|peak| peak.basepair >= assay.mutant_bp_min && peak.basepair <= assay.mutant_bp_max)
+        .collect::<Vec<_>>();
+    mutant_peaks.sort_by(|left, right| {
+        right
+            .intensity
+            .partial_cmp(&left.intensity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if mutant_peaks.len() > 3 {
+        mutant_peaks.truncate(3);
+    }
+
+    let strongest_mutant_ratio = wt_peak.as_ref().and_then(|wt| {
+        mutant_peaks
+            .first()
+            .map(|mutant| round2(mutant.intensity / wt.intensity.max(1.0)))
+    });
+    let positive_call = if let Some(ratio) = strongest_mutant_ratio {
+        ratio >= assay.positive_ratio && !mutant_peaks.is_empty()
+    } else {
+        !mutant_peaks.is_empty()
+    };
+
+    Flt3Preview {
+        assay_name: assay.name.to_owned(),
+        matched_by_filename,
+        compatible_channel,
+        assay_bp_min: assay.bp_min,
+        assay_bp_max: assay.bp_max,
+        wt_peak,
+        mutant_peaks,
+        strongest_mutant_ratio,
+        positive_call,
     }
 }
 
@@ -1647,10 +1848,10 @@ fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
 mod tests {
     use super::{
         SamplePeakGroupPreview, SamplePeakPreview, SizingModelPreview, build_assay_group_preview,
-        build_clonality_preview, build_sample_mapping_preview, compute_ladder_qc_metrics,
-        curvature_score, estimate_combination_count_capped, eval_polynomial,
-        fit_polynomial_least_squares, generate_peak_combinations, quadratic_fit_r2,
-        refine_best_combination, select_best_combination, select_ladder_peaks,
+        build_clonality_preview, build_flt3_preview, build_sample_mapping_preview,
+        compute_ladder_qc_metrics, curvature_score, estimate_combination_count_capped,
+        eval_polynomial, fit_polynomial_least_squares, generate_peak_combinations,
+        quadratic_fit_r2, refine_best_combination, select_best_combination, select_ladder_peaks,
     };
 
     #[test]
@@ -1823,5 +2024,38 @@ mod tests {
         assert_eq!(preview.ranked_assays[0].clonal_group_count, 1);
         assert_eq!(preview.ranked_assays[0].best_dominant_ratio, Some(2.2));
         assert!(preview.ranked_assays[0].matched_groups[0].clonal_candidate);
+    }
+
+    #[test]
+    fn flt3_preview_detects_itd_mutant_peaks_from_filename() {
+        let peaks = vec![
+            SamplePeakPreview {
+                time: 100,
+                intensity: 10000.0,
+                basepair: 330.2,
+            },
+            SamplePeakPreview {
+                time: 120,
+                intensity: 850.0,
+                basepair: 351.0,
+            },
+            SamplePeakPreview {
+                time: 140,
+                intensity: 410.0,
+                basepair: 371.2,
+            },
+        ];
+
+        let preview = build_flt3_preview("ivs0000_flt3_itd_p1.fsa", "DATA1", &peaks);
+        assert_eq!(preview.assay_name, "FLT3-ITD");
+        assert!(preview.matched_by_filename);
+        assert!(preview.compatible_channel);
+        assert!(preview.positive_call);
+        assert_eq!(
+            preview.wt_peak.as_ref().map(|peak| peak.basepair),
+            Some(330.2)
+        );
+        assert_eq!(preview.mutant_peaks.len(), 2);
+        assert!(preview.strongest_mutant_ratio.is_some());
     }
 }
