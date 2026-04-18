@@ -21,6 +21,7 @@ Implemented in Rust so far:
 - conservative local refinement around the best ladder candidate when QC suggests it
 - sample-trace to basepair mapping preview from the fitted sizing model
 - sample-peak preview in basepair space from the mapped sample trace
+- assay-agnostic sample peak grouping preview in basepair space
 - multi-file `analyze` request handling in the core engine
 
 Current limitation:

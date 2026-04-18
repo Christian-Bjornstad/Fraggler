@@ -16,6 +16,8 @@ const MAX_REFINEMENT_STEPS: usize = 3;
 const MAX_REFINEMENT_OPTIONS_PER_STEP: usize = 5;
 const MIN_REFINEMENT_TRIGGER_BP: f64 = 0.75;
 const MAX_REFINEMENT_RADIUS_SCANS: f64 = 120.0;
+const SAMPLE_ASSAY_GROUP_DISTANCE_BP: f64 = 15.0;
+const SAMPLE_ASSAY_MIN_RATIO: f64 = 0.33;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LadderFitPreview {
@@ -57,6 +59,7 @@ pub struct SampleMappingPreview {
     pub monotonic_unique: bool,
     pub preview: Vec<SampleMappingPoint>,
     pub sample_peak_preview: Vec<SamplePeakPreview>,
+    pub assay_group_preview: Vec<SamplePeakGroupPreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -71,6 +74,16 @@ pub struct SamplePeakPreview {
     pub time: usize,
     pub intensity: f64,
     pub basepair: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SamplePeakGroupPreview {
+    pub group_id: usize,
+    pub start_basepair: f64,
+    pub end_basepair: f64,
+    pub max_intensity: f64,
+    pub kept_peak_count: usize,
+    pub peaks: Vec<SamplePeakPreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -846,6 +859,7 @@ fn build_sample_mapping_preview(
         .all(|window| window[1].basepair > window[0].basepair);
     let preview = sample_mapping_preview_points(&mapped);
     let sample_peak_preview = build_sample_peak_preview(sample_trace, &mapped);
+    let assay_group_preview = build_assay_group_preview(&sample_peak_preview);
     let min_basepair = mapped.first().map(|point| point.basepair).unwrap_or(0.0);
     let max_basepair = mapped.last().map(|point| point.basepair).unwrap_or(0.0);
 
@@ -856,6 +870,7 @@ fn build_sample_mapping_preview(
         monotonic_unique,
         preview,
         sample_peak_preview,
+        assay_group_preview,
     })
 }
 
@@ -939,6 +954,69 @@ fn estimate_sample_peak_min_height(sample_trace: &[f64]) -> f64 {
     let max_value = positives.last().copied().unwrap_or(median);
     let adaptive_floor = (max_value * 0.05).max(median * 3.0);
     adaptive_floor.max(25.0)
+}
+
+fn build_assay_group_preview(peaks: &[SamplePeakPreview]) -> Vec<SamplePeakGroupPreview> {
+    if peaks.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted = peaks.to_vec();
+    sorted.sort_by(|left, right| {
+        left.basepair
+            .partial_cmp(&right.basepair)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut groups: Vec<Vec<SamplePeakPreview>> = Vec::new();
+    for peak in sorted {
+        let should_start_new = groups
+            .last()
+            .and_then(|group| group.last())
+            .map(|last| peak.basepair - last.basepair > SAMPLE_ASSAY_GROUP_DISTANCE_BP)
+            .unwrap_or(true);
+        if should_start_new {
+            groups.push(vec![peak]);
+        } else if let Some(group) = groups.last_mut() {
+            group.push(peak);
+        }
+    }
+
+    groups
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, group)| {
+            let max_intensity = group
+                .iter()
+                .map(|peak| peak.intensity)
+                .fold(f64::NEG_INFINITY, f64::max);
+            if !max_intensity.is_finite() || max_intensity <= 0.0 {
+                return None;
+            }
+
+            let kept = group
+                .into_iter()
+                .filter(|peak| peak.intensity / max_intensity >= SAMPLE_ASSAY_MIN_RATIO)
+                .collect::<Vec<_>>();
+            if kept.is_empty() {
+                return None;
+            }
+
+            let start_basepair = kept.first().map(|peak| peak.basepair).unwrap_or(0.0);
+            let end_basepair = kept
+                .last()
+                .map(|peak| peak.basepair)
+                .unwrap_or(start_basepair);
+            Some(SamplePeakGroupPreview {
+                group_id: index + 1,
+                start_basepair,
+                end_basepair,
+                max_intensity: round2(max_intensity),
+                kept_peak_count: kept.len(),
+                peaks: kept,
+            })
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1162,10 +1240,11 @@ fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::{
-        SizingModelPreview, build_sample_mapping_preview, compute_ladder_qc_metrics,
-        curvature_score, estimate_combination_count_capped, eval_polynomial,
-        fit_polynomial_least_squares, generate_peak_combinations, quadratic_fit_r2,
-        refine_best_combination, select_best_combination, select_ladder_peaks,
+        SamplePeakPreview, SizingModelPreview, build_assay_group_preview,
+        build_sample_mapping_preview, compute_ladder_qc_metrics, curvature_score,
+        estimate_combination_count_capped, eval_polynomial, fit_polynomial_least_squares,
+        generate_peak_combinations, quadratic_fit_r2, refine_best_combination,
+        select_best_combination, select_ladder_peaks,
     };
 
     #[test]
@@ -1263,12 +1342,44 @@ mod tests {
 
     #[test]
     fn sample_mapping_preview_includes_detected_sample_peaks() {
-        let trace = vec![0.0, 10.0, 200.0, 15.0, 0.0, 5.0, 0.0, 4.0, 0.0, 20.0, 250.0, 10.0, 0.0];
+        let trace = vec![
+            0.0, 10.0, 200.0, 15.0, 0.0, 5.0, 0.0, 4.0, 0.0, 20.0, 250.0, 10.0, 0.0,
+        ];
         let coeffs = vec![0.0, 1.0];
         let preview = build_sample_mapping_preview(&trace, &coeffs)
             .expect("sample mapping preview should be created");
         assert_eq!(preview.sample_peak_preview.len(), 2);
         assert_eq!(preview.sample_peak_preview[0].time, 2);
         assert_eq!(preview.sample_peak_preview[1].time, 10);
+    }
+
+    #[test]
+    fn assay_group_preview_clusters_nearby_peaks_and_filters_weak_ones() {
+        let peaks = vec![
+            SamplePeakPreview {
+                time: 10,
+                intensity: 100.0,
+                basepair: 100.0,
+            },
+            SamplePeakPreview {
+                time: 12,
+                intensity: 20.0,
+                basepair: 104.0,
+            },
+            SamplePeakPreview {
+                time: 20,
+                intensity: 50.0,
+                basepair: 130.0,
+            },
+            SamplePeakPreview {
+                time: 22,
+                intensity: 30.0,
+                basepair: 138.0,
+            },
+        ];
+        let groups = build_assay_group_preview(&peaks);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].kept_peak_count, 1);
+        assert_eq!(groups[1].kept_peak_count, 2);
     }
 }
