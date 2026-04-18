@@ -56,10 +56,18 @@ pub struct SampleMappingPreview {
     pub max_basepair: f64,
     pub monotonic_unique: bool,
     pub preview: Vec<SampleMappingPoint>,
+    pub sample_peak_preview: Vec<SamplePeakPreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SampleMappingPoint {
+    pub time: usize,
+    pub intensity: f64,
+    pub basepair: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SamplePeakPreview {
     pub time: usize,
     pub intensity: f64,
     pub basepair: f64,
@@ -837,6 +845,7 @@ fn build_sample_mapping_preview(
         .windows(2)
         .all(|window| window[1].basepair > window[0].basepair);
     let preview = sample_mapping_preview_points(&mapped);
+    let sample_peak_preview = build_sample_peak_preview(sample_trace, &mapped);
     let min_basepair = mapped.first().map(|point| point.basepair).unwrap_or(0.0);
     let max_basepair = mapped.last().map(|point| point.basepair).unwrap_or(0.0);
 
@@ -846,6 +855,7 @@ fn build_sample_mapping_preview(
         max_basepair,
         monotonic_unique,
         preview,
+        sample_peak_preview,
     })
 }
 
@@ -866,6 +876,69 @@ fn sample_mapping_preview_points(mapped: &[SampleMappingPoint]) -> Vec<SampleMap
 
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
+}
+
+fn build_sample_peak_preview(
+    sample_trace: &[f64],
+    mapped: &[SampleMappingPoint],
+) -> Vec<SamplePeakPreview> {
+    if sample_trace.is_empty() || mapped.is_empty() {
+        return Vec::new();
+    }
+
+    let min_height = estimate_sample_peak_min_height(sample_trace);
+    let peaks = find_peaks(sample_trace, min_height, 8);
+    let mut preview = peaks
+        .into_iter()
+        .filter_map(|peak| {
+            mapped
+                .binary_search_by_key(&peak.index, |point| point.time)
+                .ok()
+                .and_then(|mapped_index| mapped.get(mapped_index))
+                .map(|point| SamplePeakPreview {
+                    time: peak.index,
+                    intensity: round2(peak.height),
+                    basepair: point.basepair,
+                })
+        })
+        .collect::<Vec<_>>();
+
+    preview.sort_by(|left, right| {
+        right
+            .intensity
+            .partial_cmp(&left.intensity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| {
+                left.basepair
+                    .partial_cmp(&right.basepair)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+    });
+    if preview.len() > 12 {
+        preview.truncate(12);
+    }
+    preview.sort_by(|left, right| {
+        left.basepair
+            .partial_cmp(&right.basepair)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    preview
+}
+
+fn estimate_sample_peak_min_height(sample_trace: &[f64]) -> f64 {
+    let mut positives = sample_trace
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0)
+        .collect::<Vec<_>>();
+    if positives.is_empty() {
+        return 1.0;
+    }
+    positives.sort_by(|left, right| left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal));
+    let median = positives[positives.len() / 2];
+    let max_value = positives.last().copied().unwrap_or(median);
+    let adaptive_floor = (max_value * 0.05).max(median * 3.0);
+    adaptive_floor.max(25.0)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1186,5 +1259,16 @@ mod tests {
         assert_eq!(preview.points_retained, 4);
         assert_eq!(preview.min_basepair, 1.0);
         assert!(preview.monotonic_unique);
+    }
+
+    #[test]
+    fn sample_mapping_preview_includes_detected_sample_peaks() {
+        let trace = vec![0.0, 10.0, 200.0, 15.0, 0.0, 5.0, 0.0, 4.0, 0.0, 20.0, 250.0, 10.0, 0.0];
+        let coeffs = vec![0.0, 1.0];
+        let preview = build_sample_mapping_preview(&trace, &coeffs)
+            .expect("sample mapping preview should be created");
+        assert_eq!(preview.sample_peak_preview.len(), 2);
+        assert_eq!(preview.sample_peak_preview[0].time, 2);
+        assert_eq!(preview.sample_peak_preview[1].time, 10);
     }
 }

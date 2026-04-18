@@ -20,6 +20,7 @@ Implemented in Rust so far:
 - first-pass sizing-model fit and ladder QC metrics for the best candidate
 - conservative local refinement around the best ladder candidate when QC suggests it
 - sample-trace to basepair mapping preview from the fitted sizing model
+- sample-peak preview in basepair space from the mapped sample trace
 - multi-file `analyze` request handling in the core engine
 
 Current limitation:
