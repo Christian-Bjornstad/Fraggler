@@ -1572,10 +1572,12 @@ name = "fraggler-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "camino",
  "fraggler-core",
  "open",
  "slint",
  "slint-build",
+ "uuid",
 ]
 
 [[package]]

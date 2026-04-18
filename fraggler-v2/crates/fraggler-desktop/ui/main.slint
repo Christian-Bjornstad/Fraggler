@@ -1,16 +1,20 @@
-import { Button, HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Button, HorizontalBox, LineEdit, VerticalBox } from "std-widgets.slint";
 
 export component MainWindow inherits Window {
-    in-out property <string> status_text: "Fraggler v2 desktop scaffold ready.";
-    in-out property <string> log_text: "Rust + Slint desktop shell scaffolded.\n";
+    in-out property <string> status_text: "Fraggler v2 desktop is ready for Rust engine runs.";
+    in-out property <string> log_text: "Rust + Slint desktop shell connected to fraggler-core.\n";
+    in-out property <string> analysis_kind: "clonality";
+    in-out property <string> input_path: "";
+    in-out property <string> output_path: "";
 
     callback show_contract();
-    callback run_demo();
+    callback select_analysis(string);
+    callback run_analysis();
     callback open_docs();
 
     title: "Fraggler v2";
-    width: 980px;
-    height: 720px;
+    width: 1080px;
+    height: 820px;
 
     VerticalBox {
         padding: 16px;
@@ -26,17 +30,79 @@ export component MainWindow inherits Window {
             wrap: word-wrap;
         }
 
+        Rectangle {
+            background: #f8fafc;
+            border-width: 1px;
+            border-color: #dbe2ea;
+            border-radius: 10px;
+            min-height: 170px;
+
+            VerticalBox {
+                padding: 14px;
+                spacing: 10px;
+
+                Text {
+                    text: "Run Configuration";
+                    font-size: 20px;
+                }
+
+                Text {
+                    text: "Analysis";
+                }
+
+                HorizontalBox {
+                    spacing: 8px;
+
+                    Button {
+                        text: "Clonality";
+                        clicked => { root.select_analysis("clonality"); }
+                    }
+
+                    Button {
+                        text: "FLT3";
+                        clicked => { root.select_analysis("flt3"); }
+                    }
+
+                    Button {
+                        text: "General";
+                        clicked => { root.select_analysis("general"); }
+                    }
+
+                    Text {
+                        text: "Active: " + root.analysis_kind;
+                        vertical-alignment: center;
+                    }
+                }
+
+                Text {
+                    text: "Input .fsa file";
+                }
+
+                LineEdit {
+                    text <=> root.input_path;
+                }
+
+                Text {
+                    text: "Output directory";
+                }
+
+                LineEdit {
+                    text <=> root.output_path;
+                }
+            }
+        }
+
         HorizontalBox {
             spacing: 8px;
 
             Button {
-                text: "Show Contract";
-                clicked => { root.show_contract(); }
+                text: "Run Analysis";
+                clicked => { root.run_analysis(); }
             }
 
             Button {
-                text: "Run Stub";
-                clicked => { root.run_demo(); }
+                text: "Show Contract";
+                clicked => { root.show_contract(); }
             }
 
             Button {

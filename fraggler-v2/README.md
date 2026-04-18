@@ -8,6 +8,7 @@ Current scope in this scaffold:
 - stand up the CLI and desktop shell entrypoints
 - freeze Python reference timings and outputs before engine porting begins
 - start Phase 2 engine porting in `fraggler-core`
+- wire the Slint desktop shell to real Rust analyze runs
 
 ## Phase 2 status
 
@@ -25,6 +26,7 @@ Implemented in Rust so far:
 - first-pass clonality assay matching using filename, channel compatibility, bp overlap, and group-level dominance signals
 - Willros-style monotone spline ladder sizing as the primary Rust sizing strategy, with polynomial fallback
 - multi-file `analyze` request handling in the core engine
+- desktop shell fields for analysis, input path, output path, and live Rust engine log/status updates
 
 Current limitation:
 - the engine does not yet reproduce the full Python ladder-fit/refinement/rescue workflow

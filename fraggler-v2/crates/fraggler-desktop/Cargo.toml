@@ -8,8 +8,10 @@ build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
+camino.workspace = true
 open.workspace = true
 slint.workspace = true
+uuid.workspace = true
 
 fraggler-core = { path = "../fraggler-core" }
 
