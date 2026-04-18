@@ -12,6 +12,10 @@ use crate::signal::{Peak, baseline_correct_nonnegative, find_peaks};
 const MAX_CANDIDATE_COMBINATIONS: usize = 100_000;
 const LADDER_MAX_GAP_EXPANSIONS: usize = 15;
 const LADDER_GAP_EXPANSION_STEP: usize = 10;
+const MAX_REFINEMENT_STEPS: usize = 3;
+const MAX_REFINEMENT_OPTIONS_PER_STEP: usize = 5;
+const MIN_REFINEMENT_TRIGGER_BP: f64 = 0.75;
+const MAX_REFINEMENT_RADIUS_SCANS: f64 = 120.0;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LadderFitPreview {
@@ -24,6 +28,7 @@ pub struct LadderFitPreview {
     pub best_curvature_score: Option<f64>,
     pub best_quadratic_r2: Option<f64>,
     pub sizing_model: Option<SizingModelPreview>,
+    pub refinement: Option<RefinementPreview>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -32,6 +37,15 @@ pub struct SizingModelPreview {
     pub coefficients: Vec<f64>,
     pub predicted_ladder_basepairs: Vec<f64>,
     pub qc_metrics: LadderQcMetrics,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RefinementPreview {
+    pub changed_step_indices: Vec<usize>,
+    pub original_scan_indices: Vec<usize>,
+    pub refined_scan_indices: Vec<usize>,
+    pub refined_curvature_score: f64,
+    pub refined_quadratic_r2: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -342,13 +356,44 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
             best_curvature_score: None,
             best_quadratic_r2: None,
             sizing_model: None,
+            refinement: None,
         });
     }
     let ladder_sizes = ladder.sizes();
-    let best = select_best_combination(&combinations, ladder_sizes);
-    let sizing_model = best
+    let mut best = select_best_combination(&combinations, ladder_sizes);
+    let mut sizing_model = best
         .as_ref()
         .and_then(|entry| fit_best_sizing_model(&entry.indices, ladder_sizes));
+    let mut refinement = None;
+
+    if let (Some(best_entry), Some(model)) = (best.as_ref(), sizing_model.as_ref()) {
+        if let Some(refined) =
+            refine_best_combination(&peak_indices, &best_entry.indices, ladder_sizes, model)
+        {
+            let refined_qr2 = quadratic_fit_r2(
+                ladder_sizes,
+                &refined
+                    .refined_scan_indices
+                    .iter()
+                    .map(|value| *value as f64)
+                    .collect::<Vec<_>>(),
+            );
+            let refined_curvature = curvature_score(ladder_sizes, &refined.refined_scan_indices);
+            best = Some(CombinationScore {
+                indices: refined.refined_scan_indices.clone(),
+                curvature_score: refined_curvature,
+                quadratic_r2: refined_qr2,
+            });
+            sizing_model = fit_best_sizing_model(&refined.refined_scan_indices, ladder_sizes);
+            refinement = Some(RefinementPreview {
+                changed_step_indices: refined.changed_step_indices,
+                original_scan_indices: refined.original_scan_indices,
+                refined_scan_indices: refined.refined_scan_indices,
+                refined_curvature_score: refined_curvature,
+                refined_quadratic_r2: refined_qr2,
+            });
+        }
+    }
 
     Some(LadderFitPreview {
         max_allowed_peak_gap,
@@ -363,6 +408,7 @@ fn build_ladder_fit_preview(ladder_peaks: &[Peak], ladder: LadderKind) -> Option
         best_curvature_score: best.as_ref().map(|entry| entry.curvature_score),
         best_quadratic_r2: best.as_ref().map(|entry| entry.quadratic_r2),
         sizing_model,
+        refinement,
     })
 }
 
@@ -728,12 +774,231 @@ fn compute_ladder_qc_metrics(expected: &[f64], predicted: &[f64]) -> LadderQcMet
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct RefinementCandidate {
+    changed_step_indices: Vec<usize>,
+    original_scan_indices: Vec<usize>,
+    refined_scan_indices: Vec<usize>,
+    sizing_model: SizingModelPreview,
+}
+
+fn refine_best_combination(
+    peak_pool: &[usize],
+    current_scans: &[usize],
+    ladder_sizes: &[f64],
+    current_model: &SizingModelPreview,
+) -> Option<RefinementCandidate> {
+    if current_scans.len() != ladder_sizes.len() || current_scans.len() < 3 {
+        return None;
+    }
+
+    let residuals = ladder_sizes
+        .iter()
+        .zip(current_model.predicted_ladder_basepairs.iter())
+        .map(|(expected, predicted)| expected - predicted)
+        .collect::<Vec<_>>();
+    let mut ranked_steps = residuals
+        .iter()
+        .enumerate()
+        .map(|(index, residual)| (index, residual.abs()))
+        .filter(|(_, abs_residual)| *abs_residual >= MIN_REFINEMENT_TRIGGER_BP)
+        .collect::<Vec<_>>();
+    ranked_steps.sort_by(|left, right| {
+        right
+            .1
+            .partial_cmp(&left.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ranked_steps.truncate(MAX_REFINEMENT_STEPS);
+    if ranked_steps.is_empty() {
+        return None;
+    }
+
+    let derivative_coeffs = derivative_coefficients(&current_model.coefficients);
+    let mut option_buckets = Vec::new();
+    let mut changed_indices = Vec::new();
+
+    for (step_index, _) in ranked_steps {
+        let current_scan = current_scans[step_index] as f64;
+        let derivative = eval_polynomial(&derivative_coeffs, current_scan);
+        if !derivative.is_finite() || derivative.abs() <= 1e-6 {
+            continue;
+        }
+        let target_scan = current_scan + (residuals[step_index] / derivative);
+        let lower_bound = if step_index == 0 {
+            f64::NEG_INFINITY
+        } else {
+            current_scans[step_index - 1] as f64 + 6.0
+        };
+        let upper_bound = if step_index + 1 >= current_scans.len() {
+            f64::INFINITY
+        } else {
+            current_scans[step_index + 1] as f64 - 6.0
+        };
+        let options = refinement_options(
+            peak_pool,
+            current_scan,
+            target_scan,
+            lower_bound,
+            upper_bound,
+        );
+        if options.len() < 2 {
+            continue;
+        }
+        changed_indices.push(step_index);
+        option_buckets.push(options);
+    }
+
+    if option_buckets.is_empty() {
+        return None;
+    }
+
+    let baseline_score = model_score(&current_model.qc_metrics);
+    let mut best_candidate: Option<RefinementCandidate> = None;
+    let mut best_score = baseline_score;
+    let mut current_trial = current_scans.to_vec();
+    try_refinement_combinations(
+        0,
+        &changed_indices,
+        &option_buckets,
+        &mut current_trial,
+        current_scans,
+        ladder_sizes,
+        &mut best_candidate,
+        &mut best_score,
+    );
+    best_candidate
+}
+
+fn try_refinement_combinations(
+    bucket_index: usize,
+    changed_indices: &[usize],
+    option_buckets: &[Vec<usize>],
+    trial_scans: &mut Vec<usize>,
+    original_scans: &[usize],
+    ladder_sizes: &[f64],
+    best_candidate: &mut Option<RefinementCandidate>,
+    best_score: &mut (f64, f64, f64),
+) {
+    if bucket_index == changed_indices.len() {
+        if trial_scans == original_scans {
+            return;
+        }
+        if !trial_scans.windows(2).all(|window| window[1] > window[0]) {
+            return;
+        }
+        let Some(model) = fit_best_sizing_model(trial_scans, ladder_sizes) else {
+            return;
+        };
+        let score = model_score(&model.qc_metrics);
+        if score < *best_score {
+            *best_score = score;
+            *best_candidate = Some(RefinementCandidate {
+                changed_step_indices: changed_indices.to_vec(),
+                original_scan_indices: original_scans.to_vec(),
+                refined_scan_indices: trial_scans.clone(),
+                sizing_model: model,
+            });
+        }
+        return;
+    }
+
+    let step_index = changed_indices[bucket_index];
+    let original_value = trial_scans[step_index];
+    for candidate in &option_buckets[bucket_index] {
+        trial_scans[step_index] = *candidate;
+        if step_index > 0 && trial_scans[step_index] <= trial_scans[step_index - 1] {
+            continue;
+        }
+        if step_index + 1 < trial_scans.len()
+            && trial_scans[step_index] >= trial_scans[step_index + 1]
+        {
+            continue;
+        }
+        try_refinement_combinations(
+            bucket_index + 1,
+            changed_indices,
+            option_buckets,
+            trial_scans,
+            original_scans,
+            ladder_sizes,
+            best_candidate,
+            best_score,
+        );
+    }
+    trial_scans[step_index] = original_value;
+}
+
+fn refinement_options(
+    peak_pool: &[usize],
+    current_scan: f64,
+    target_scan: f64,
+    lower_bound: f64,
+    upper_bound: f64,
+) -> Vec<usize> {
+    let mut options = peak_pool
+        .iter()
+        .copied()
+        .filter(|scan| {
+            let scan_f64 = *scan as f64;
+            scan_f64 >= lower_bound
+                && scan_f64 <= upper_bound
+                && (scan_f64 - current_scan).abs() <= MAX_REFINEMENT_RADIUS_SCANS
+                || (scan_f64 - target_scan).abs() <= MAX_REFINEMENT_RADIUS_SCANS
+        })
+        .collect::<Vec<_>>();
+
+    options.sort_by(|left, right| {
+        let left_score = (
+            (*left as f64 - target_scan).abs(),
+            (*left as f64 - current_scan).abs(),
+        );
+        let right_score = (
+            (*right as f64 - target_scan).abs(),
+            (*right as f64 - current_scan).abs(),
+        );
+        left_score
+            .partial_cmp(&right_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    options.dedup();
+
+    let current_scan_usize = current_scan.round() as usize;
+    if !options.contains(&current_scan_usize) {
+        options.insert(0, current_scan_usize);
+    }
+    options.truncate(MAX_REFINEMENT_OPTIONS_PER_STEP);
+    if options.is_empty() {
+        vec![current_scan_usize]
+    } else {
+        options
+    }
+}
+
+fn derivative_coefficients(coefficients: &[f64]) -> Vec<f64> {
+    coefficients
+        .iter()
+        .enumerate()
+        .skip(1)
+        .map(|(power, coefficient)| *coefficient * power as f64)
+        .collect()
+}
+
+fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
+    (
+        -metrics.r2,
+        metrics.max_abs_error_bp,
+        metrics.mean_abs_error_bp,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        compute_ladder_qc_metrics, curvature_score, estimate_combination_count_capped,
-        eval_polynomial, fit_polynomial_least_squares, generate_peak_combinations,
-        quadratic_fit_r2, select_best_combination, select_ladder_peaks,
+        SizingModelPreview, compute_ladder_qc_metrics, curvature_score,
+        estimate_combination_count_capped, eval_polynomial, fit_polynomial_least_squares,
+        generate_peak_combinations, quadratic_fit_r2, refine_best_combination,
+        select_best_combination, select_ladder_peaks,
     };
 
     #[test]
@@ -791,5 +1056,29 @@ mod tests {
         assert!(qc.r2 > 0.999999);
         assert!(qc.mean_abs_error_bp < 1e-6);
         assert!(qc.monotonic_on_ladder);
+    }
+
+    #[test]
+    fn local_refinement_can_improve_a_nearby_candidate() {
+        let ladder_sizes = vec![35.0, 50.0, 75.0, 100.0];
+        let scans = vec![100, 200, 320, 405];
+        let model = SizingModelPreview {
+            degree: 1,
+            coefficients: fit_polynomial_least_squares(
+                &scans.iter().map(|value| *value as f64).collect::<Vec<_>>(),
+                &ladder_sizes,
+                1,
+            )
+            .expect("fit should work"),
+            predicted_ladder_basepairs: scans.iter().map(|value| *value as f64).collect::<Vec<_>>(),
+            qc_metrics: compute_ladder_qc_metrics(&ladder_sizes, &[35.0, 50.0, 80.0, 101.5]),
+        };
+        let peak_pool = vec![100, 200, 300, 320, 405];
+        let refined = refine_best_combination(&peak_pool, &scans, &ladder_sizes, &model)
+            .expect("refinement should find an improvement");
+        assert_eq!(refined.refined_scan_indices, vec![100, 200, 300, 405]);
+        assert!(
+            refined.sizing_model.qc_metrics.max_abs_error_bp < model.qc_metrics.max_abs_error_bp
+        );
     }
 }

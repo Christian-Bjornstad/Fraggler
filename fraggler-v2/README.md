@@ -18,6 +18,7 @@ Implemented in Rust so far:
 - peak detection primitives
 - first-pass ladder candidate generation and curvature scoring
 - first-pass sizing-model fit and ladder QC metrics for the best candidate
+- conservative local refinement around the best ladder candidate when QC suggests it
 - multi-file `analyze` request handling in the core engine
 
 Current limitation:
