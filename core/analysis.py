@@ -269,6 +269,12 @@ ROX_MIDDLE_MISSING_STEP_PENALTY = 0.35
 ROX_TAIL_EXPANSION_STEPS = 5
 ROX_TAIL_GAP_MULTIPLIER = 3.10
 ROX_PARTIAL_ALIGNMENT_VARIANTS = 8
+ROX_PARTIAL_WAIVER_ALLOWED_MISSING_STEPS = {50.0, 100.0, 160.0, 190.0, 290.0}
+ROX_PARTIAL_WAIVER_MIN_FITTED_STEPS = 17
+ROX_PARTIAL_WAIVER_MIN_R2 = 0.99999
+ROX_PARTIAL_WAIVER_MAX_MEAN_ABS_ERROR = 0.20
+ROX_PARTIAL_WAIVER_MAX_MAX_ABS_ERROR = 0.50
+ROX_PARTIAL_WAIVER_MAX_CURVATURE = 0.05
 
 
 def _project_root_for(path: Path) -> Path | None:
@@ -574,6 +580,42 @@ def _annotate_fit_qc_review(
     *,
     ladder_fit_profile: str | None = None,
 ) -> FsaFile:
+    if bool(getattr(fsa, "ladder_review_required", False)):
+        profile = _normalize_ladder_fit_profile(
+            ladder_fit_profile or getattr(fsa, "ladder_fit_profile", None),
+            analysis_id=str(getattr(fsa, "analysis_id", "") or ""),
+            ladder_name=str(getattr(fsa, "ladder", "") or ""),
+        )
+        strategy = str(getattr(fsa, "ladder_fit_strategy", "") or "")
+        expected_steps = _get_expected_ladder_steps(fsa)
+        missing_steps = list(map(float, getattr(fsa, "ladder_missing_expected_steps", [])))
+        fitted_steps = np.asarray(getattr(fsa, "ladder_steps", []), dtype=float)
+
+        # Strict waiver for known ROX partial profiles where Python historically
+        # produces excellent residuals despite a few masked ladder steps.
+        if (
+            profile == LADDER_FIT_PROFILE_CLONALITY_ROX400HD
+            and strategy == "auto_partial"
+            and expected_steps.size == ROX400HD_FAMILY_STEPS.size
+            and fitted_steps.size >= ROX_PARTIAL_WAIVER_MIN_FITTED_STEPS
+            and missing_steps
+            and all(any(np.isclose(step, allowed, atol=1e-6) for allowed in ROX_PARTIAL_WAIVER_ALLOWED_MISSING_STEPS) for step in missing_steps)
+            and float(metrics.get("r2", float("-inf"))) >= ROX_PARTIAL_WAIVER_MIN_R2
+            and float(metrics.get("mean_abs_error_bp", float("inf"))) <= ROX_PARTIAL_WAIVER_MAX_MEAN_ABS_ERROR
+            and float(metrics.get("max_abs_error_bp", float("inf"))) <= ROX_PARTIAL_WAIVER_MAX_MAX_ABS_ERROR
+            and float(metrics.get("max_curvature", float("inf"))) <= ROX_PARTIAL_WAIVER_MAX_CURVATURE
+        ):
+            fsa.ladder_review_required = False
+            missing_txt = ", ".join(f"{bp:.0f}" for bp in missing_steps)
+            waiver_note = (
+                "High-confidence ROX partial fit auto-accepted "
+                f"(missing masked steps: {missing_txt} bp)."
+            )
+            note = str(getattr(fsa, "ladder_fit_note", "") or "")
+            if waiver_note not in note:
+                fsa.ladder_fit_note = f"{note} {waiver_note}".strip() if note else waiver_note
+            return fsa
+
     if bool(getattr(fsa, "ladder_review_required", False)):
         return fsa
 
