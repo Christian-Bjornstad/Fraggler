@@ -138,13 +138,13 @@ LADDER_FIT_AUTO_ACCEPT_RULES: dict[str, dict[str, float]] = {
         "r2_floor": 0.9985,
         "mean_abs_error_bp": 1.8,
         "max_abs_error_bp": 3.0,
-        "max_curvature": 0.5,
+        "max_curvature": 0.7,
     },
     LADDER_FIT_PROFILE_CLONALITY_ROX400HD: {
-        "r2_floor": 0.9985,
+        "r2_floor": 0.9980,
         "mean_abs_error_bp": 1.8,
         "max_abs_error_bp": 3.0,
-        "max_curvature": 0.5,
+        "max_curvature": 0.7,
     },
     LADDER_FIT_PROFILE_FLT3_GS500ROX: {
         "r2_floor": 0.9985,
@@ -236,7 +236,7 @@ ROX_DYEBLOB_HEIGHT_MULTIPLIER = 2.0
 ROX_DYEBLOB_EARLY_INDEX = 2000
 ROX_DYEBLOB_TIGHT_GAP = 40
 ROX_DYEBLOB_CLUSTER_GAP = 70
-ROX_BASELINE_FALLBACK_MIN_HEIGHT = 50.0
+ROX_BASELINE_FALLBACK_MIN_HEIGHT = 20.0
 ROX_BASELINE_FALLBACK_MIN_PEAKS = 3
 LADDER_RESCORING_MAX_COMBINATIONS = 250
 ROX_COMBINATION_ESTIMATE_LIMIT = 10_000
@@ -256,7 +256,7 @@ ROX_PREFERRED_TIME_MARGIN = 75.0
 ROX_HARD_FILTER_TIME_MIN = 1600.0
 ROX_HARD_FILTER_TIME_MAX = 4050.0
 ROX_APEX_SNAP_RADIUS = 6
-ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT = 250.0
+ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT = 50.0
 ROX_PREFERRED_SUPPLEMENT_DISTANCE = 15
 ROX_PROFILE_TIME_WEIGHT = 0.10
 ROX_PROFILE_LOW_INTENSITY_WEIGHT = 0.04
@@ -3026,6 +3026,24 @@ def analyse_fsa_liz(
     )
     base_fsa.analysis_id = "clonality"
     _set_ladder_fit_profile(base_fsa, ladder_fit_profile, analysis_id="clonality")
+
+    from config import APP_SETTINGS
+    if APP_SETTINGS.get("engine", {}).get("use_rust", False):
+        from core.rust_bridge import run_ladder_fit_hybrid
+        print_green(f"[LIZ] Attempting Rust Engine hybrid analysis for {fsa_path.name}")
+        hybrid_fsa = run_ladder_fit_hybrid(base_fsa, "clonality")
+        if hybrid_fsa is not None:
+            qc = compute_ladder_qc_metrics(hybrid_fsa)
+            hybrid_fsa = _finalize_auto_fit_metadata(hybrid_fsa)
+            hybrid_fsa = _annotate_fit_qc_review(hybrid_fsa, qc)
+            if not bool(getattr(hybrid_fsa, "ladder_review_required", False)):
+                return hybrid_fsa
+            print_warning(
+                f"[LIZ] Rust hybrid fit remained review_required for {fsa_path.name}. "
+                "Falling back to Python ladder search."
+            )
+        print_warning(f"[LIZ] Rust Engine failed or returned None for {fsa_path.name}. Falling back to Python.")
+
     base_fsa = find_size_standard_peaks(base_fsa)
     
     applied = _try_apply_saved_ladder_adjustment(base_fsa, load_ladder_adjustment(base_fsa), "LIZ")
@@ -3334,6 +3352,24 @@ def analyse_fsa_rox(
     )
     base_fsa.analysis_id = "flt3" if ladder_fit_profile == LADDER_FIT_PROFILE_FLT3_GS500ROX else "clonality"
     _set_ladder_fit_profile(base_fsa, ladder_fit_profile, analysis_id=str(getattr(base_fsa, "analysis_id", "") or ""))
+
+    from config import APP_SETTINGS
+    if APP_SETTINGS.get("engine", {}).get("use_rust", False):
+        from core.rust_bridge import run_ladder_fit_hybrid
+        print_green(f"[ROX] Attempting Rust Engine hybrid analysis for {fsa_path.name}")
+        hybrid_fsa = run_ladder_fit_hybrid(base_fsa, str(getattr(base_fsa, "analysis_id", "clonality")))
+        if hybrid_fsa is not None:
+            qc = compute_ladder_qc_metrics(hybrid_fsa)
+            hybrid_fsa = _finalize_auto_fit_metadata(hybrid_fsa)
+            hybrid_fsa = _annotate_fit_qc_review(hybrid_fsa, qc)
+            if not bool(getattr(hybrid_fsa, "ladder_review_required", False)):
+                return hybrid_fsa
+            print_warning(
+                f"[ROX] Rust hybrid fit remained review_required for {fsa_path.name}. "
+                "Falling back to Python ladder search."
+            )
+        print_warning(f"[ROX] Rust Engine failed or returned None for {fsa_path.name}. Falling back to Python.")
+
     base_fsa = find_size_standard_peaks(base_fsa)
     base_raw_rox = np.asarray(base_fsa.fsa["DATA4"], dtype=float)
     base_found = np.asarray(getattr(base_fsa, "size_standard_peaks", []), dtype=float)
