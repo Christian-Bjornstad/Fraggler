@@ -9,13 +9,27 @@ use crate::engine::EngineError;
 use crate::ladders::LadderKind;
 use crate::signal::{Peak, baseline_correct_nonnegative, find_peaks};
 
-const MAX_CANDIDATE_COMBINATIONS: usize = 100_000;
-const LADDER_MAX_GAP_EXPANSIONS: usize = 15;
+const MAX_CANDIDATE_COMBINATIONS: usize = 2_000_000;
+const LADDER_MAX_GAP_EXPANSIONS: usize = 30;
 const LADDER_GAP_EXPANSION_STEP: usize = 10;
 const MAX_REFINEMENT_STEPS: usize = 3;
 const MAX_REFINEMENT_OPTIONS_PER_STEP: usize = 5;
 const MIN_REFINEMENT_TRIGGER_BP: f64 = 0.75;
 const MAX_REFINEMENT_RADIUS_SCANS: f64 = 120.0;
+const LADDER_DOMAIN_TIME_WEIGHT: f64 = 3.00;
+const LADDER_DOMAIN_GAP_WEIGHT: f64 = 0.15;
+const LADDER_DOMAIN_INTENSITY_WEIGHT: f64 = 0.10;
+const LADDER_DOMAIN_FIRST_ANCHOR_WEIGHT: f64 = 1.50;
+const ROX_HARD_TIME_MIN: f64 = 1300.0;
+const ROX_HARD_TIME_MAX: f64 = 4300.0;
+const ROX_PREFERRED_TIME_MIN: f64 = 1500.0;
+const ROX_PREFERRED_TIME_MAX: f64 = 4000.0;
+const ROX_MAX_FIRST_ANCHOR: f64 = 1900.0;
+const LIZ_HARD_TIME_MIN: f64 = 1150.0;
+const LIZ_HARD_TIME_MAX: f64 = 4300.0;
+const LIZ_PREFERRED_TIME_MIN: f64 = 1250.0;
+const LIZ_PREFERRED_TIME_MAX: f64 = 4100.0;
+const LIZ_MAX_FIRST_ANCHOR: f64 = 1700.0;
 const SAMPLE_ASSAY_GROUP_DISTANCE_BP: f64 = 12.0;
 const SAMPLE_ASSAY_MIN_RATIO: f64 = 0.40;
 const CLONAL_MAX_LABELLED_PEAKS: usize = 3;
@@ -204,13 +218,15 @@ pub fn analyze_fsa_primitives(
 
     let ladder = suggested_ladder_kind(&record, &size_standard_channel, analysis_kind);
     let min_height = match ladder {
-        LadderKind::Liz500250 => 300.0,
-        LadderKind::Rox400Hd => 120.0,
+        LadderKind::Liz500250 => 150.0,
+        // ROX traces in clonality are prone to dense late noise clusters.
+        // A stricter floor keeps true ladder peaks while suppressing blob tails.
+        LadderKind::Rox400Hd => 180.0,
         LadderKind::Gs500Rox => 120.0,
     };
     let min_distance = match ladder {
         LadderKind::Liz500250 => 15,
-        LadderKind::Rox400Hd => 8,
+        LadderKind::Rox400Hd => 14,
         LadderKind::Gs500Rox => 15,
     };
 
@@ -497,7 +513,7 @@ fn build_ladder_fit_preview(
         .iter()
         .map(|peak| peak.index)
         .collect::<Vec<_>>();
-    let mut max_allowed_peak_gap = estimate_max_allowed_peak_gap(&peak_indices, 2.0);
+    let mut max_allowed_peak_gap = estimate_max_allowed_peak_gap(&peak_indices, 5.0);
     let mut gap_expansions = 0usize;
     let mut estimated_combination_count = 0usize;
     let mut candidate_generation_capped = false;
@@ -543,7 +559,11 @@ fn build_ladder_fit_preview(
         });
     }
     let ladder_sizes = ladder.sizes();
-    let mut best = select_best_combination(&combinations, ladder_sizes);
+    let peak_height_by_index = ladder_peaks
+        .iter()
+        .map(|peak| (peak.index, peak.height))
+        .collect::<BTreeMap<_, _>>();
+    let mut best = select_best_combination(&combinations, ladder_sizes, ladder, &peak_height_by_index);
     let mut sizing_model = best
         .as_ref()
         .and_then(|entry| fit_best_sizing_model(&entry.indices, ladder_sizes, sample_trace));
@@ -562,10 +582,14 @@ fn build_ladder_fit_preview(
                     .collect::<Vec<_>>(),
             );
             let refined_curvature = curvature_score(ladder_sizes, &refined.refined_scan_indices);
+            let refined_domain_penalty =
+                ladder_domain_penalty(ladder, &refined.refined_scan_indices, &peak_height_by_index);
             best = Some(CombinationScore {
                 indices: refined.refined_scan_indices.clone(),
                 curvature_score: refined_curvature,
                 quadratic_r2: refined_qr2,
+                domain_penalty: refined_domain_penalty,
+                blended_score: refined_curvature + refined_domain_penalty,
             });
             sizing_model =
                 fit_best_sizing_model(&refined.refined_scan_indices, ladder_sizes, sample_trace);
@@ -752,27 +776,43 @@ struct CombinationScore {
     indices: Vec<usize>,
     curvature_score: f64,
     quadratic_r2: f64,
+    domain_penalty: f64,
+    blended_score: f64,
 }
 
 fn select_best_combination(
     combinations: &[Vec<usize>],
     ladder_sizes: &[f64],
+    ladder: LadderKind,
+    peak_height_by_index: &BTreeMap<usize, f64>,
 ) -> Option<CombinationScore> {
     combinations
         .iter()
         .filter(|combo| combo.len() == ladder_sizes.len())
-        .map(|combo| CombinationScore {
-            indices: combo.clone(),
-            curvature_score: curvature_score(ladder_sizes, combo),
-            quadratic_r2: quadratic_fit_r2(
+        .map(|combo| {
+            let curvature = curvature_score(ladder_sizes, combo);
+            let qr2 = quadratic_fit_r2(
                 ladder_sizes,
                 &combo.iter().map(|value| *value as f64).collect::<Vec<_>>(),
-            ),
+            );
+            let domain_penalty = ladder_domain_penalty(ladder, combo, peak_height_by_index);
+            CombinationScore {
+                indices: combo.clone(),
+                curvature_score: curvature,
+                quadratic_r2: qr2,
+                domain_penalty,
+                blended_score: curvature + domain_penalty,
+            }
         })
         .min_by(|left, right| {
-            left.curvature_score
-                .partial_cmp(&right.curvature_score)
+            left.blended_score
+                .partial_cmp(&right.blended_score)
                 .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| {
+                    left.curvature_score
+                        .partial_cmp(&right.curvature_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| {
                     right
                         .quadratic_r2
@@ -781,6 +821,110 @@ fn select_best_combination(
                 })
                 .then_with(|| left.indices.cmp(&right.indices))
         })
+}
+
+fn ladder_domain_penalty(
+    ladder: LadderKind,
+    scans: &[usize],
+    peak_height_by_index: &BTreeMap<usize, f64>,
+) -> f64 {
+    if scans.is_empty() {
+        return f64::INFINITY;
+    }
+    if !matches!(ladder, LadderKind::Rox400Hd) {
+        return 0.0;
+    }
+
+    let (hard_min, hard_max, preferred_min, preferred_max, max_first_anchor) = match ladder {
+        LadderKind::Rox400Hd => (
+            ROX_HARD_TIME_MIN,
+            ROX_HARD_TIME_MAX,
+            ROX_PREFERRED_TIME_MIN,
+            ROX_PREFERRED_TIME_MAX,
+            ROX_MAX_FIRST_ANCHOR,
+        ),
+        LadderKind::Liz500250 | LadderKind::Gs500Rox => (
+            LIZ_HARD_TIME_MIN,
+            LIZ_HARD_TIME_MAX,
+            LIZ_PREFERRED_TIME_MIN,
+            LIZ_PREFERRED_TIME_MAX,
+            LIZ_MAX_FIRST_ANCHOR,
+        ),
+    };
+
+    let scans_f = scans.iter().map(|value| *value as f64).collect::<Vec<_>>();
+    let hard_out_fraction = scans_f
+        .iter()
+        .filter(|value| **value < hard_min || **value > hard_max)
+        .count() as f64
+        / scans_f.len() as f64;
+
+    let median_scan = scans_f[scans_f.len() / 2];
+    let median_window_penalty = if median_scan < preferred_min {
+        (preferred_min - median_scan) / preferred_min.max(1.0)
+    } else if median_scan > preferred_max {
+        (median_scan - preferred_max) / preferred_max.max(1.0)
+    } else {
+        0.0
+    };
+
+    let first_anchor_penalty = if scans_f[0] > max_first_anchor {
+        (scans_f[0] - max_first_anchor) / max_first_anchor.max(1.0)
+    } else {
+        0.0
+    };
+
+    let gap_cv_penalty = if scans_f.len() >= 3 {
+        let gaps = scans_f.windows(2).map(|window| window[1] - window[0]).collect::<Vec<_>>();
+        let mean_gap = gaps.iter().sum::<f64>() / gaps.len() as f64;
+        if mean_gap <= f64::EPSILON {
+            1.0
+        } else {
+            let variance = gaps
+                .iter()
+                .map(|gap| {
+                    let d = *gap - mean_gap;
+                    d * d
+                })
+                .sum::<f64>()
+                / gaps.len() as f64;
+            let cv = variance.sqrt() / mean_gap;
+            (cv - 0.55).max(0.0)
+        }
+    } else {
+        0.0
+    };
+
+    let intensities = scans
+        .iter()
+        .filter_map(|scan| peak_height_by_index.get(scan).copied())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .collect::<Vec<_>>();
+    let intensity_cv_penalty = if intensities.len() >= 4 {
+        let mean_intensity = intensities.iter().sum::<f64>() / intensities.len() as f64;
+        if mean_intensity <= f64::EPSILON {
+            1.0
+        } else {
+            let variance = intensities
+                .iter()
+                .map(|value| {
+                    let d = *value - mean_intensity;
+                    d * d
+                })
+                .sum::<f64>()
+                / intensities.len() as f64;
+            let cv = variance.sqrt() / mean_intensity;
+            (cv - 0.60).max(0.0)
+        }
+    } else {
+        0.0
+    };
+
+    hard_out_fraction * LADDER_DOMAIN_TIME_WEIGHT
+        + median_window_penalty * LADDER_DOMAIN_TIME_WEIGHT
+        + first_anchor_penalty * LADDER_DOMAIN_FIRST_ANCHOR_WEIGHT
+        + gap_cv_penalty * LADDER_DOMAIN_GAP_WEIGHT
+        + intensity_cv_penalty * LADDER_DOMAIN_INTENSITY_WEIGHT
 }
 
 fn curvature_score(ladder_sizes: &[f64], scans: &[usize]) -> f64 {
@@ -1846,6 +1990,10 @@ fn model_score(metrics: &LadderQcMetrics) -> (f64, f64, f64) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::ladders::LadderKind;
+
     use super::{
         SamplePeakGroupPreview, SamplePeakPreview, SizingModelPreview, build_assay_group_preview,
         build_clonality_preview, build_flt3_preview, build_sample_mapping_preview,
@@ -1880,7 +2028,12 @@ mod tests {
     fn select_best_combination_picks_lowest_curvature_candidate() {
         let ladder_sizes = vec![35.0, 50.0, 75.0, 100.0];
         let combinations = vec![vec![100, 200, 300, 400], vec![100, 200, 380, 620]];
-        let best = select_best_combination(&combinations, &ladder_sizes)
+        let best = select_best_combination(
+            &combinations,
+            &ladder_sizes,
+            LadderKind::Liz500250,
+            &BTreeMap::new(),
+        )
             .expect("a best combination should be selected");
         assert_eq!(best.indices, vec![100, 200, 380, 620]);
         assert!(curvature_score(&ladder_sizes, &best.indices).is_finite());
