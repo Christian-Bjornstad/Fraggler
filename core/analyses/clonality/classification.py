@@ -13,7 +13,9 @@ from core.utils import strip_stage_prefix
 def _assay_pattern(*roots: str, suffix: str) -> re.Pattern[str]:
     joined_roots = "|".join(re.escape(root) for root in roots)
     return re.compile(
-        rf"(?<![a-z0-9])(?:{joined_roots})(?:[\s_-]*mix)?[\s_-]*{re.escape(suffix)}(?![a-z0-9])",
+        # Allow assay tokens to appear directly after numeric run/patient ids
+        # (e.g. "...05028TCRg_B..."), while still avoiding letter-embedded noise.
+        rf"(?<![a-z])(?:{joined_roots})(?:[\s_-]*mix)?[\s_-]*{re.escape(suffix)}(?![a-z])",
         re.IGNORECASE,
     )
 
