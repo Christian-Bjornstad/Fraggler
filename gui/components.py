@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — GUI Shared Components
+HemaFrag Diagnostics — GUI Shared Components
 
 Reusable widgets, badges, and layout helpers.
 """

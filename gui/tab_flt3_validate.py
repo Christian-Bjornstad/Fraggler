@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — FLT3 Validation Tab
+HemaFrag Diagnostics — FLT3 Validation Tab
 """
 from __future__ import annotations
 

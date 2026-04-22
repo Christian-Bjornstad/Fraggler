@@ -1,5 +1,5 @@
 """
-Fraggler QC subpackage re-exports.
+HemaFrag QC subpackage re-exports.
 """
 from core.qc.qc_rules import QCRules, ASSAY_ALIASES_QC, normalize_assay_qc  # noqa
 

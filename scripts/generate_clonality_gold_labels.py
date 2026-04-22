@@ -11,12 +11,19 @@ def _ensure_not_gold_output(output_csv: Path) -> None:
         )
 
 
+def _safe_read(path: Path) -> pd.DataFrame:
+    try:
+        return pd.read_csv(path)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return pd.DataFrame()
+
+
 def generate_labels(ladder_csv: Path, pk_csv: Path, output_csv: Path):
     _ensure_not_gold_output(output_csv)
     dfs = []
     
     if ladder_csv.exists():
-        ladder = pd.read_csv(ladder_csv)
+        ladder = _safe_read(ladder_csv)
         if not ladder.empty:
             l_gold = pd.DataFrame()
             l_gold['artifact_table'] = ladder['artifact_table']
@@ -29,7 +36,7 @@ def generate_labels(ladder_csv: Path, pk_csv: Path, output_csv: Path):
             dfs.append(l_gold)
             
     if pk_csv.exists():
-        pk = pd.read_csv(pk_csv)
+        pk = _safe_read(pk_csv)
         if not pk.empty:
             p_gold = pd.DataFrame()
             p_gold['artifact_table'] = pk['artifact_table']

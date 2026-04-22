@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Configuration & Settings
+HemaFrag Diagnostics — Configuration & Settings
 
 Centralized settings persistence (YAML), defaults, and path helpers.
 Compatible with Python 3.10+.
@@ -18,7 +18,8 @@ from typing import Any, Dict, Mapping
 # PATHS
 # ============================================================
 
-SETTINGS_PATH = Path.home() / ".fraggler_gui.yaml"
+LEGACY_SETTINGS_PATH = Path.home() / ".fraggler_gui.yaml"
+SETTINGS_PATH = Path.home() / ".hemafrag_gui.yaml"
 _LOG = logging.getLogger(__name__)
 
 LAST_SETTINGS_LOAD_ERROR: str | None = None
@@ -64,6 +65,12 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "nk_ymax_floor": 250.0,
         "w_sample": 3.0,
         "w_ladder": 3.0,
+    },
+    "engine": {
+        "use_rust": True,
+        "rust_timeout_seconds": 60,
+        "rust_timeout_seconds_rox": 120,
+        "rust_timeout_seconds_liz": 60,
     },
     "batch": {
         "base_input_dir": str(Path.home()),
@@ -189,7 +196,7 @@ def _coerce_env_value(value: str) -> Any:
 
 
 def _apply_env_overrides(settings: Dict[str, Any], env: Mapping[str, str]) -> None:
-    """Apply FRAGGLER_* environment overrides to nested settings."""
+    """Apply HEMAFRAG_* / legacy FRAGGLER_* environment overrides to nested settings."""
     def _assign(target: Dict[str, Any], schema: Any, parts: list[str], raw_value: str) -> None:
         if not parts:
             return
@@ -214,10 +221,12 @@ def _apply_env_overrides(settings: Dict[str, Any], env: Mapping[str, str]) -> No
         target["_".join(parts)] = _coerce_env_value(raw_value)
 
     for key, value in env.items():
-        if not key.startswith("FRAGGLER_"):
+        if key.startswith("HEMAFRAG_"):
+            parts = [part.lower() for part in key.split("_")[1:] if part]
+        elif key.startswith("FRAGGLER_"):
+            parts = [part.lower() for part in key.split("_")[1:] if part]
+        else:
             continue
-
-        parts = [part.lower() for part in key.split("_")[1:] if part]
         if not parts:
             continue
 
@@ -407,6 +416,7 @@ def _validate_settings(settings: Dict[str, Any]) -> None:
         settings["active_analysis"] = DEFAULT_SETTINGS["active_analysis"]
 
     settings["default_output"] = general.get("default_output", "")
+    settings.setdefault("engine", {})["use_rust"] = True
 
     qc_min_r2_ok = qc.get("min_r2_ok", 0.995)
     try:
@@ -533,16 +543,20 @@ def load_settings(
     settings_path = settings_path or SETTINGS_PATH
     env = env or os.environ
     LAST_SETTINGS_LOAD_ERROR = None
-    
+
+    resolved_settings_path = settings_path
+    if settings_path == SETTINGS_PATH and not settings_path.exists() and LEGACY_SETTINGS_PATH.exists():
+        resolved_settings_path = LEGACY_SETTINGS_PATH
+
     # 1) Load from YAML if exists
-    if settings_path.exists():
+    if resolved_settings_path.exists():
         try:
             # Use errors="replace" to prevent crashing on non-UTF8 characters in path names or comments
-            with open(settings_path, "r", encoding="utf-8", errors="replace") as f:
+            with open(resolved_settings_path, "r", encoding="utf-8", errors="replace") as f:
                 user = yaml.safe_load(f) or {}
             settings = _deep_update(settings, user)
         except Exception as exc:
-            LAST_SETTINGS_LOAD_ERROR = _report_settings_issue("Failed to load", settings_path, exc)
+            LAST_SETTINGS_LOAD_ERROR = _report_settings_issue("Failed to load", resolved_settings_path, exc)
 
     _apply_env_overrides(settings, env)
     settings = _migrate_legacy_settings(settings)

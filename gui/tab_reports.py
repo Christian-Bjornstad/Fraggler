@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Reports Tab (NEW)
+HemaFrag Diagnostics — Reports Tab (NEW)
 
 Browse generated HTML reports, open inline, and print to PDF.
 """

@@ -1,1 +1,1 @@
-# Fraggler Diagnostics — GUI Package
+# HemaFrag Diagnostics — GUI Package

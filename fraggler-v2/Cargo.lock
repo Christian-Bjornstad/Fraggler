@@ -1591,6 +1591,7 @@ dependencies = [
  "camino",
  "clap",
  "fraggler-core",
+ "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
@@ -1624,7 +1625,9 @@ dependencies = [
  "rfd",
  "slint",
  "slint-build",
+ "tracing",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]

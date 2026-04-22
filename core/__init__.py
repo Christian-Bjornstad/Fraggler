@@ -1,5 +1,5 @@
 """
-Core package — Fraggler Diagnostics engine.
+Core package — HemaFrag Diagnostics engine.
 
 Re-exports key symbols from submodules for convenient access.
 """

@@ -1,5 +1,5 @@
 """
-Fraggler QC — Marker tracking, filename parsing, peak finding utilities.
+HemaFrag QC — Marker tracking, filename parsing, peak finding utilities.
 """
 from __future__ import annotations
 
@@ -239,8 +239,9 @@ def markers_for_entry(entry: dict, rules: QCRules) -> list[dict]:
     Returnerer markører som skal trackes for QC.
     Kun PK/PK1/PK2 får markører.
     """
-    fsa = entry["fsa"]
-    ctrl = control_id_from_filename(fsa.file_name)
+    fsa = entry.get("fsa")
+    file_name = getattr(fsa, "file_name", None) or entry.get("file_name", "")
+    ctrl = control_id_from_filename(file_name)
     if ctrl not in {"PK", "PK1", "PK2"}:
         return []
 

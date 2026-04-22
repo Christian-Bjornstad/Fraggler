@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fraggler.local/schemas/fraggler-contract-v1.schema.json",
-  "title": "Fraggler v2 Engine Contract",
+  "title": "HemaFrag Diagnostics Engine Contract",
   "type": "object",
   "required": [
     "contract_version",

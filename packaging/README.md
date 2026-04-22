@@ -1,21 +1,21 @@
-# Fraggler Diagnostics — Desktop Packaging
+# HemaFrag Diagnostics — Desktop Packaging
 
-Fraggler is packaged as a **native PyQt desktop app** on all supported platforms.
+HemaFrag is packaged as a **native PyQt desktop app** on all supported platforms.
 The canonical packaged entrypoint is `qt_app.py`.
 
 The embedded/local Panel server is now treated as legacy support only:
 - it is not the default packaged startup path
 - packaged builds disable it by default via a runtime hook
-- it can still be re-enabled explicitly with `FRAGGLER_ENABLE_LEGACY_PANEL=1`
+- it can still be re-enabled explicitly with `HEMAFRAG_ENABLE_LEGACY_PANEL=1`
 
 ## Supported Release Outputs
 
 Every platform is built from the same desktop packaging contract in `build_qt.py`.
 
 Artifacts:
-- macOS: `dist/Fraggler.app` and `dist/releases/Fraggler_macOS.zip`
-- Linux: `dist/Fraggler_Linux` and `dist/releases/Fraggler_Linux_offline.zip`
-- Windows: `dist/Fraggler_Windows` and `dist/releases/Fraggler_Windows.zip`
+- macOS: `dist/HemaFrag.app` and `dist/releases/HemaFrag_macOS.zip`
+- Linux: `dist/HemaFrag_Linux` and `dist/releases/HemaFrag_Linux_offline.zip`
+- Windows: `dist/HemaFrag_Windows` and `dist/releases/HemaFrag_Windows.zip`
 
 ## Platform Targets
 
@@ -30,7 +30,7 @@ Artifacts:
 - Offline bundle includes critical XCB/Qt runtime libraries inside the artifact
 
 ### Windows
-- Native desktop bundle with `Fraggler.exe`
+- Native desktop bundle with `HemaFrag.exe`
 - Same packaged app behavior as macOS/Linux
 
 ## Quick Start
@@ -65,7 +65,7 @@ Build-tool reproducibility:
 
 ## Linux Offline Deployment
 
-Use `dist/releases/Fraggler_Linux_offline.zip`.
+Use `dist/releases/HemaFrag_Linux_offline.zip`.
 
 Target machine:
 - Fedora 35
@@ -74,16 +74,16 @@ Target machine:
 
 Run on Linux:
 ```bash
-unzip Fraggler_Linux_offline.zip -d ~/Fraggler
-cd ~/Fraggler/Fraggler_Linux
-chmod +x Fraggler
-./Fraggler
+unzip HemaFrag_Linux_offline.zip -d ~/HemaFrag
+cd ~/HemaFrag/HemaFrag_Linux
+chmod +x HemaFrag
+./HemaFrag
 ```
 
 Validation checklist:
 ```bash
 ldd --version
-ldd ./Fraggler
+ldd ./HemaFrag
 ```
 
 Expected:
@@ -106,19 +106,19 @@ Expected:
 ## Release Uploads
 
 Recommended GitHub release assets:
-- `Fraggler_macOS.zip`
-- `Fraggler_Linux_offline.zip`
-- `Fraggler_Windows.zip`
+- `HemaFrag_macOS.zip`
+- `HemaFrag_Linux_offline.zip`
+- `HemaFrag_Windows.zip`
 
 ## Troubleshooting
 
 ### Linux launch fails with missing library errors
 - Ensure the full zip was extracted, including `_internal`
-- Run `ldd ./Fraggler`
+- Run `ldd ./HemaFrag`
 - Keep the offline bundle contents together; do not move the binary out of the folder
 
 ### Linux opens with Wayland/X11 issues
-Fraggler forces `QT_QPA_PLATFORM=xcb` in packaged Linux builds for compatibility.
+HemaFrag forces `QT_QPA_PLATFORM=xcb` in packaged Linux builds for compatibility.
 
 ### macOS unsigned app warning
 Use right-click → `Open` the first time, or sign/notarize the zip before release.

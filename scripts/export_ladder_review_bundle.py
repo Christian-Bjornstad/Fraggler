@@ -57,7 +57,11 @@ def _normalize_months(values: list[str]) -> list[str]:
 
 
 def _iter_month_dirs(month_runs_root: Path, selected_months: list[str]) -> list[Path]:
-    month_dirs = [p for p in sorted(month_runs_root.iterdir()) if p.is_dir() and p.name.startswith("2025_")]
+    month_dirs = [
+        p
+        for p in sorted(month_runs_root.iterdir())
+        if p.is_dir() and len(p.name) == 7 and p.name[:4].isdigit() and p.name[4] == "_" and p.name[5:7].isdigit()
+    ]
     if not selected_months:
         return month_dirs
     selected = set(selected_months)

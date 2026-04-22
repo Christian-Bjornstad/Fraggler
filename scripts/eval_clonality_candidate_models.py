@@ -97,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
 def _read_csv(path: Path | None) -> pd.DataFrame:
     if path is None:
         return pd.DataFrame()
-    return pd.read_csv(Path(path).expanduser()).fillna("")
+    try:
+        return pd.read_csv(Path(path).expanduser()).fillna("")
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return pd.DataFrame()
 
 
 def _evaluate_task(

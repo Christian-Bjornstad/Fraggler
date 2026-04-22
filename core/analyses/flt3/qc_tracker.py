@@ -323,7 +323,7 @@ def update_flt3_npm1_qc_tracker(
 
         refresh_clonality_tracking_dashboard(
             excel_path,
-            dashboard_title="Fraggler FLT3/NPM1 Tracking Dashboard",
+            dashboard_title="HemaFrag FLT3/NPM1 Tracking Dashboard",
         )
 
     print_green(f"FLT3/NPM1 QC tracker updated in {excel_path}")

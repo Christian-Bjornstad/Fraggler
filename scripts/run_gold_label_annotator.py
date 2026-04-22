@@ -113,8 +113,14 @@ class GoldLabelAnnotator:
         ladder_path = candidates_dir / "clonality_ladder_candidates.csv"
         pk_path = candidates_dir / "clonality_pk_candidates.csv"
         
-        self.ladder_df = pd.read_csv(ladder_path) if ladder_path.exists() else pd.DataFrame()
-        self.pk_df = pd.read_csv(pk_path) if pk_path.exists() else pd.DataFrame()
+        def _safe_read_csv(p: Path) -> pd.DataFrame:
+            try:
+                return pd.read_csv(p)
+            except (pd.errors.EmptyDataError, FileNotFoundError):
+                return pd.DataFrame()
+
+        self.ladder_df = _safe_read_csv(ladder_path) if ladder_path.exists() else pd.DataFrame()
+        self.pk_df = _safe_read_csv(pk_path) if pk_path.exists() else pd.DataFrame()
         
         # Normalize Ladder DF for unified curation
         if not self.ladder_df.empty:
@@ -134,12 +140,13 @@ class GoldLabelAnnotator:
         self.all_candidates['channel'] = self.all_candidates['channel'].fillna("UNKNOWN").astype(str)
         
         if not self.gold_path.exists():
+            self.gold_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame(columns=[
                 "artifact_table", "artifact_row_key", "label", "label_source", 
                 "reviewer", "reviewed_at_utc", "notes"
             ]).to_csv(self.gold_path, index=False)
             
-        self.gold_df = pd.read_csv(self.gold_path) if self.gold_path.exists() else pd.DataFrame(columns=["artifact_table", "artifact_row_key", "label", "label_source", "reviewer", "reviewed_at_utc", "notes"])
+        self.gold_df = _safe_read_csv(self.gold_path) if self.gold_path.exists() else pd.DataFrame(columns=["artifact_table", "artifact_row_key", "label", "label_source", "reviewer", "reviewed_at_utc", "notes"])
 
         # Unified candidates for grouping
         self.all_candidates = pd.concat([self.ladder_df, self.pk_df], ignore_index=True)

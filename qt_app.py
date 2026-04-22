@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Main Entry Point for PyQt6 UI
+HemaFrag Diagnostics — Main Entry Point for PyQt6 UI
 """
 import multiprocessing
 import sys
@@ -23,11 +23,10 @@ from core.log import log
 
 LEGACY_PANEL_HOST = "localhost"
 LEGACY_PANEL_PORT = 5078
-LEGACY_PANEL_ENABLED = os.environ.get("FRAGGLER_ENABLE_LEGACY_PANEL", "").lower() in {
-    "1",
-    "true",
-    "yes",
-}
+LEGACY_PANEL_ENABLED = (
+    os.environ.get("HEMAFRAG_ENABLE_LEGACY_PANEL", os.environ.get("FRAGGLER_ENABLE_LEGACY_PANEL", "")).lower()
+    in {"1", "true", "yes"}
+)
 
 
 def _remove_macos_metadata_files(bundle_dir: Path) -> None:
@@ -78,7 +77,7 @@ def start_panel_server():
             port=LEGACY_PANEL_PORT,
             address=LEGACY_PANEL_HOST,
             show=False,
-            title="Fraggler Diagnostics",
+            title="HemaFrag Diagnostics",
             verbose=False,
         )
     except Exception as e:
@@ -120,7 +119,7 @@ def main():
                 pass
 
     app = QApplication(sys.argv)
-    app.setApplicationName("Fraggler")
+    app.setApplicationName("HemaFrag Diagnostics")
     app.setOrganizationName("OUS")
     app.setApplicationVersion(APP_VERSION)
     
@@ -168,7 +167,7 @@ if __name__ == "__main__":
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
         msg.setWindowTitle("Startup Error")
-        msg.setText("Fraggler Diagnostics failed to start.")
+        msg.setText("HemaFrag Diagnostics failed to start.")
         msg.setInformativeText(str(e))
         msg.setDetailedText(err_msg)
         msg.exec()

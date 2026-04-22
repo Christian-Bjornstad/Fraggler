@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Matplotlib Plot Helpers.
+HemaFrag Diagnostics — Matplotlib Plot Helpers.
 
 Static matplotlib plotting for zoom views, multi-channel traces, and peak labels.
 """

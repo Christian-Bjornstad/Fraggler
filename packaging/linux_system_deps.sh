@@ -1,9 +1,9 @@
 #!/bin/bash
-# System dependencies for building Fraggler on Linux (offline)
+# System dependencies for building HemaFrag on Linux (offline)
 # Run this as: sudo apt-get install ... (or on air-gapped: copy packages manually)
 
 echo "=========================================="
-echo "  Linux System Dependencies for Fraggler"
+echo "  Linux System Dependencies for HemaFrag"
 echo "=========================================="
 
 # Core build tools

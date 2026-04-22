@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Interactive Plotly Plot Builders.
+HemaFrag Diagnostics — Interactive Plotly Plot Builders.
 
 Interactive peak editors and assay batch plots using Plotly.
 """
@@ -52,6 +52,102 @@ def _assay_reference_ranges() -> dict:
 
 def _nonspecific_peaks() -> dict:
     return merged_analysis_attr("NONSPECIFIC_PEAKS")
+
+
+def _json_dumps_compact(value: object) -> str:
+    """Serialize JSON without extra whitespace to keep report HTML smaller."""
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _get_entry_plot_cache(entry: dict) -> dict:
+    cache = entry.get("_plotly_report_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        entry["_plotly_report_cache"] = cache
+    return cache
+
+
+def _get_fsa_plot_cache(fsa: object) -> dict:
+    cache = getattr(fsa, "_plotly_report_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(fsa, "_plotly_report_cache", cache)
+    return cache
+
+
+def _get_fsa_axis_arrays(fsa: object) -> dict | None:
+    raw_df = getattr(fsa, "sample_data_with_basepairs", None)
+    if raw_df is None or raw_df.empty:
+        return None
+    if "time" not in raw_df.columns or "basepairs" not in raw_df.columns:
+        return None
+
+    cache = _get_fsa_plot_cache(fsa)
+    cache_key = ("axis_arrays", id(raw_df), tuple(raw_df.columns))
+    cached = cache.get("axis_arrays")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["value"]
+
+    value = {
+        "time_all": raw_df["time"].astype(int).to_numpy(),
+        "bp_all": raw_df["basepairs"].to_numpy(),
+        "available_channels": tuple(k for k in fsa.fsa.keys() if k.startswith("DATA")),
+    }
+    cache["axis_arrays"] = {"key": cache_key, "value": value}
+    return value
+
+
+def _get_trace_array(fsa: object, channel: str) -> np.ndarray:
+    cache = _get_fsa_plot_cache(fsa)
+    trace_arrays = cache.setdefault("trace_arrays", {})
+    cached = trace_arrays.get(channel)
+    current = getattr(fsa, "fsa", {}).get(channel)
+    current_id = id(current)
+    if isinstance(cached, dict) and cached.get("source_id") == current_id:
+        return cached["value"]
+
+    value = np.asarray(current, dtype=float)
+    trace_arrays[channel] = {"source_id": current_id, "value": value}
+    return value
+
+
+def _baseline_correct_trace_for_display(full_trace: np.ndarray, assay_name: str | None) -> np.ndarray:
+    if assay_name == "SL":
+        baseline = estimate_running_baseline(full_trace, bin_size=5000, quantile=0.01, use_arpls=False)
+    else:
+        baseline = estimate_running_baseline(full_trace, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
+    return np.maximum(full_trace - baseline, 0.0)
+
+
+def _get_display_trace(entry: dict, channel: str, assay_name: str | None) -> np.ndarray:
+    fsa = entry["fsa"]
+    cache = _get_entry_plot_cache(entry)
+    display_cache = cache.setdefault("display_traces", {})
+    trace = _get_trace_array(fsa, channel)
+    cache_key = (assay_name, channel, id(trace), trace.shape)
+    cached = display_cache.get(channel)
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["value"]
+
+    value = _baseline_correct_trace_for_display(trace, assay_name)
+    display_cache[channel] = {"key": cache_key, "value": value}
+    return value
+
+
+def _get_nonspecific_corrected_trace(entry: dict, channel: str) -> np.ndarray:
+    fsa = entry["fsa"]
+    cache = _get_entry_plot_cache(entry)
+    ns_cache = cache.setdefault("nonspecific_traces", {})
+    trace = _get_trace_array(fsa, channel)
+    cache_key = ("nonspecific", channel, id(trace), trace.shape)
+    cached = ns_cache.get(channel)
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["value"]
+
+    baseline = estimate_running_baseline(trace, bin_size=200, quantile=0.10)
+    value = np.maximum(trace - baseline, 0.0)
+    ns_cache[channel] = {"key": cache_key, "value": value}
+    return value
 
 
 def _flt3_candidate_peaks_for_entry(entry: dict) -> list[dict]:
@@ -277,18 +373,13 @@ def compute_group_ymax_for_entries(entries: list[dict]) -> float:
 def _prepare_plot_data(entry: dict) -> dict | None:
     """Extracts and prepares data for plotting from an entry dict."""
     fsa = entry["fsa"]
-    raw_df = getattr(fsa, "sample_data_with_basepairs", None)
-    if raw_df is None or raw_df.empty:
-        return None
-    if "time" not in raw_df.columns or "basepairs" not in raw_df.columns:
+    axis_arrays = _get_fsa_axis_arrays(fsa)
+    if not axis_arrays:
         return None
 
-    time_all = raw_df["time"].astype(int).to_numpy()
-    bp_all = raw_df["basepairs"].to_numpy()
-    
     primary_ch = entry["primary_peak_channel"]
-    trace_channels = entry.get("trace_channels", [primary_ch])
-    available = [k for k in fsa.fsa.keys() if k.startswith("DATA")]
+    trace_channels = tuple(entry.get("trace_channels", [primary_ch]))
+    available = axis_arrays["available_channels"]
     channels_to_plot = [ch for ch in trace_channels if ch in available]
     if not channels_to_plot:
         channels_to_plot = [primary_ch] if primary_ch in fsa.fsa else []
@@ -296,20 +387,42 @@ def _prepare_plot_data(entry: dict) -> dict | None:
     if not channels_to_plot:
         return None
 
-    # Common x-axis (bp) based on first channel
-    first_ch = channels_to_plot[0]
-    trace_first = np.asarray(fsa.fsa[first_ch])
-    mask = (time_all >= 0) & (time_all < len(trace_first))
-    if not np.any(mask):
-        return None
+    cache = _get_entry_plot_cache(entry)
+    cache_key = (
+        id(axis_arrays["time_all"]),
+        id(axis_arrays["bp_all"]),
+        primary_ch,
+        tuple(channels_to_plot),
+        id(getattr(fsa, "fsa", {}).get(channels_to_plot[0])),
+    )
+    prepared_cache = cache.get("prepared_data")
+    if not isinstance(prepared_cache, dict) or prepared_cache.get("key") != cache_key:
+        time_all = axis_arrays["time_all"]
+        bp_all = axis_arrays["bp_all"]
+        first_ch = channels_to_plot[0]
+        trace_first = _get_trace_array(fsa, first_ch)
+        mask = (time_all >= 0) & (time_all < len(trace_first))
+        if not np.any(mask):
+            return None
+
+        prepared_base = {
+            "fsa": fsa,
+            "time_all": time_all,
+            "bp_all": bp_all,
+            "mask": mask,
+            "bp_trace": bp_all[mask],
+            "channels_to_plot": tuple(channels_to_plot),
+            "channel_trace_arrays": {
+                ch: _get_trace_array(fsa, ch)
+                for ch in channels_to_plot
+            },
+        }
+        cache["prepared_data"] = {"key": cache_key, "value": prepared_base}
+    else:
+        prepared_base = prepared_cache["value"]
 
     return {
-        "fsa": fsa,
-        "time_all": time_all,
-        "bp_all": bp_all,
-        "mask": mask,
-        "bp_trace": bp_all[mask],
-        "channels_to_plot": channels_to_plot,
+        **prepared_base,
         "primary_ch": primary_ch,
         "bp_min": float(entry["bp_min"]),
         "bp_max": float(entry["bp_max"]),
@@ -322,7 +435,8 @@ def _prepare_plot_data(entry: dict) -> dict | None:
         "wt_bp": entry.get("wt_bp"),
         "mut_bp": entry.get("mut_bp"),
         "file_name": fsa.file_name,
-        "sample_id": f"{fsa.file_name}_{primary_ch}"
+        "sample_id": f"{fsa.file_name}_{primary_ch}",
+        "entry_ref": entry,
     }
 
 
@@ -332,6 +446,7 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
     channels_to_plot, primary_ch = data["channels_to_plot"], data["primary_ch"]
     bp_min, bp_max, assay_name = data["bp_min"], data["bp_max"], data["assay_name"]
     time_all = data["time_all"]
+    entry = data.get("entry_ref") or {}
 
     fig = go.Figure()
     ymax_auto_primary = 0.0
@@ -346,15 +461,10 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
         win_bp = (bp_trace >= bp_min) & (bp_trace <= bp_max)
 
     for ch in channels_to_plot:
-        full_trace = np.asarray(fsa.fsa[ch])
-        if assay_name == "SL":
-            baseline = estimate_running_baseline(full_trace, bin_size=5000, quantile=0.01, use_arpls=False)
-        else:
-            baseline = estimate_running_baseline(full_trace, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
-        full_corr = np.maximum(full_trace - baseline, 0.0)
+        full_corr = _get_display_trace(entry, ch, assay_name)
         y_corr = full_corr[time_all[mask]]
-        
-        if y_corr.size == 0: continue
+        if y_corr.size == 0:
+            continue
 
         color = CHANNEL_COLORS.get(ch, DEFAULT_TRACE_COLOR)
         fig.add_trace(go.Scatter(x=bp_trace, y=y_corr, mode="lines", name=f"{ch} trace", line=dict(width=1, color=color), hoverinfo="x+y"))
@@ -363,7 +473,8 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
         if y_win.size > 0 and np.any(np.isfinite(y_win)):
             local_max = float(np.nanmax(y_win))
             ymax_auto_all = max(ymax_auto_all, local_max)
-            if ch == primary_ch: ymax_auto_primary = max(ymax_auto_primary, local_max)
+            if ch == primary_ch:
+                ymax_auto_primary = max(ymax_auto_primary, local_max)
 
     # 4) Select final ymax
     forced_ymax = data["forced_ymax"]
@@ -388,9 +499,7 @@ def _create_plotly_figure(data: dict) -> tuple[go.Figure, float, int]:
 
     # NS Peaks
     if assay_name in _nonspecific_peaks():
-        trace_data = np.asarray(fsa.fsa[primary_ch]).astype(float)
-        baseline = estimate_running_baseline(trace_data, bin_size=200, quantile=0.10)
-        corr_trace = np.maximum(trace_data - baseline, 0.0)
+        corr_trace = _get_nonspecific_corrected_trace(entry, primary_ch)
         ns_x, ns_y, ns_text = [], [], []
         for ns_bp in _nonspecific_peaks()[assay_name]:
             shapes.append(dict(type="line", x0=float(ns_bp), x1=float(ns_bp), y0=0, y1=1, xref="x", yref="paper", line=dict(color="rgba(100, 116, 139, 0.7)", width=1.5, dash="dashdot")))
@@ -467,16 +576,16 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
 
     div_id = f"peakplot_{data['sample_id'].replace('.','_')}_{uuid.uuid4().hex}"
     entry["_report_plot_id"] = div_id
-    fig_json = json.dumps(fig.to_plotly_json())
-    initial_peaks_json = json.dumps(initial_peaks)
+    fig_json = _json_dumps_compact(fig.to_plotly_json())
+    initial_peaks_json = _json_dumps_compact(initial_peaks)
     manual_ratio_assays = {"FLT3-ITD", "FLT3-D835"}
     is_manual_ratio_assay = data["assay_name"] in manual_ratio_assays
     manual_trace_channels = [ch for ch in data["channels_to_plot"] if str(ch).startswith("DATA")]
     flt3_initial_selection = entry.get("manual_ratio_selection") if is_manual_ratio_assay else {}
-    flt3_manual_selection_json = json.dumps(
+    flt3_manual_selection_json = _json_dumps_compact(
         flt3_initial_selection or {"enabled": False, "version": 2, "mutant_peak_ids": [], "wt_peak_ids": []}
     )
-    manual_trace_channels_json = json.dumps(manual_trace_channels)
+    manual_trace_channels_json = _json_dumps_compact(manual_trace_channels)
 
     manual_panel_html = ""
     if is_manual_ratio_assay:
@@ -596,8 +705,13 @@ def build_interactive_peak_plot_for_entry(entry: dict) -> str | None:
     }}
   }}
 
-  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
-    if (window.ReportPlotManager) {{ window.ReportPlotManager.register(g); }}
+  var plotConfig = {{ responsive: true, displaylogo: false }};
+  var mountPlot = (window.ReportPlotManager && window.ReportPlotManager.mountPlot)
+    ? window.ReportPlotManager.mountPlot(gd, fig.data, fig.layout, plotConfig)
+    : Plotly.newPlot(gd, fig.data, fig.layout, plotConfig);
+
+  mountPlot.then(function(g) {{
+    if (window.ReportPlotManager && !window.ReportPlotManager.mountPlot) {{ window.ReportPlotManager.register(g); }}
     var baseShapes = (g.layout.shapes || []).slice();
     var baseAnnots = (g.layout.annotations || []).slice();
     var primaryTrace = g.data[primaryTraceIndex] || {{}};
@@ -1657,7 +1771,7 @@ def build_interactive_assay_batch_plot_html(
             zeroline=False,
         )
 
-        fig_json = json.dumps(fig.to_plotly_json())
+        fig_json = _json_dumps_compact(fig.to_plotly_json())
 
         # Unik div-id per entry
         safe_name = (
@@ -1726,8 +1840,13 @@ def build_interactive_assay_batch_plot_html(
     }}
   }}
 
-  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
-    if (window.ReportPlotManager) {{ window.ReportPlotManager.register(g); }}
+  var plotConfig = {{ responsive: true, displaylogo: false }};
+  var mountPlot = (window.ReportPlotManager && window.ReportPlotManager.mountPlot)
+    ? window.ReportPlotManager.mountPlot(gd, fig.data, fig.layout, plotConfig)
+    : Plotly.newPlot(gd, fig.data, fig.layout, plotConfig);
+
+  mountPlot.then(function(g) {{
+    if (window.ReportPlotManager && !window.ReportPlotManager.mountPlot) {{ window.ReportPlotManager.register(g); }}
     var primaryTrace = g.data[0] || {{}};
 
     function decodePlotlyArray(val) {{

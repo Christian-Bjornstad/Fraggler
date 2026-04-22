@@ -34,7 +34,7 @@ DASHBOARD_SHEETS = [
 def refresh_clonality_tracking_dashboard(
     excel_path: Path,
     *,
-    dashboard_title: str = "Fraggler Klonalitet Dashboard",
+    dashboard_title: str = "HemaFrag Klonalitet Dashboard",
 ) -> None:
     if not excel_path.exists():
         return
@@ -411,4 +411,3 @@ def _add_dashboard_charts(ws, assay_ws, pk_sample_ws) -> None:
     pk_chart.add_data(Reference(pk_sample_ws, min_col=3, min_row=1, max_row=max_row), titles_from_data=True)
     pk_chart.set_categories(Reference(pk_sample_ws, min_col=1, min_row=2, max_row=max_row))
     ws.add_chart(pk_chart, "J30")
-

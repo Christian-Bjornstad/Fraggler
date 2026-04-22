@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Main Pipeline.
+HemaFrag Diagnostics — Main Pipeline.
 
 ``run_pipeline`` processes all .fsa files in a directory, classifies them,
 fits ladders, detects peaks, builds DIT reports, and orchestrates the full
@@ -199,11 +199,15 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
     )
     ladder_qc_status = "ok"
     ladder_r2, n_ladder_steps, n_size_standard_peaks = np.nan, np.nan, np.nan
+    ladder_mean_residual_bp, ladder_max_residual_bp, ladder_max_curvature = np.nan, np.nan, np.nan
     try:
         metrics = compute_ladder_qc_metrics(fsa)
         ladder_r2 = metrics["r2"]
         n_ladder_steps = metrics["n_ladder_steps"]
         n_size_standard_peaks = metrics["n_size_standard_peaks"]
+        ladder_mean_residual_bp = metrics["mean_abs_error_bp"]
+        ladder_max_residual_bp = metrics["max_abs_error_bp"]
+        ladder_max_curvature = metrics["max_curvature"]
         if ladder_fit_strategy == "manual_adjustment":
             ladder_qc_status = "manual_adjustment"
         elif ladder_review_required:
@@ -225,11 +229,31 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
         except Exception as ex:
             print_warning(f"[SL] Klarte ikke beregne SL-area for {fsa.file_name}: {ex}")
 
+    # Pre-calculate tracking peaks to avoid re-detection later (saves time + allows dropping raw FSA)
+    from core.qc.qc_rules import QCRules
+    from core.qc.qc_markers import markers_for_entry, evaluate_peak_near_bp_with_fallback
+    
+    rules = QCRules() # Default rules for tracking
+    tracking_marker_results = {}
+    markers = markers_for_entry({"fsa": fsa, "assay": assay, "ladder": ladder}, rules)
+    for marker in markers:
+        channel = primary_peak_channel if marker["channel"] == "primary" else str(marker["channel"])
+        res = evaluate_peak_near_bp_with_fallback(
+            fsa=fsa,
+            channel=channel,
+            target_bp=float(marker["expected_bp"]),
+            window_bp=float(marker["window_bp"]),
+            baseline_correct=True,
+            name=marker.get("name"),
+        )
+        tracking_marker_results[marker["name"]] = res["selected"]
+
     return {
         "fsa": fsa,
         "file_name": fsa.file_name,
         "source_run_dir": resolve_source_run_dir({"fsa": fsa}),
         "peaks_by_channel": peaks_by_channel,
+        "tracking_marker_results": tracking_marker_results,
         "trace_channels": trace_channels,
         "primary_peak_channel": primary_peak_channel,
         "ymax": ymax,
@@ -241,6 +265,9 @@ def _analyze_single_file(fsa_path: Path) -> dict | None:
         "dit": extract_dit_from_name(fsa.file_name),
         "ladder_qc_status": ladder_qc_status,
         "ladder_r2": ladder_r2,
+        "ladder_mean_residual_bp": ladder_mean_residual_bp,
+        "ladder_max_residual_bp": ladder_max_residual_bp,
+        "ladder_max_curvature": ladder_max_curvature,
         "n_ladder_steps": n_ladder_steps,
         "n_size_standard_peaks": n_size_standard_peaks,
         "ladder_fit_strategy": ladder_fit_strategy,
@@ -350,7 +377,7 @@ def run_pipeline(
 ) -> list[dict] | None:
 
     """
-    Kjør full Fraggler-pipeline på alle .fsa-filer i fsa_dir.
+    Kjør full HemaFrag-pipeline på alle .fsa-filer i fsa_dir.
     """
     fsa_dir, assay_dir = normalize_pipeline_paths(fsa_dir, base_outdir, assay_folder_name)
 

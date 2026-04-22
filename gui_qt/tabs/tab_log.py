@@ -17,7 +17,7 @@ class TabLog(QWidget):
         header_layout = QHBoxLayout()
         title = QLabel("System Log")
         title.setObjectName("PageTitle")
-        sub = QLabel("Real-time execution logs from the core Fraggler pipeline.")
+        sub = QLabel("Real-time execution logs from the core HemaFrag pipeline.")
         sub.setObjectName("PageSubtitle")
         
         self.clear_btn = QPushButton("Clear Log")

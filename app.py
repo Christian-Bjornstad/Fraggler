@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — App Entry Point (templateless)
+HemaFrag Diagnostics — App Entry Point (templateless)
 
 panel serve app.py --port 5078 --allow-websocket-origin=localhost:5078
 """
@@ -21,4 +21,4 @@ pn.extension(
 
 from gui.main import build_app
 
-build_app().servable(title="Fraggler Diagnostics")
+build_app().servable(title="HemaFrag Diagnostics")

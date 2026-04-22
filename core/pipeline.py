@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Pipeline Dispatcher.
+HemaFrag Diagnostics — Pipeline Dispatcher.
 """
 from __future__ import annotations
 import inspect

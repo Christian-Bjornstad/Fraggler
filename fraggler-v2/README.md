@@ -1,6 +1,6 @@
-# Fraggler v2
+# HemaFrag Rust Engine
 
-`fraggler-v2` is the Rust-first rewrite track for Fraggler.
+`fraggler-v2` is the Rust-first engine workspace for HemaFrag Diagnostics.
 
 Current scope in this scaffold:
 - establish the new workspace layout

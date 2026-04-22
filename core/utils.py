@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Shared Utilities.
+HemaFrag Diagnostics — Shared Utilities.
 """
 from __future__ import annotations
 import re

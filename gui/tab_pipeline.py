@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Pipeline Tab
+HemaFrag Diagnostics — Pipeline Tab
 """
 from __future__ import annotations
 
@@ -142,7 +142,7 @@ def make_pipeline_tab() -> pn.Column:
             "Pipeline Run",
             "Run FLT3 / NPM1 fragment analysis on a single folder of .fsa files"
             if is_flt3 else
-            "Run Fraggler assay analysis on a single folder of .fsa files"
+            "Run HemaFrag assay analysis on a single folder of .fsa files"
         ),
         VSpace(8),
         analysis_note,

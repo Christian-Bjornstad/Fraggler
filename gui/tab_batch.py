@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Batch Tab
+HemaFrag Diagnostics — Batch Tab
 
 Folder selection always visible. Job table and progress below. Settings collapsed.
 """
@@ -450,7 +450,7 @@ def make_batch_tab() -> pn.Column:
     # ── Layout ────────────────────────────────────────────────────────
     return pn.Column(
         # Page heading
-        section_header("Batch Processing", "Scan for patient folders and run the Fraggler pipeline."),
+        section_header("Batch Processing", "Scan for patient folders and run the HemaFrag pipeline."),
 
         # ── FOLDER CARD (always visible) ──────────────────────────────
         pn.pane.HTML('<div class="fd-card-title">Folders</div>'),

@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Assay Configuration & Constants.
+HemaFrag Diagnostics — Assay Configuration & Constants.
 
 Dispatcher for analysis-specific configurations.
 """

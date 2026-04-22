@@ -7,7 +7,7 @@ HOST_UID="$(id -u)"
 HOST_GID="$(id -g)"
 
 echo "============================================================"
-echo "  Building Fraggler Diagnostics for Linux Offline Bundle"
+echo "  Building HemaFrag Diagnostics for Linux Offline Bundle"
 echo "============================================================"
 
 # Ensure Docker binaries are in PATH (common for Docker Desktop on Mac)
@@ -37,5 +37,5 @@ docker run --rm \
     alpine sh -lc "chown -R ${HOST_UID}:${HOST_GID} /mnt"
 
 echo "Done!"
-echo "Portable folder: dist/Fraggler_Linux"
-echo "Offline zip    : dist/releases/Fraggler_Linux_offline.zip"
+echo "Portable folder: dist/HemaFrag_Linux"
+echo "Offline zip    : dist/releases/HemaFrag_Linux_offline.zip"

@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Job Execution
+HemaFrag Diagnostics — Job Execution
 
 AsyncExecutor for background threads + pipeline/QC/DIT job wrappers.
 Compatible with Python 3.10+.
@@ -11,7 +11,7 @@ import shutil
 import tempfile
 import threading
 from pathlib import Path
-from typing import Callable, List, Optional, Any
+from typing import Callable, List, Optional, Any, Dict, Tuple
 
 import param
 
@@ -307,6 +307,7 @@ def run_pipeline_job(
 # PIPELINE JOB (with return_entries for DIT aggregation)
 # ============================================================
 
+
 def run_pipeline_job_collect(
     fsa_dir: Optional[Path],
     base_outdir: Path,
@@ -318,11 +319,23 @@ def run_pipeline_job_collect(
     chunk_files: bool = True,
     tracking_excel_path: Path | None = None,
     progress_callback=None,
+    return_entries: bool = True,
+    make_dit_reports: bool = False,
     update_tracking_workbook: bool = False,
-) -> list:
-    """
-    Like run_pipeline_job but returns entries for cross-folder DIT aggregation.
-    """
+) -> List[Dict[str, Any]]:
+    """Run a pipeline job and optionally collect entries for DIT aggregation."""
+    effective_files = files
+    if effective_files is None and fsa_dir is not None:
+        from core.batch import _scan_folder_fsa_files
+        effective_files = _scan_folder_fsa_files(fsa_dir, {})
+
+    if not effective_files:
+        return []
+
+    assay_outdir = base_outdir / out_folder_name
+    assay_outdir.mkdir(parents=True, exist_ok=True)
+
+    # Original Python logic
     effective_mode = "all"
     if scope == "controls":
         effective_mode = "controls"
@@ -483,8 +496,9 @@ def run_qc_job(
     tracking_excel_path: Path | None = None,
     update_tracking_workbook: bool = True,
     return_entries: bool = False,
+    skip_html_reports: bool = False,
     progress_callback=None,
-) -> Optional[Path] | tuple[Optional[Path], list[dict]]:
+) -> Optional[Path] | Tuple[Optional[Path], List[Dict[str, Any]]]:
     """Run QC analysis and return the path to the HTML report."""
     from datetime import datetime
     
@@ -534,8 +548,8 @@ def run_qc_job(
             if total_fsa > 0 and empty_or_bad == total_fsa:
                 raise RuntimeError("All QC .fsa files were empty or unreadable.")
             raise RuntimeError("No QC entries found (check file names or skipped unreadable files).")
-
-        build_qc_html(entries, out_html, rules, excel_path)
+        if not skip_html_reports:
+            build_qc_html(entries, out_html, rules, excel_path)
         run_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         update_excel_trends(excel_path, entries, rules, run_ts)
 

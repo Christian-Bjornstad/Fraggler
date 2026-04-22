@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — PyQt6 Architecture Stylesheet
+HemaFrag Diagnostics — PyQt6 Architecture Stylesheet
 """
 
 VIBRANT_PRO_QSS = """

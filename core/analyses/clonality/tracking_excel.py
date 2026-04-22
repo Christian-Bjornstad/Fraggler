@@ -49,6 +49,9 @@ PATIENT_RUN_SHEET_COLUMNS = [
     "LadderExpectedStepCount",
     "LadderFittedStepCount",
     "LadderR2",
+    "LadderMeanResidualBp",
+    "LadderMaxResidualBp",
+    "LadderCurvature",
     "Spacer1",
     "Spacer2",
     "Spacer3",
@@ -73,6 +76,9 @@ CONTROL_RUN_SHEET_COLUMNS = [
     "LadderExpectedStepCount",
     "LadderFittedStepCount",
     "LadderR2",
+    "LadderMeanResidualBp",
+    "LadderMaxResidualBp",
+    "LadderCurvature",
 ]
 PEAK_SHEET_COLUMNS = [
     "Month",
@@ -171,7 +177,8 @@ def update_clonality_tracking_workbook(
 
     rules = rules or build_clonality_qc_rules()
     df_patient, df_control, df_peaks, pk_identity_keys = _build_tracking_frames(entries, rules)
-    if df_patient.empty and df_control.empty and df_peaks.empty:
+    # If no data and file exists, nothing to do. If no data and file MISSING, we create the skeleton below.
+    if df_patient.empty and df_control.empty and df_peaks.empty and excel_path.exists():
         return
 
     with _clonality_excel_lock:
@@ -356,6 +363,15 @@ def _build_run_row(entry: dict) -> dict:
     ladder_r2 = entry.get("ladder_r2")
     if ladder_r2 is None or not np.isfinite(ladder_r2):
         ladder_r2 = ""
+    ladder_mean_residual_bp = entry.get("ladder_mean_residual_bp")
+    if ladder_mean_residual_bp is None or not np.isfinite(ladder_mean_residual_bp):
+        ladder_mean_residual_bp = ""
+    ladder_max_residual_bp = entry.get("ladder_max_residual_bp")
+    if ladder_max_residual_bp is None or not np.isfinite(ladder_max_residual_bp):
+        ladder_max_residual_bp = ""
+    ladder_curvature = entry.get("ladder_max_curvature")
+    if ladder_curvature is None or not np.isfinite(ladder_curvature):
+        ladder_curvature = ""
 
     return {
         "Month": _month_bucket(join_fields["run_date"]),
@@ -377,6 +393,9 @@ def _build_run_row(entry: dict) -> dict:
         "LadderExpectedStepCount": int(entry.get("ladder_expected_step_count", 0) or 0),
         "LadderFittedStepCount": int(entry.get("ladder_fitted_step_count", 0) or 0),
         "LadderR2": ladder_r2,
+        "LadderMeanResidualBp": ladder_mean_residual_bp,
+        "LadderMaxResidualBp": ladder_max_residual_bp,
+        "LadderCurvature": ladder_curvature,
         "Spacer1": "",
         "Spacer2": "",
         "Spacer3": "",
@@ -389,25 +408,34 @@ def _build_pk_peak_rows(entry: dict, rules: QCRules, base_row: dict) -> list[dic
     fsa = entry["fsa"]
     primary_channel = str(entry.get("primary_peak_channel") or "")
 
+    tracking_results = entry.get("tracking_marker_results")
     for marker in markers_for_entry(entry, rules):
         channel = primary_channel if marker["channel"] == "primary" else str(marker["channel"])
-        if marker["kind"] == "sample":
-            result = find_peak_near_bp_with_fallback(
-                fsa=fsa,
-                channel=channel,
-                target_bp=float(marker["expected_bp"]),
-                window_bp=float(marker["window_bp"]),
-                fallback_window_bp=float(getattr(rules, "sample_peak_window_bp_fallback", marker["window_bp"])),
-                baseline_correct=True,
-            )
-        else:
-            result = find_peak_near_bp(
-                fsa=fsa,
-                channel=channel,
-                target_bp=float(marker["expected_bp"]),
-                window_bp=float(marker["window_bp"]),
-                baseline_correct=True,
-            )
+
+        result = None
+        if tracking_results and marker["name"] in tracking_results:
+            result = tracking_results[marker["name"]]
+
+        if result is None:
+            if entry.get("fsa") is None:
+                result = {"ok": False, "reason": "FSA data dropped and no pre-calculated results"}
+            elif marker["kind"] == "sample":
+                result = find_peak_near_bp_with_fallback(
+                    fsa=fsa,
+                    channel=channel,
+                    target_bp=float(marker["expected_bp"]),
+                    window_bp=float(marker["window_bp"]),
+                    fallback_window_bp=float(getattr(rules, "sample_peak_window_bp_fallback", marker["window_bp"])),
+                    baseline_correct=True,
+                )
+            else:
+                result = find_peak_near_bp(
+                    fsa=fsa,
+                    channel=channel,
+                    target_bp=float(marker["expected_bp"]),
+                    window_bp=float(marker["window_bp"]),
+                    baseline_correct=True,
+                )
 
         row = {
             "Month": _month_bucket(base_row["RunDate"]),
@@ -598,6 +626,6 @@ def _apply_reference_tracking_headers(excel_path: Path) -> None:
     wb = load_workbook(excel_path)
     if "Patient_Runs" in wb.sheetnames:
         ws = wb["Patient_Runs"]
-        for col in range(15, 19):
-            ws.cell(1, col).value = None
+        for col, header in enumerate(PATIENT_RUN_SHEET_COLUMNS, start=1):
+            ws.cell(1, col).value = header
     wb.save(excel_path)

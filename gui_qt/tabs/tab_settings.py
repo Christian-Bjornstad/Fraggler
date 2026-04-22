@@ -135,7 +135,7 @@ class TabAnalysisSettings(QWidget):
         card.setObjectName("Card")
         layout = QFormLayout(card)
 
-        layout.addRow(QLabel("<b>Shared App Settings</b>"))
+        layout.addRow(QLabel("<b>Shared App Settings & Engine</b>"))
 
         self.author = QLineEdit()
         layout.addRow("Author (for PDF templates):", self.author)
@@ -151,6 +151,11 @@ class TabAnalysisSettings(QWidget):
         self.d_min_r2_warn.setSingleStep(0.001)
         self.d_min_r2_warn.setDecimals(3)
         layout.addRow("Min R² (WARN):", self.d_min_r2_warn)
+
+        self.engine_note = QLabel("Ladder fitting now runs with the integrated Rust engine by default.")
+        self.engine_note.setWordWrap(True)
+        self.engine_note.setStyleSheet("color: #2563eb; font-weight: 600;")
+        layout.addRow("", self.engine_note)
 
         btn_save = QPushButton(f"Save {self.analysis_label} Settings")
         btn_save.setObjectName("PrimaryButton")
@@ -168,7 +173,6 @@ class TabAnalysisSettings(QWidget):
         pipeline_settings = analysis_settings.get("pipeline", {})
         general_settings = APP_SETTINGS.get("general", {})
         qc_settings = APP_SETTINGS.get("qc", {})
-
         self.default_input.setText(batch_settings.get("base_input_dir", str(Path.home())))
         self.default_output.setText(batch_settings.get("output_base", str(Path.home())))
         self.tracking_excel_path.setText(batch_settings.get("tracking_excel_path", ""))
@@ -208,6 +212,7 @@ class TabAnalysisSettings(QWidget):
         APP_SETTINGS.setdefault("general", {})["author"] = self.author.text().strip()
         APP_SETTINGS.setdefault("qc", {})["min_r2_ok"] = self.d_min_r2_ok.value()
         APP_SETTINGS.setdefault("qc", {})["min_r2_warn"] = self.d_min_r2_warn.value()
+        APP_SETTINGS.setdefault("engine", {})["use_rust"] = True
 
         save_settings(APP_SETTINGS)
         self.settings_saved.emit(self.analysis_id)

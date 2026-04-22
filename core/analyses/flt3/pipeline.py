@@ -60,7 +60,7 @@ RELEVANT_PEAK_LABELS = {"WT", "MUT", "ITD"}
 FLT3_QC_TRENDS_FILENAME = "FLT3_QC_TRENDS.xlsx"
 FLT3_MANUAL_RATIO_VERSION = 2
 MANUAL_RATIO_ASSAYS = {"FLT3-ITD", "FLT3-D835"}
-FLT3_REVIEW_MAX_RESIDUAL_BP = 3.0
+FLT3_REVIEW_MAX_RESIDUAL_BP = 4.0
 FLT3_LOW_SIGNAL_LADDER_PROMINENCE = 100.0
 FLT3_LOW_END_LADDER_PROMINENCE = 120.0
 FLT3_LATE_TEMPLATE_TOLERANCE = 950.0
@@ -837,6 +837,8 @@ def _infer_sizing_method(fsa: FsaFile) -> str:
         return "spline"
     if model_name == "LinearRegression":
         return "polynomial_refinement"
+    if model_name == "_RustSizingModel":
+        return "rust_hybrid"
     return "unknown"
 
 

@@ -132,9 +132,6 @@ def build_candidate_rows_from_fsa(task: dict[str, Any], fsa) -> pd.DataFrame:
     from core.analysis import get_ladder_candidates
 
     candidate_table = get_ladder_candidates(fsa).copy()
-    if candidate_table.empty:
-        return pd.DataFrame()
-
     selected_map: dict[int, float] = {}
     best_size_standard = getattr(fsa, "best_size_standard", None)
     ladder_steps = getattr(fsa, "ladder_steps", None)
@@ -142,6 +139,40 @@ def build_candidate_rows_from_fsa(task: dict[str, Any], fsa) -> pd.DataFrame:
     ladder_steps = np.asarray([] if ladder_steps is None else ladder_steps, dtype=float)
     for time_value, step_bp in zip(best_size_standard.tolist(), ladder_steps.tolist()):
         selected_map[int(round(float(time_value)))] = float(step_bp)
+
+    trace = np.asarray(getattr(fsa, "size_standard", []), dtype=float)
+    recovered_rows: list[dict[str, Any]] = []
+    if best_size_standard.size > 0:
+        existing_times = (
+            candidate_table["time"].astype(float).to_numpy()
+            if not candidate_table.empty and "time" in candidate_table.columns
+            else np.asarray([], dtype=float)
+        )
+        next_index = (
+            int(pd.to_numeric(candidate_table["index"], errors="coerce").max()) + 1
+            if not candidate_table.empty and "index" in candidate_table.columns
+            else 0
+        )
+        for time_value in best_size_standard.tolist():
+            time_float = float(time_value)
+            if existing_times.size and np.any(np.abs(existing_times - time_float) <= 1.5):
+                continue
+            idx = int(round(time_float))
+            intensity = float(trace[idx]) if 0 <= idx < trace.size else float("nan")
+            recovered_rows.append(
+                {
+                    "index": next_index,
+                    "time": time_float,
+                    "intensity": intensity,
+                    "source": "fit_anchor",
+                }
+            )
+            next_index += 1
+
+    if recovered_rows:
+        candidate_table = pd.concat([candidate_table, pd.DataFrame(recovered_rows)], ignore_index=True)
+    if candidate_table.empty:
+        return pd.DataFrame()
 
     rows: list[dict[str, Any]] = []
     for row in candidate_table.to_dict("records"):
@@ -283,6 +314,15 @@ class LadderReviewAnnotator:
             button_type="default",
             value="All",
         )
+        initial_queue = "pending"
+        case_reviewed = (
+            self.case_df["label"].astype(str).str.strip().ne("")
+            | self.case_df["label_note"].astype(str).str.strip().ne("")
+            | self.case_df["reviewed_at_utc"].astype(str).str.strip().ne("")
+        )
+        if len(self.case_df) and int((~case_reviewed).sum()) == 0:
+            initial_queue = "all"
+
         self.queue_filter = pn.widgets.RadioButtonGroup(
             name="Queue",
             options={
@@ -291,7 +331,7 @@ class LadderReviewAnnotator:
                 "Reviewed only": "reviewed",
             },
             button_type="primary",
-            value="pending",
+            value=initial_queue,
         )
         self.sort_mode = pn.widgets.RadioButtonGroup(
             name="Sort",
@@ -613,6 +653,38 @@ class LadderReviewAnnotator:
             return self._empty_candidate_frame()
         return self._normalize_candidate_rows(rows, task)
 
+    def _merge_candidate_annotations(
+        self,
+        live_rows: pd.DataFrame,
+        saved_rows: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Keep fresh live candidates, but preserve manual labels/notes when times align."""
+        live = self._normalize_candidate_rows(live_rows, self.current_case or {}) if not live_rows.empty else self._empty_candidate_frame()
+        if saved_rows.empty or live.empty:
+            return live
+
+        saved = self._normalize_candidate_rows(saved_rows, self.current_case or {})
+        if saved.empty:
+            return live
+
+        for live_idx, live_row in live.iterrows():
+            distances = (saved["candidate_time"] - float(live_row["candidate_time"])).abs()
+            if distances.empty:
+                continue
+            best_idx = int(distances.idxmin())
+            best_distance = float(distances.loc[best_idx])
+            if best_distance > 3.0:
+                continue
+            saved_row = saved.loc[best_idx]
+            label = str(saved_row.get("human_label", "")).strip()
+            note = str(saved_row.get("human_note", "")).strip()
+            if label:
+                live.at[live_idx, "human_label"] = label
+            if note:
+                live.at[live_idx, "human_note"] = note
+
+        return live
+
     def _add_manual_candidate_at_time(self, clicked_time: float) -> int | None:
         if self.current_case is None or self.current_trace.size == 0:
             return None
@@ -867,7 +939,8 @@ class LadderReviewAnnotator:
     def _load_case(self, task: dict[str, Any]) -> None:
         self.current_case = task
         self.case_label.value = task.get("label") or None
-        self.current_case_candidates = self._task_candidates(task)
+        saved_case_candidates = self._task_candidates(task)
+        self.current_case_candidates = saved_case_candidates.copy()
         note_value = str(task.get("label_note") or "")
         if not note_value and not self.current_case_candidates.empty:
             candidate_notes = [
@@ -920,8 +993,8 @@ class LadderReviewAnnotator:
             self.current_plot_error = str(cached["plot_error"])
             self.current_qc_metrics = cached["metrics"]
             self.current_trace_click_x = None
-            if self.current_case_candidates.empty:
-                self.current_case_candidates = self._candidate_frame_from_fsa(task, cached["fsa"])
+            live_candidates = self._candidate_frame_from_fsa(task, cached["fsa"])
+            self.current_case_candidates = self._merge_candidate_annotations(live_candidates, saved_case_candidates)
             self._recompute_preview_metrics()
             self._set_status(f"Loaded {task['assay']} {task['well']} for review.", level="success")
         except Exception as exc:
@@ -1027,6 +1100,19 @@ class LadderReviewAnnotator:
         self.candidate_table.selection = list(self.current_candidate_selection)
         self._updating_candidate_selection = False
 
+    def _plot_peak_intensity(self, time_value: float, radius: int = 4) -> float:
+        if self.current_trace.size == 0:
+            return float("nan")
+        center = int(round(time_value))
+        if center < 0 or center >= self.current_trace.size:
+            return float("nan")
+        left = max(0, center - radius)
+        right = min(self.current_trace.size, center + radius + 1)
+        window = self.current_trace[left:right]
+        if window.size == 0:
+            return float(self.current_trace[center])
+        return float(np.max(window))
+
     def _refresh_plot(self) -> None:
         if self.current_case is None:
             self.plot.object = go.Figure()
@@ -1052,7 +1138,10 @@ class LadderReviewAnnotator:
         for row_idx, row in self.current_case_candidates.iterrows():
             candidate_idx = int(row["candidate_index"])
             time_value = float(row["candidate_time"])
-            intensity_value = float(row["candidate_intensity"])
+            source_intensity = float(row["candidate_intensity"])
+            intensity_value = self._plot_peak_intensity(time_value)
+            if not np.isfinite(intensity_value):
+                intensity_value = source_intensity
             fit_used = self._truthy(row.get("selected_for_fit"))
             human_label = str(row.get("human_label", "")).strip().lower()
             is_selected = row_idx in self.current_candidate_selection
@@ -1090,7 +1179,8 @@ class LadderReviewAnnotator:
                     name=f"candidate {candidate_idx}",
                     customdata=[[int(row_idx), candidate_idx]],
                     hovertemplate=(
-                        f"candidate #{candidate_idx}<br>time={time_value:.1f}<br>intensity={intensity_value:.0f}"
+                        f"candidate #{candidate_idx}<br>time={time_value:.1f}<br>plot_intensity={intensity_value:.0f}"
+                        f"<br>candidate_intensity={source_intensity:.0f}"
                         f"<br>fit_used={fit_used}<br>human_label={human_label or '-'}<extra></extra>"
                     ),
                 )

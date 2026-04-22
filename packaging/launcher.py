@@ -42,7 +42,7 @@ def open_browser_delayed():
 
 def main():
     print("=" * 60)
-    print("  Fraggler Diagnostics")
+    print("  HemaFrag Diagnostics")
     print("=" * 60)
     print(f"  App directory : {APP_DIR}")
     print(f"  Bundle dir    : {BUNDLE_DIR}")
@@ -52,7 +52,7 @@ def main():
 
     # ── Graceful shutdown on Ctrl+C ──
     def handle_sigint(sig, frame):
-        print("\n\n✦ Shutting down Fraggler Diagnostics …")
+        print("\n\n✦ Shutting down HemaFrag Diagnostics …")
         sys.exit(0)
 
     signal.signal(signal.SIGINT, handle_sigint)
@@ -77,7 +77,7 @@ def main():
         port=PORT,
         address=HOST,
         show=False,
-        title="Fraggler Diagnostics",
+        title="HemaFrag Diagnostics",
         verbose=False,
     )
 

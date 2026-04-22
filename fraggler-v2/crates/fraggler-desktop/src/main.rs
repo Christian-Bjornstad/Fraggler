@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::rc::Rc;
 
 use anyhow::Result;
 use camino::Utf8PathBuf;
@@ -7,20 +8,21 @@ use fraggler_core::{
     AnalysisKind, ContractVersion, EngineMessage, EnginePayload, EventSink, InputSpec, OutputSpec,
     RunKind, RunOptions, RunRequest, run_request,
 };
-use slint::{ComponentHandle, SharedString, Weak};
+use slint::{ComponentHandle, SharedString, Weak, Model, VecModel, ModelRc};
 use uuid::Uuid;
+use walkdir::WalkDir;
 
 slint::include_modules!();
 
 fn main() -> Result<()> {
     let app = MainWindow::new()?;
     let readme_path = workspace_readme_path();
-    let default_input = default_input_path();
     let default_output = default_output_path();
 
-    app.set_input_path(SharedString::from(
-        default_input.to_string_lossy().to_string(),
-    ));
+    // Setup input sources model
+    let input_sources_model = Rc::new(VecModel::<SharedString>::default());
+    app.set_input_sources(ModelRc::from(input_sources_model.clone()));
+
     app.set_output_path(SharedString::from(
         default_output.to_string_lossy().to_string(),
     ));
@@ -56,18 +58,43 @@ fn main() -> Result<()> {
 
     {
         let weak = app.as_weak();
-        app.on_browse_input(move || {
-            if let Some(path) = rfd::FileDialog::new()
+        let model = input_sources_model.clone();
+        app.on_add_files(move || {
+            if let Some(paths) = rfd::FileDialog::new()
                 .add_filter("FSA/ABI", &["fsa", "FSA", "abi", "ABI"])
-                .pick_file()
+                .pick_files()
             {
-                set_input_path(&weak, &path.to_string_lossy());
+                for path in paths {
+                    model.push(SharedString::from(path.to_string_lossy().to_string()));
+                    append_log(
+                        &weak,
+                        &format!("[desktop] added file {}", path.display()),
+                    );
+                }
+                set_status(&weak, "Files added to queue.");
+            }
+        });
+    }
+
+    {
+        let weak = app.as_weak();
+        let model = input_sources_model.clone();
+        app.on_add_folder(move || {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                model.push(SharedString::from(path.to_string_lossy().to_string()));
                 append_log(
                     &weak,
-                    &format!("[desktop] selected input {}", path.display()),
+                    &format!("[desktop] added folder {}", path.display()),
                 );
-                set_status(&weak, "Input file selected.");
+                set_status(&weak, "Folder added to queue.");
             }
+        });
+    }
+
+    {
+        let model = input_sources_model.clone();
+        app.on_remove_source(move |index| {
+            model.remove(index as usize);
         });
     }
 
@@ -87,20 +114,22 @@ fn main() -> Result<()> {
 
     {
         let weak = app.as_weak();
+        let sources_model = input_sources_model.clone();
         app.on_run_analysis(move || {
             let Some(app) = weak.upgrade() else {
                 return;
             };
 
-            let input_path = app.get_input_path().to_string();
             let output_path = app.get_output_path().to_string();
             let analysis_kind = app.get_analysis_kind().to_string();
 
-            if input_path.trim().is_empty() {
-                set_status(&weak, "Input path is required.");
+            let sources: Vec<String> = sources_model.iter().map(|s| s.to_string()).collect();
+
+            if sources.is_empty() {
+                set_status(&weak, "No input sources provided.");
                 append_log(
                     &weak,
-                    "[error] please provide an input .fsa path before running.",
+                    "[error] please add files or folders before running.",
                 );
                 return;
             }
@@ -113,13 +142,36 @@ fn main() -> Result<()> {
                 return;
             }
 
+            // Expand inputs
+            let mut all_paths = Vec::new();
+            for src in sources {
+                let p = Path::new(&src);
+                if p.is_dir() {
+                    for entry in WalkDir::new(p).into_iter().filter_map(|e| e.ok()) {
+                        if entry.file_type().is_file() {
+                            let ext = entry.path().extension().and_then(|s| s.to_str()).unwrap_or("");
+                            if ext.to_lowercase() == "fsa" {
+                                all_paths.push(Utf8PathBuf::from(entry.path().to_string_lossy().to_string()));
+                            }
+                        }
+                    }
+                } else {
+                    all_paths.push(Utf8PathBuf::from(src));
+                }
+            }
+
+            if all_paths.is_empty() {
+                set_status(&weak, "No .fsa files found in selected sources.");
+                return;
+            }
+
             let request = RunRequest {
                 contract_version: ContractVersion::current(),
                 run_kind: RunKind::Analyze,
                 analysis_kind: Some(parse_analysis_kind(&analysis_kind)),
                 correlation_id: Uuid::new_v4(),
                 inputs: InputSpec {
-                    paths: vec![Utf8PathBuf::from(input_path.clone())],
+                    paths: all_paths.clone(),
                     manifest_path: None,
                     report_source_path: None,
                 },
@@ -128,23 +180,26 @@ fn main() -> Result<()> {
                     report_dir: None,
                     artifacts_dir: None,
                 },
-                options: RunOptions::default(),
+                options: RunOptions {
+                    deterministic: true,
+                    ..RunOptions::default()
+                },
             };
 
             set_status(
                 &weak,
-                &format!("Running Rust analysis for {}", file_name(&input_path)),
+                &format!("Running Rust analysis for {} file(s)", all_paths.len()),
             );
             set_last_artifact_path(&weak, "");
             set_last_run_summary(
                 &weak,
-                &format!("Running {} on {}", analysis_kind, file_name(&input_path)),
+                &format!("Processing {} files...", all_paths.len()),
             );
             append_log(
                 &weak,
                 &format!(
-                    "[run] starting analyze | analysis={} | input={} | output={}",
-                    analysis_kind, input_path, output_path
+                    "[run] starting batch analyze | analysis={} | inputs={} | output={}",
+                    analysis_kind, all_paths.len(), output_path
                 ),
             );
 
@@ -153,13 +208,15 @@ fn main() -> Result<()> {
                 let mut sink = DesktopEventSink::new(weak_for_thread.clone());
                 match run_request(&request, &mut sink) {
                     Ok(summary) => {
-                        let finished = format!(
-                            "[done] status={:?} artifacts={} detail_keys={}",
-                            summary.status,
-                            summary.artifact_manifest.len(),
-                            summary.details.len()
-                        );
-                        append_log(&weak_for_thread, &finished);
+                        let summary_path = Path::new(&output_path).join("analyze_summary.json");
+                        if summary_path.exists() {
+                            append_log(&weak_for_thread, "[report] triggering Python report builder bridge...");
+                            match run_report_bridge(&summary_path, Path::new(&output_path)) {
+                                Ok(_) => append_log(&weak_for_thread, "[report] Plotly reports generated and aggregated by DIT."),
+                                Err(err) => append_log(&weak_for_thread, &format!("[report] bridge failed: {err}")),
+                            }
+                        }
+
                         set_status(
                             &weak_for_thread,
                             &format!("Rust analysis finished with status {:?}", summary.status),
@@ -167,8 +224,7 @@ fn main() -> Result<()> {
                         set_last_run_summary(
                             &weak_for_thread,
                             &format!(
-                                "{} | {} | {} artifacts",
-                                file_name(&input_path),
+                                "Batch complete | {} | {} artifacts",
                                 format!("{:?}", summary.status).to_lowercase(),
                                 summary.artifact_manifest.len()
                             ),
@@ -179,7 +235,7 @@ fn main() -> Result<()> {
                         set_status(&weak_for_thread, &format!("Run failed: {err}"));
                         set_last_run_summary(
                             &weak_for_thread,
-                            &format!("{} | failed | {}", file_name(&input_path), err),
+                            &format!("Batch failed | {}", err),
                         );
                     }
                 }
@@ -367,16 +423,6 @@ fn set_last_run_summary(weak: &Weak<MainWindow>, summary: &str) {
     });
 }
 
-fn set_input_path(weak: &Weak<MainWindow>, path: &str) {
-    let weak = weak.clone();
-    let path = path.to_owned();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(app) = weak.upgrade() {
-            app.set_input_path(SharedString::from(path));
-        }
-    });
-}
-
 fn set_output_path(weak: &Weak<MainWindow>, path: &str) {
     let weak = weak.clone();
     let path = path.to_owned();
@@ -403,34 +449,45 @@ fn analysis_hint(value: &str) -> &'static str {
     }
 }
 
-fn file_name(path: &str) -> String {
-    Path::new(path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or(path)
-        .to_owned()
+fn run_report_bridge(summary_path: &Path, output_dir: &Path) -> Result<()> {
+    let root = workspace_root();
+    let bridge_script = root.join("scripts").join("build_reports_v2.py");
+    let python_exe = root.join("fraggler-mac310-venv").join("bin").join("python3");
+
+    let mut cmd = std::process::Command::new(if python_exe.exists() {
+        python_exe.as_os_str()
+    } else {
+        std::ffi::OsStr::new("python3")
+    });
+
+    cmd.arg(bridge_script)
+       .arg(summary_path)
+       .arg(output_dir);
+
+    tracing::info!(?cmd, "running report bridge");
+    let status = cmd.status()?;
+    if !status.success() {
+        anyhow::bail!("report bridge exited with error code {:?}", status.code());
+    }
+    Ok(())
+}
+
+fn workspace_root() -> PathBuf {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    manifest_dir
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|path| path.to_owned())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn workspace_readme_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .map(|path| path.join("README.md"))
-        .unwrap_or_else(|| PathBuf::from("README.md"))
+    workspace_root().join("README.md")
 }
 
 fn default_output_path() -> PathBuf {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    manifest_dir
-        .parent()
-        .and_then(|path| path.parent())
-        .map(|path| path.join("validation_outputs").join("fraggler_v2_desktop"))
-        .unwrap_or_else(|| PathBuf::from("validation_outputs/fraggler_v2_desktop"))
+    workspace_root()
+        .join("validation_outputs")
+        .join("fraggler_v2_desktop")
 }
 
-fn default_input_path() -> PathBuf {
-    PathBuf::from(
-        "/Volumes/T7 Shield/DATA/2026/2026_03_27_TCRg_IGK_KDE_CFB_H9H1DI2F_2026-03-27_0652/26OUM04817_IGK_270326_B05_H9H1DI2F.fsa",
-    )
-}

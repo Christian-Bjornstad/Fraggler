@@ -96,7 +96,7 @@ class AnalysisGroup(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"Fraggler Diagnostics v{APP_VERSION}")
+        self.setWindowTitle(f"HemaFrag Diagnostics v{APP_VERSION}")
         self.setStyleSheet(VIBRANT_PRO_QSS)
         
         # Central widget
@@ -116,7 +116,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.setContentsMargins(0, 0, 0, 0)
         sidebar_layout.setSpacing(4)
         
-        brand = QLabel("FRAGGLER")
+        brand = QLabel("HEMAFRAG")
         brand.setObjectName("SidebarBrand")
         sidebar_layout.addWidget(brand)
         

@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Log Tab (Redesigned)
+HemaFrag Diagnostics — Log Tab (Redesigned)
 
 Terminal-style dark log with search filter and export.
 """

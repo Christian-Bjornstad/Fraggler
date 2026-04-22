@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 echo "============================================================"
-echo "  Building Fraggler Diagnostics for Windows Desktop Bundle"
+echo "  Building HemaFrag Diagnostics for Windows Desktop Bundle"
 echo "============================================================"
 
 # Ensure Docker binaries are in PATH (common for Docker Desktop on Mac)
@@ -27,5 +27,5 @@ mkdir -p "$PROJECT_ROOT/dist"
 docker run --rm -v "$PROJECT_ROOT/dist:/app/dist" fraggler-windows-build wine python build_qt.py
 
 echo "Done!"
-echo "Portable folder: dist/Fraggler_Windows"
-echo "Release zip    : dist/releases/Fraggler_Windows.zip"
+echo "Portable folder: dist/HemaFrag_Windows"
+echo "Release zip    : dist/releases/HemaFrag_Windows.zip"

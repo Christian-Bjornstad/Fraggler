@@ -113,6 +113,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Delete the temporary symlink staging root after the run completes.",
     )
+    parser.add_argument(
+        "--use-rust",
+        action="store_true",
+        help="Use the Rust Engine for ladder fitting.",
+    )
+    parser.add_argument(
+        "--skip-html-reports",
+        action="store_true",
+        help="Skip generation of HTML reports to save time.",
+    )
+    parser.add_argument(
+        "--resume-existing",
+        dest="retry_failed",
+        action="store_true",
+        help="Retry folders that are marked as failed in the state file.",
+    )
     return parser
 
 
@@ -277,6 +293,10 @@ def run_validation(argv: list[str] | None = None) -> dict[str, Any]:
             collected_entries.extend(entries)
 
     try:
+        if args.use_rust:
+            from config import APP_SETTINGS
+            APP_SETTINGS.setdefault("engine", {})["use_rust"] = True
+
         timing["backfill_started"] = time.monotonic()
         state = run_clonality_backfill(
             input_root=staging_root,
@@ -285,8 +305,9 @@ def run_validation(argv: list[str] | None = None) -> dict[str, Any]:
             state_file=state_file,
             max_workers=args.max_workers,
             folder_workers=args.folder_workers,
-            retry_failed=False,
+            retry_failed=args.retry_failed,
             defer_tracking_refresh=not args.refresh_each_folder,
+            skip_html_reports=args.skip_html_reports,
             collected_entries_callback=_record_entries,
         )
         timing["backfill_finished"] = time.monotonic()

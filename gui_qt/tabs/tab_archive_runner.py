@@ -121,10 +121,17 @@ class TabArchiveRunner(QWidget):
         self.chk_include_sl = QCheckBox("Include SL in exported artifacts")
         self.chk_refresh_each_folder = QCheckBox("Refresh workbook after each folder")
         self.chk_cleanup_staging = QCheckBox("Delete month staging roots after completion")
+        self.chk_generate_html = QCheckBox("Generate HTML Reports")
+        self.chk_generate_html.setChecked(False)
         form.addRow("", self.chk_resume)
         form.addRow("", self.chk_include_sl)
         form.addRow("", self.chk_refresh_each_folder)
         form.addRow("", self.chk_cleanup_staging)
+        rust_note = QLabel("Rust ladder fitting is always used for archive runs.")
+        rust_note.setWordWrap(True)
+        rust_note.setObjectName("MutedText")
+        form.addRow("", rust_note)
+        form.addRow("", self.chk_generate_html)
         return card
 
     def _build_month_card(self) -> QWidget:
@@ -243,6 +250,11 @@ class TabArchiveRunner(QWidget):
         form.addRow("Combined Workbook:", self.workbook_lbl)
         return card
 
+    def _on_settings_saved(self, analysis_id: str) -> None:
+        if analysis_id == "clonality":
+            self.refresh_from_settings()
+            self._rebuild_month_table()
+
     def _profile(self) -> dict:
         return get_analysis_settings("clonality")
 
@@ -263,7 +275,6 @@ class TabArchiveRunner(QWidget):
         self.chk_include_sl.setChecked(bool(archive.get("include_sl", False)))
         self.chk_refresh_each_folder.setChecked(bool(archive.get("refresh_each_folder", False)))
         self.chk_cleanup_staging.setChecked(bool(archive.get("cleanup_staging_root", False)))
-
         last_selected_run_root = str(
             archive.get("last_selected_run_root", "") or archive.get("last_run_root", "") or ""
         ).strip()
@@ -300,6 +311,7 @@ class TabArchiveRunner(QWidget):
             "include_sl": self.chk_include_sl.isChecked(),
             "refresh_each_folder": self.chk_refresh_each_folder.isChecked(),
             "cleanup_staging_root": self.chk_cleanup_staging.isChecked(),
+            "use_rust": True,
         }
 
     def _browse_directory(self, target: QLineEdit) -> None:
@@ -363,7 +375,18 @@ class TabArchiveRunner(QWidget):
     def _guess_workbook_path(self) -> Path | None:
         if self._current_run_root is None:
             return None
-        return self._current_run_root / f"track-clonality-{self.year_input.text().strip()}-overview.xlsx"
+        overview = self._current_run_root / f"track-clonality-{self.year_input.text().strip()}-overview.xlsx"
+        if overview.exists():
+            return overview
+        # Fallback to month-specific workbook if only one month was run
+        months_dir = self._current_run_root / "month_runs"
+        if months_dir.exists():
+            for mdir in months_dir.iterdir():
+                if mdir.is_dir():
+                    wb = mdir / "track-clonality.xlsx"
+                    if wb.exists():
+                        return wb
+        return None
 
     def _month_counts(self) -> dict[str, int]:
         year_label = self.year_input.text().strip()
@@ -374,18 +397,62 @@ class TabArchiveRunner(QWidget):
             month_map = discover_month_folders(Path(input_root), year_label)
         except Exception:
             return {}
-        return {month: len(paths) for month, paths in month_map.items()}
+        
+        counts = {month: len(paths) for month, paths in month_map.items()}
+        
+        # Also check for already processed or running months in the output dir
+        if self._current_run_root and self._current_run_root.exists():
+            month_runs_dir = self._current_run_root / "month_runs"
+            if month_runs_dir.exists():
+                for mdir in month_runs_dir.iterdir():
+                    if mdir.is_dir() and mdir.name.startswith(f"{year_label}_"):
+                        state_path = mdir / "backfill_state.json"
+                        if state_path.exists():
+                            # We found an existing run for this month
+                            pass 
+
+        return counts
 
     def _rebuild_month_table(self) -> None:
         counts = self._month_counts()
         selected_months = self._selected_months() if self.year_input.text().strip().isdigit() else []
         old_state: dict[str, tuple[str, str, str]] = {}
+        
+        # Try to recover state from disk for each month if not in memory
+        for month_key in selected_months:
+            status = "pending"
+            run_dir = ""
+            if self._current_run_root and self._current_run_root.exists():
+                mdir = self._current_run_root / "month_runs" / month_key
+                if mdir.exists():
+                    run_dir = str(mdir)
+                    state_path = mdir / "backfill_state.json"
+                    if state_path.exists():
+                        try:
+                            with open(state_path, "r") as f:
+                                month_state = json.load(f)
+                                folders = month_state.get("folders", {})
+                                done_count = sum(1 for f in folders.values() if f.get("status") == "done")
+                                total_count = len(folders)
+                                if done_count == total_count and total_count > 0:
+                                    status = "done"
+                                elif done_count > 0:
+                                    status = f"partial ({done_count}/{total_count})"
+                                else:
+                                    status = "started"
+                        except Exception:
+                            status = "error (state)"
+            old_state[month_key] = (status, str(counts.get(month_key, "")), run_dir)
+
+        # Overwrite with in-memory state if we are currently running
         for month, row in self._month_row_map.items():
-            old_state[month] = (
-                self.month_table.item(row, 1).text() if self.month_table.item(row, 1) else "pending",
-                self.month_table.item(row, 2).text() if self.month_table.item(row, 2) else "",
-                self.month_table.item(row, 3).text() if self.month_table.item(row, 3) else "",
-            )
+            current_status = self.month_table.item(row, 1).text() if self.month_table.item(row, 1) else "pending"
+            if current_status in ("running", "resumed", "done"):
+                old_state[month] = (
+                    current_status,
+                    self.month_table.item(row, 2).text() if self.month_table.item(row, 2) else "",
+                    self.month_table.item(row, 3).text() if self.month_table.item(row, 3) else "",
+                )
 
         self.month_table.setRowCount(0)
         self._month_row_map = {}
@@ -454,6 +521,8 @@ class TabArchiveRunner(QWidget):
             include_sl=self.chk_include_sl.isChecked(),
             cleanup_staging_root=self.chk_cleanup_staging.isChecked(),
             resume_existing=self.chk_resume.isChecked(),
+            use_rust=True,
+            skip_html_reports=not self.chk_generate_html.isChecked(),
         )
         worker.kwargs["progress_callback"] = worker.signals.event.emit
         worker.kwargs["status_callback"] = worker.signals.status.emit

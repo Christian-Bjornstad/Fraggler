@@ -1,12 +1,14 @@
 use std::fs;
+use std::io::{self, BufRead, Write};
 
 use anyhow::{Context, Result, bail};
 use camino::Utf8PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use fraggler_core::{
-    AnalysisKind, ContractVersion, EngineMessage, InputSpec, OutputSpec, RunKind, RunOptions,
-    RunRequest, run_request,
+    AnalysisKind, ContractVersion, EngineMessage, InputSpec, OutputSpec, PrimitiveAnalysisResult,
+    RunKind, RunOptions, RunRequest, analyze_fsa_primitives, run_request,
 };
+use serde::{Deserialize, Serialize};
 use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
@@ -14,7 +16,7 @@ use uuid::Uuid;
 #[command(
     name = "fraggler-cli",
     version,
-    about = "Fraggler v2 Rust CLI scaffold"
+    about = "HemaFrag Diagnostics Rust CLI"
 )]
 struct Cli {
     #[arg(long, global = true, default_value = "info")]
@@ -29,6 +31,7 @@ enum Commands {
     Qc(CommandArgs),
     ValidateFlt3(CommandArgs),
     BuildReport(CommandArgs),
+    ServePrimitives,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -57,7 +60,8 @@ struct CommandArgs {
     shadow_reference_python: bool,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 enum AnalysisArg {
     Clonality,
     Flt3,
@@ -72,6 +76,19 @@ impl From<AnalysisArg> for AnalysisKind {
             AnalysisArg::General => Self::General,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct PrimitiveWorkerRequest {
+    input: Utf8PathBuf,
+    analysis: Option<AnalysisArg>,
+}
+
+#[derive(Debug, Serialize)]
+struct PrimitiveWorkerResponse {
+    ok: bool,
+    result: Option<PrimitiveAnalysisResult>,
+    error: Option<String>,
 }
 
 #[derive(Default)]
@@ -99,6 +116,7 @@ fn main() -> Result<()> {
         Commands::Qc(args) => (RunKind::Qc, args),
         Commands::ValidateFlt3(args) => (RunKind::ValidateFlt3, args),
         Commands::BuildReport(args) => (RunKind::BuildReport, args),
+        Commands::ServePrimitives => return serve_primitives(),
     };
 
     let request = load_request(run_kind, args)?;
@@ -110,6 +128,48 @@ fn main() -> Result<()> {
         }
         Err(err) => bail!("{err}"),
     }
+}
+
+fn serve_primitives() -> Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout().lock();
+
+    for line_result in stdin.lock().lines() {
+        let line = line_result.context("failed to read worker request line")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let response = match serde_json::from_str::<PrimitiveWorkerRequest>(&line) {
+            Ok(request) => match analyze_fsa_primitives(
+                &request.input,
+                request.analysis.map(Into::into).as_ref(),
+            ) {
+                Ok(result) => PrimitiveWorkerResponse {
+                    ok: true,
+                    result: Some(result),
+                    error: None,
+                },
+                Err(err) => PrimitiveWorkerResponse {
+                    ok: false,
+                    result: None,
+                    error: Some(err.to_string()),
+                },
+            },
+            Err(err) => PrimitiveWorkerResponse {
+                ok: false,
+                result: None,
+                error: Some(format!("invalid worker request: {err}")),
+            },
+        };
+
+        serde_json::to_writer(&mut stdout, &response)
+            .context("failed to serialize worker response")?;
+        stdout.write_all(b"\n").context("failed to write newline")?;
+        stdout.flush().context("failed to flush worker response")?;
+    }
+
+    Ok(())
 }
 
 fn load_request(run_kind: RunKind, args: CommandArgs) -> Result<RunRequest> {

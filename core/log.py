@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Centralized Logging
+HemaFrag Diagnostics — Centralized Logging
 
 Provides a param-based LogBuffer that the GUI can watch, and a global
 log() function for all modules.

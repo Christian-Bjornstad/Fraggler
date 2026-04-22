@@ -1,6 +1,6 @@
 @echo off
 REM ============================================================
-REM Build Fraggler Diagnostics — Windows Desktop Bundle
+REM Build HemaFrag Diagnostics — Windows Desktop Bundle
 REM ============================================================
 REM Prerequisites:
 REM   - Python 3.10+ installed
@@ -10,11 +10,11 @@ REM Usage:
 REM   packaging\build_windows.bat
 REM
 REM Output:
-REM   dist\Fraggler_Windows and dist\releases\Fraggler_Windows.zip
+REM   dist\HemaFrag_Windows and dist\releases\HemaFrag_Windows.zip
 REM ============================================================
 
 echo ============================================================
-echo   Building Fraggler Diagnostics for Windows
+echo   Building HemaFrag Diagnostics for Windows
 echo ============================================================
 
 cd /d "%~dp0\.."
@@ -45,11 +45,11 @@ python build_qt.py
 echo.
 echo ============================================================
 echo   Build complete!
-echo   Folder: dist\Fraggler_Windows
-echo   Zip   : dist\releases\Fraggler_Windows.zip
+echo   Folder: dist\HemaFrag_Windows
+echo   Zip   : dist\releases\HemaFrag_Windows.zip
 echo.
 echo   To run:
-echo     dist\Fraggler_Windows\Fraggler.exe
+echo     dist\HemaFrag_Windows\HemaFrag.exe
 echo ============================================================
 
 pause

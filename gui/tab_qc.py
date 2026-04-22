@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — QC Tab
+HemaFrag Diagnostics — QC Tab
 """
 from __future__ import annotations
 

@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Settings Tab
+HemaFrag Diagnostics — Settings Tab
 """
 from __future__ import annotations
 
@@ -32,11 +32,11 @@ def make_settings_tab() -> pn.Column:
     # App info
     info_html = pn.pane.HTML("""
 <div style="background:#ffffff; border:1px solid var(--border); border-radius:8px; padding:16px; font-size:13px; color:var(--text-dim); line-height:1.8">
-  <div style="font-size:20px; font-weight:700; color:var(--text); margin-bottom:8px">Fraggler Diagnostics</div>
+  <div style="font-size:20px; font-weight:700; color:var(--text); margin-bottom:8px">HemaFrag Diagnostics</div>
   <div><span style="color:var(--primary); font-weight:600">Version:</span> """ + APP_VERSION + """</div>
   <div><span style="color:var(--primary); font-weight:600">Mode:</span> Legacy Panel view for the browser-based workflow</div>
-  <div><span style="color:var(--primary); font-weight:600">Analysis:</span> Fraggler library (fragment analysis)</div>
-  <div style="margin-top:10px; font-size:11px; color:var(--muted)">Desktop builds use the PyQt6 app; settings are stored in <code>~/.fraggler_gui.yaml</code>.</div>
+  <div><span style="color:var(--primary); font-weight:600">Analysis:</span> HemaFrag runtime with embedded upstream fragment-analysis components</div>
+  <div style="margin-top:10px; font-size:11px; color:var(--muted)">Desktop builds use the PyQt6 app; settings are now stored in <code>~/.hemafrag_gui.yaml</code> and legacy Fraggler settings are imported automatically if present.</div>
 </div>""", sizing_mode="stretch_width")
 
     return pn.Column(

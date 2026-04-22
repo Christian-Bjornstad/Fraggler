@@ -22,12 +22,14 @@ from core.log import log
 
 DEFAULT_INPUT_ROOT = Path("/Users/christian/Desktop/DATA/Klonalitet/2025_data")
 DEFAULT_OUTPUT_BASE = Path("/Users/christian/Desktop/FINAL")
-DEFAULT_TRACKING_EXCEL = Path("/Users/christian/Desktop/Excel_Fraggler/track-clonality.xlsx")
-DEFAULT_STATE_FILE = Path("/Users/christian/Desktop/Excel_Fraggler/backfill_2025_state.json")
+DEFAULT_TRACKING_EXCEL = Path("/Users/christian/Desktop/Excel_HemaFrag/track-clonality.xlsx")
+DEFAULT_STATE_FILE = Path("/Users/christian/Desktop/Excel_HemaFrag/backfill_2025_state.json")
 BACKFILL_OUTPUT_DIRNAME = "backfill_2025"
 BACKFILL_REPORT_DIRNAME = "reports_backfill"
 STATE_VERSION = 1
 RUNNING_HEARTBEAT_TTL_SECONDS = 300
+
+_LAST_SAVE_TIME = 0.0
 TERMINAL_PHASES = {"done", "failed"}
 PHASE_RANK = {
     "": 0,
@@ -73,6 +75,7 @@ def run_clonality_backfill(
     folder_workers: int | None = None,
     retry_failed: bool = False,
     defer_tracking_refresh: bool = True,
+    skip_html_reports: bool = False,
     collected_entries_callback: Callable[[str, list[dict[str, Any]]], None] | None = None,
 ) -> dict[str, Any]:
     input_root = Path(input_root).expanduser()
@@ -142,6 +145,9 @@ def run_clonality_backfill(
                 f"[BACKFILL] Spilled {len(entries)} deferred tracking entries for {folder_name} "
                 f"to {spill_path}."
             )
+            # Periodic flush to prevent data loss in case of crash
+            if defer_tracking_refresh and len(pending_tracking_spills.get(month_key, [])) >= 5:
+                _flush_tracking_month(month_key)
             return spill_path
 
         def _cleanup_spill_paths(spill_paths: list[Path]) -> None:
@@ -204,6 +210,20 @@ def run_clonality_backfill(
             pending_tracking_spills[month_key] = [spill_path for spill_path in spill_paths if spill_path not in loaded_paths]
             _cleanup_spill_paths(loaded_paths)
 
+        # Load tracking data once to allow skipping folders already in the master workbook
+        master_tracking_data = pd.DataFrame()
+        if tracking_excel_path and tracking_excel_path.exists():
+            try:
+                with pd.ExcelFile(tracking_excel_path, engine="openpyxl") as xls:
+                    sheet_name = 'Patient_Runs' if 'Patient_Runs' in xls.sheet_names else xls.sheet_names[0]
+                    master_tracking_data = pd.read_excel(xls, sheet_name=sheet_name)
+                    if 'SourceRunDir' in master_tracking_data.columns:
+                        log(f"[BACKFILL] Loaded {len(master_tracking_data)} existing runs from {tracking_excel_path.name}")
+                    else:
+                        master_tracking_data = pd.DataFrame()
+            except Exception as e:
+                log(f"[WARN] Could not read tracking workbook for skipping logic: {e}")
+
         def _execute_folder(
             folder: Path,
             month_key: str,
@@ -221,6 +241,7 @@ def run_clonality_backfill(
             with state_lock:
                 _mark_folder_running(item, output_base, month_key, folder_name, tracking_excel_path)
                 _save_state(state_file, state)
+                _LAST_SAVE_TIME = time.monotonic()
 
             outcome: dict[str, Any] = {
                 "folder_name": folder_name,
@@ -254,7 +275,7 @@ def run_clonality_backfill(
                     output_base=folder_output_base,
                     out_folder_tmpl="ASSAY_REPORTS",
                     outfile_html_tmpl="QC_REPORT_{name}.html",
-                    excel_name_tmpl="Fraggler_QC_Trends.xlsx",
+                    excel_name_tmpl="HemaFrag_QC_Trends.xlsx",
                     pipeline_scope=pipeline_settings.get("mode", "all"),
                     assay_filter=pipeline_settings.get("assay_filter_substring", ""),
                     aggregate_dit_reports=True,
@@ -266,10 +287,19 @@ def run_clonality_backfill(
                     aggregate_outdir_name=BACKFILL_REPORT_DIRNAME,
                     defer_tracking_workbook_refresh=defer_tracking_refresh,
                     defer_dit_html_reports=False,
+                    skip_html_reports=skip_html_reports,
                 )
                 failed_jobs = list((result or {}).get("failed_jobs", []))
                 completed_jobs = list((result or {}).get("completed_jobs", []))
                 collected_entries = list((result or {}).get("collected_entries") or [])
+                if collected_entries:
+                    # Strip heavy FSA objects to save memory during pickling/loading
+                    for entry in collected_entries:
+                        entry["fsa"] = None
+                        # Also drop other heavy fields if they exist
+                        entry.pop("peaks_by_channel", None)
+                        entry.pop("size_standard", None)
+
                 if defer_tracking_refresh and collected_entries:
                     _spill_tracking_entries(month_key, folder_name, collected_entries)
 
@@ -331,6 +361,20 @@ def run_clonality_backfill(
                 if item["status"] == "done":
                     log(f"[BACKFILL] Skipping completed folder {folder.name} ({folder_index}/{total_folders}).")
                     continue
+                
+                # Check tracking workbook for status
+                if not master_tracking_data.empty and folder.name in master_tracking_data['SourceRunDir'].values:
+                    # If it's in the master workbook, we might want to skip it unless it's explicitly marked for retry
+                    # For now, let's look for a 'status' column if it exists
+                    if 'status' in master_tracking_data.columns:
+                        status = master_tracking_data[master_tracking_data['SourceRunDir'] == folder.name]['status'].iloc[0]
+                        if str(status).lower() in ('done', 'skipped'):
+                            log(f"[BACKFILL] Skipping folder {folder.name} (marked as {status} in tracking workbook).")
+                            continue
+                    else:
+                        # If no status column, just being there means it's processed
+                        log(f"[BACKFILL] Skipping folder {folder.name} (already present in tracking workbook).")
+                        continue
                 if item["status"] == "failed" and not retry_failed:
                     log(
                         f"[BACKFILL] Skipping failed folder {folder.name} ({folder_index}/{total_folders}); "
@@ -339,6 +383,12 @@ def run_clonality_backfill(
                     continue
                 eligible.append(folder)
             return eligible
+
+        # INITIAL FLUSH: Flush any existing spills from previous (crashed) runs immediately
+        for month_key in sorted(pending_tracking_spills):
+            if pending_tracking_spills[month_key]:
+                log(f"[BACKFILL] Found existing spills for {month_key}, flushing to workbook...")
+                _flush_tracking_month(month_key)
 
         for month_key in sorted(month_groups):
             month_folders = month_groups[month_key]
@@ -554,7 +604,9 @@ def _record_folder_progress(
     state: dict[str, Any],
     folder_name: str,
     event: dict[str, Any],
+    force_save: bool = False,
 ) -> None:
+    global _LAST_SAVE_TIME
     item = state["folders"][folder_name]
     phase = str(event.get("phase", "") or "")
     if item.get("status") in TERMINAL_PHASES and phase not in TERMINAL_PHASES:
@@ -618,7 +670,11 @@ def _record_folder_progress(
     item["last_heartbeat_at"] = str(latest_progress.get("heartbeat_at") or heartbeat_at)
     item["last_note"] = str(latest_progress.get("note", "") or note)
     item["updated_at"] = item["last_heartbeat_at"]
-    _save_state(state_file, state)
+    
+    now = time.monotonic()
+    if force_save or (now - _LAST_SAVE_TIME > 2.0):
+        _save_state(state_file, state)
+        _LAST_SAVE_TIME = now
 
 
 def _clear_live_progress(item: dict[str, Any], *, phase: str = "") -> None:
@@ -690,9 +746,14 @@ def _write_month_summary(
 
     if tracking_excel_path.exists():
         try:
-            patient = pd.read_excel(tracking_excel_path, sheet_name="Patient_Runs", engine="openpyxl")
-            control = pd.read_excel(tracking_excel_path, sheet_name="Control_Runs", engine="openpyxl")
-            peaks = pd.read_excel(tracking_excel_path, sheet_name="PK_Peaks", engine="openpyxl")
+            with pd.ExcelFile(tracking_excel_path, engine="openpyxl") as xls:
+                has_patient = "Patient_Runs" in xls.sheet_names
+                has_control = "Control_Runs" in xls.sheet_names
+                has_peaks = "PK_Peaks" in xls.sheet_names
+
+                patient = pd.read_excel(xls, sheet_name="Patient_Runs", engine="openpyxl") if has_patient else pd.DataFrame()
+                control = pd.read_excel(xls, sheet_name="Control_Runs", engine="openpyxl") if has_control else pd.DataFrame()
+                peaks = pd.read_excel(xls, sheet_name="PK_Peaks", engine="openpyxl") if has_peaks else pd.DataFrame()
             patient["RunDate"] = patient["RunDate"].astype(str)
             control["RunDate"] = control["RunDate"].astype(str)
             peaks["RunDate"] = peaks["RunDate"].astype(str)
@@ -784,6 +845,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--folder-workers", type=int, default=None, help="Parallel top-level folders to run inside each month.")
     parser.add_argument("--retry-failed", action="store_true")
     parser.add_argument("--refresh-each-folder", action="store_true", help="Refresh the tracking workbook/dashboard after every folder instead of deferring to month boundaries.")
+    parser.add_argument("--skip-html-reports", action="store_true", help="Skip generation of HTML reports to save time.")
     return parser
 
 
@@ -801,6 +863,7 @@ def main(argv: list[str] | None = None) -> int:
         folder_workers=args.folder_workers,
         retry_failed=args.retry_failed,
         defer_tracking_refresh=not args.refresh_each_folder,
+        skip_html_reports=args.skip_html_reports,
     )
     return 0
 

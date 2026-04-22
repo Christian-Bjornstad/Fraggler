@@ -199,7 +199,7 @@ class TabBatch(QWidget):
         
         # Header
         header = QVBoxLayout()
-        self.title_lbl = QLabel("Run Fraggler")
+        self.title_lbl = QLabel("Run HemaFrag")
         self.title_lbl.setObjectName("PageTitle")
         self.subtitle_lbl = QLabel("")
         self.subtitle_lbl.setObjectName("PageSubtitle")
@@ -1012,7 +1012,7 @@ class TabBatch(QWidget):
             output_base=out_path_obj,
             out_folder_tmpl="ASSAY_REPORTS",
             outfile_html_tmpl="QC_REPORT_{name}.html",
-            excel_name_tmpl="Fraggler_QC_Trends.xlsx",
+            excel_name_tmpl="HemaFrag_QC_Trends.xlsx",
             pipeline_scope=p_scope,
             assay_filter=a_filter,
             aggregate_dit_reports=aggregate_dit_reports,

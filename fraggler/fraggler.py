@@ -191,14 +191,12 @@ def get_files(in_path: str) -> list[Path]:
 
 def file_exists(file):
     if not Path(file).exists():
-        print_fail(f"{file} does not exist!")
-        sys.exit(1)
+        raise RuntimeError(f"{file} does not exist!")
 
 
 def folder_exists(folder):
     if Path(folder).exists():
-        print_fail(f"{folder} already exist!")
-        sys.exit(1)
+        raise RuntimeError(f"{folder} already exist!")
 
 
 ASCII_ART = f"""
@@ -301,8 +299,7 @@ class FsaFile:
         self.file_name = self.file.parts[-1]
 
         if ladder not in LADDERS.keys():
-            print_fail(f"'{ladder}' is not a valid ladder. Available: {list(LADDERS.keys())}")
-            sys.exit(1)
+            raise RuntimeError(f"'{ladder}' is not a valid ladder. Available: {list(LADDERS.keys())}")
         self.ladder = ladder
 
         # 1) Hvis bruker har satt size_standard_channel eksplisitt, bruk den.
@@ -521,7 +518,7 @@ def estimate_combination_count(peaks, length, distance, cap=None):
     return int(total_count)
 
 
-def generate_combinations(fsa, max_combinations=100000):
+def generate_combinations(fsa, max_combinations=10000):
     """
     Implementation of the depth-first search algorithm
     """
@@ -924,8 +921,7 @@ def read_custom_peaks(custom_peaks):
         )
     )
     if not isinstance(custom_peaks, pd.DataFrame):
-        print_fail("No custom peaks could be read")
-        sys.exit(1)
+        raise RuntimeError("No custom peaks could be read")
 
     return custom_peaks
 
@@ -946,10 +942,9 @@ def custom_peaks_are_overlapping(custom_peaks):
             .loc[lambda x: x["count"] > 1]
             .iloc[0, 0]
         )
-        print_fail(
+        raise RuntimeError(
             f"Custom peaks contains overlapping ranges starting at value: {dups}"
         )
-        sys.exit(1)
 
 
 def custom_peaks_has_columns(custom_peaks):
@@ -960,15 +955,11 @@ def custom_peaks_has_columns(custom_peaks):
     )
     df_columns = set(df.columns)
     if len(columns) != len(df_columns):
-        print_fail(f"Customized peaks table does not contain the right columns.")
-        print_fail(f"Current columns: {df_columns}, Needed columns: {columns}")
-        sys.exit(1)
+        raise RuntimeError(f"Customized peaks table does not contain the right columns. Current: {df_columns}, Needed: {columns}")
 
     intersection = columns.intersection(df_columns)
     if len(intersection) != len(df_columns):
-        print_fail(f"Customized peaks table does not contain the right columns.")
-        print_fail(f"Current columns: {df_columns}, Needed columns: {columns}")
-        sys.exit(1)
+        raise RuntimeError(f"Customized peaks table does not contain the right columns. Current: {df_columns}, Needed: {columns}")
 
 
 def find_peaks_customized(
@@ -1478,9 +1469,10 @@ def read_valid_csv(csv):
         else:
             df = csv
         return df
-    except:
-        print_fail(f"{csv} cannot be read!")
-        sys.exit(1)
+    except (pd.errors.EmptyDataError, FileNotFoundError):
+        return pd.DataFrame()
+    except Exception as e:
+        raise RuntimeError(f"{csv} cannot be read: {e}")
 
 
 def parse_fsa(

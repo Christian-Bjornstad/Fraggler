@@ -97,6 +97,16 @@ def build_arg_parser(default_year_label: str = DEFAULT_YEAR_LABEL) -> argparse.A
         action="store_true",
         help="Resume an existing run directory instead of failing when it already exists.",
     )
+    parser.add_argument(
+        "--use-rust",
+        action="store_true",
+        help="Use the Rust Engine for ladder fitting.",
+    )
+    parser.add_argument(
+        "--skip-html-reports",
+        action="store_true",
+        help="Skip generation of HTML reports to save time.",
+    )
     return parser
 
 
@@ -182,6 +192,11 @@ def _build_month_argv(
         argv_for_month.append("--include-sl")
     if args.cleanup_staging_root:
         argv_for_month.append("--cleanup-staging-root")
+    argv_for_month.append("--use-rust")
+    if getattr(args, "skip_html_reports", False):
+        argv_for_month.append("--skip-html-reports")
+    if getattr(args, "resume_existing", False):
+        argv_for_month.append("--resume-existing")
     return argv_for_month
 
 
@@ -276,6 +291,8 @@ def run_yearly_validation(
     include_sl: bool = False,
     cleanup_staging_root: bool = False,
     resume_existing: bool = False,
+    use_rust: bool = True,
+    skip_html_reports: bool = False,
     progress_callback: ProgressCallback | None = None,
     status_callback: StatusCallback | None = None,
     invoke_month_validation: Callable[[list[str]], None] = _invoke_month_validation,
@@ -307,18 +324,19 @@ def run_yearly_validation(
     _emit(status_callback, f"Starting yearly run for {year_label}")
 
     month_summaries: list[dict[str, object]] = []
+    yearly_failed = False
     for month_key in selected_months:
         folders = month_map.get(month_key, [])
         month_txt = month_list_paths[month_key]
         base_record: dict[str, object] = {
             "month": month_key,
             "folder_count": len(folders),
-            "folders_file": str(month_txt),
         }
+
         if not folders:
-            month_record = {**base_record, "status": "skipped_empty", "resumed": False}
+            month_record = {"month": month_key, "folder_count": 0, "folders_file": str(month_txt), "status": "skipped_empty", "resumed": False}
             month_summaries.append(month_record)
-            manifest = _write_manifest(
+            _write_manifest(
                 run_dir,
                 input_root,
                 output_root,
@@ -333,11 +351,11 @@ def run_yearly_validation(
             continue
 
         existing_summary_path = month_runs_dir / month_key / "run_summary.json"
-        if resume_existing and existing_summary_path.is_file():
-            _emit(progress_callback, {"event": "month_resumed", "year_label": year_label, "month": month_key, "run_dir": str(run_dir)})
+        if not resume_existing and existing_summary_path.is_file():
+            _emit(progress_callback, {"event": "month_skipped_already_done", "year_label": year_label, "month": month_key, "run_dir": str(run_dir)})
             summary = _load_month_summary(month_runs_dir, month_key)
-            month_summaries.append(_build_month_record(month_key, folders, month_txt, summary, resumed=True))
-            manifest = _write_manifest(
+            month_summaries.append(_build_month_record(month_key, folders, month_txt, summary, resumed=False))
+            _write_manifest(
                 run_dir,
                 input_root,
                 output_root,
@@ -359,6 +377,9 @@ def run_yearly_validation(
                 refresh_each_folder=refresh_each_folder,
                 include_sl=include_sl,
                 cleanup_staging_root=cleanup_staging_root,
+                use_rust=use_rust,
+                skip_html_reports=skip_html_reports,
+                resume_existing=resume_existing,
             ),
             month_key,
             month_txt,
@@ -366,25 +387,17 @@ def run_yearly_validation(
         )
         try:
             invoke_month_validation(argv_for_month)
+            summary = _load_month_summary(month_runs_dir, month_key)
+            month_summaries.append(_build_month_record(month_key, folders, month_txt, summary, resumed=resume_existing))
+            _emit(progress_callback, {"event": "month_finished", "year_label": year_label, "month": month_key, "run_dir": str(run_dir), "summary_json": str(summary["summary_json"])})
         except Exception as exc:
-            month_summaries.append({**base_record, "status": "error", "resumed": False, "error": str(exc)})
-            manifest = _write_manifest(
-                run_dir,
-                input_root,
-                output_root,
-                year_label,
-                selected_months,
-                month_lists_dir,
-                month_runs_dir,
-                month_summaries,
-            )
-            _emit(progress_callback, {"event": "run_failed", "year_label": year_label, "month": month_key, "run_dir": str(run_dir), "error": str(exc), "manifest_path": str(run_dir / f"full_{year_label}_run_manifest.json")})
-            _emit(status_callback, f"Yearly run failed in {month_key}")
-            raise
-        summary = _load_month_summary(month_runs_dir, month_key)
-        month_summaries.append(_build_month_record(month_key, folders, month_txt, summary, resumed=False))
-        _emit(progress_callback, {"event": "month_finished", "year_label": year_label, "month": month_key, "run_dir": str(run_dir), "summary_json": str(summary["summary_json"])})
-        manifest = _write_manifest(
+            yearly_failed = True
+            _emit(progress_callback, {"event": "run_failed", "year_label": year_label, "month": month_key, "run_dir": str(run_dir), "error": str(exc)})
+            _emit(status_callback, f"Month {month_key} failed: {exc}")
+            from core.log import log
+            log(f"[YEARLY] Month {month_key} failed. Continuing...")
+
+        _write_manifest(
             run_dir,
             input_root,
             output_root,
@@ -408,6 +421,11 @@ def run_yearly_validation(
     )
     manifest_path = run_dir / f"full_{year_label}_run_manifest.json"
     _emit(progress_callback, {"event": "run_finished", "year_label": year_label, "run_dir": str(run_dir), "manifest_path": str(manifest_path)})
+
+    if yearly_failed:
+        _emit(status_callback, f"Yearly run finished with errors for {year_label}")
+        raise RuntimeError(f"Yearly run for {year_label} had one or more month failures.")
+
     _emit(status_callback, f"Finished yearly run for {year_label}")
     print(json.dumps(manifest, indent=2, sort_keys=True))
     return manifest
@@ -428,6 +446,8 @@ def run_yearly_validation_from_argv(argv: list[str] | None = None) -> dict[str, 
         include_sl=args.include_sl,
         cleanup_staging_root=args.cleanup_staging_root,
         resume_existing=args.resume_existing,
+        use_rust=True,
+        skip_html_reports=args.skip_html_reports,
     )
 
 

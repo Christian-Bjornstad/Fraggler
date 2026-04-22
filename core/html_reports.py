@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — DIT HTML Reports & SL Quality Interpretation.
+HemaFrag Diagnostics — DIT HTML Reports & SL Quality Interpretation.
 
 Builds per-patient DIT HTML reports with embedded interactive Plotly figures.
 """
@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 import uuid
 import json
+import time
 from pathlib import Path
 from collections import defaultdict
 from html import escape
@@ -430,6 +431,7 @@ def _build_plotly_reflow_script() -> str:
 <script>
 window.ReportPlotManager = (function() {
     var plots = {};
+    var plotMeta = {};
     var initialStates = {};
     var refreshTimer = null;
 
@@ -453,12 +455,81 @@ window.ReportPlotManager = (function() {
         return [a, b];
     }
 
+    function getPlotMeta(gd) {
+        if (!gd || !gd.id) return null;
+        if (!plotMeta[gd.id]) {
+            plotMeta[gd.id] = {
+                lastMeasuredWidth: 0,
+                lastMeasuredHeight: 0,
+                stableReadyCount: 0,
+                firstReadyAt: 0,
+                stableAncestor: null
+            };
+        }
+        return plotMeta[gd.id];
+    }
+
+    function measureBox(node) {
+        if (!node) return { width: 0, height: 0 };
+        var rect = (typeof node.getBoundingClientRect === 'function')
+            ? node.getBoundingClientRect()
+            : { width: 0, height: 0 };
+        var width = Math.max(
+            Number(node.clientWidth) || 0,
+            Number(node.offsetWidth) || 0,
+            Number(rect.width) || 0
+        );
+        var height = Math.max(
+            Number(node.clientHeight) || 0,
+            Number(node.offsetHeight) || 0,
+            Number(rect.height) || 0
+        );
+        return { width: width, height: height };
+    }
+
+    function hasUsableBox(box) {
+        return !!box && box.width > 0 && box.height > 0;
+    }
+
+    function recordBoxMeasurement(gd) {
+        var meta = getPlotMeta(gd);
+        if (!meta) return { box: { width: 0, height: 0 }, becameReady: false };
+        var box = measureBox(gd);
+        var wasReady = meta.lastMeasuredWidth > 0 && meta.lastMeasuredHeight > 0;
+        var isReady = hasUsableBox(box);
+        if (isReady) {
+            if (!wasReady) {
+                meta.firstReadyAt = Date.now();
+                meta.stableReadyCount = 1;
+            } else if (Math.abs(meta.lastMeasuredWidth - box.width) < 1 && Math.abs(meta.lastMeasuredHeight - box.height) < 1) {
+                meta.stableReadyCount += 1;
+            } else {
+                meta.stableReadyCount = 1;
+            }
+        } else {
+            meta.stableReadyCount = 0;
+        }
+        meta.lastMeasuredWidth = box.width;
+        meta.lastMeasuredHeight = box.height;
+        return { box: box, becameReady: !wasReady && isReady };
+    }
+
+    function findStableAncestor(gd) {
+        var node = gd ? gd.parentElement : null;
+        var fallback = node || gd || document.body;
+        while (node && node !== document.body) {
+            fallback = node;
+            if (hasUsableBox(measureBox(node))) return node;
+            node = node.parentElement;
+        }
+        return fallback || document.body;
+    }
+
     function resizeOne(gd) {
-        if (!gd || !window.Plotly) return;
-        if (typeof gd.isConnected === 'boolean' && !gd.isConnected) return;
-        var width = gd.clientWidth || (gd.parentElement && gd.parentElement.clientWidth) || 0;
-        var height = gd.clientHeight || (gd.parentElement && gd.parentElement.clientHeight) || 0;
-        if (width <= 0 || height <= 0) return false;
+        if (!gd || !window.Plotly) return false;
+        if (typeof gd.isConnected === 'boolean' && !gd.isConnected) return false;
+        var measurement = recordBoxMeasurement(gd);
+        if (!hasUsableBox(measurement.box)) return false;
         try { Plotly.Plots.resize(gd); } catch (e) {}
         try { Plotly.relayout(gd, {autosize: true}); } catch (e) {}
         return true;
@@ -486,7 +557,7 @@ window.ReportPlotManager = (function() {
             clearTimeout(refreshTimer);
             refreshTimer = null;
         }
-        var delays = [0, 80, 250, 750];
+        var delays = [0, 80, 220, 500, 1100, 2200, 4200];
         for (var i = 0; i < delays.length; i++) {
             setTimeout(refreshAll, delays[i]);
         }
@@ -496,7 +567,7 @@ window.ReportPlotManager = (function() {
         refreshTimer = setTimeout(function() {
             refreshAll();
             refreshTimer = null;
-        }, 1600);
+        }, 6200);
     }
 
     function stabilizePlot(gd) {
@@ -511,15 +582,81 @@ window.ReportPlotManager = (function() {
         }
     }
 
+    function whenContainerReady(gd) {
+        return new Promise(function(resolve) {
+            if (!gd) {
+                resolve(null);
+                return;
+            }
+
+            var done = false;
+            var deadlineMs = 7000;
+            var delays = [0, 40, 120, 260, 520, 900, 1500, 2400, 3600, 5200, 6800];
+            var meta = getPlotMeta(gd);
+
+            function finish() {
+                if (done) return;
+                done = true;
+                resolve(gd);
+            }
+
+            function checkReady() {
+                if (done) return;
+                var measurement = recordBoxMeasurement(gd);
+                if (measurement.becameReady) scheduleRefresh();
+                var now = Date.now();
+                var stableEnough = meta && meta.stableReadyCount >= 2;
+                var waitedLongEnough = meta && meta.firstReadyAt > 0 && (now - meta.firstReadyAt) >= 120;
+                if (hasUsableBox(measurement.box) && (stableEnough || waitedLongEnough)) {
+                    finish();
+                }
+            }
+
+            if (window.requestAnimationFrame) {
+                window.requestAnimationFrame(checkReady);
+            }
+            for (var i = 0; i < delays.length; i++) {
+                setTimeout(checkReady, delays[i]);
+            }
+            setTimeout(finish, deadlineMs);
+        });
+    }
+
+    function mountPlot(gd, data, layout, config) {
+        return whenContainerReady(gd).then(function() {
+            return Plotly.newPlot(gd, data, layout, config || {});
+        }).then(function(g) {
+            api.register(g);
+            scheduleRefresh();
+            stabilizePlot(g);
+            return g;
+        });
+    }
+
     function attachObservers(gd) {
         if (!gd || gd.__fragglerObserversAttached) return;
         gd.__fragglerObserversAttached = true;
+        var meta = getPlotMeta(gd);
+        if (meta) meta.stableAncestor = findStableAncestor(gd);
+
+        function onPotentialSizeChange() {
+            var measurement = recordBoxMeasurement(gd);
+            if (measurement.becameReady) {
+                scheduleRefresh();
+                stabilizePlot(gd);
+                return;
+            }
+            if (hasUsableBox(measurement.box)) scheduleRefresh();
+        }
 
         if (typeof ResizeObserver === 'function') {
             try {
-                var ro = new ResizeObserver(function() { resizeOne(gd); });
+                var ro = new ResizeObserver(function() { onPotentialSizeChange(); });
                 ro.observe(gd);
                 if (gd.parentElement) ro.observe(gd.parentElement);
+                if (meta && meta.stableAncestor && meta.stableAncestor !== gd.parentElement) {
+                    ro.observe(meta.stableAncestor);
+                }
                 gd.__fragglerResizeObserver = ro;
             } catch (e) {}
         }
@@ -541,12 +678,23 @@ window.ReportPlotManager = (function() {
 
         if (typeof MutationObserver === 'function' && gd.parentElement) {
             try {
-                var mo = new MutationObserver(function() { scheduleRefresh(); });
+                var mo = new MutationObserver(function() { onPotentialSizeChange(); });
                 mo.observe(gd.parentElement, {
                     attributes: true,
                     attributeFilter: ['style', 'class'],
                 });
                 gd.__fragglerMutationObserver = mo;
+            } catch (e) {}
+        }
+
+        if (typeof MutationObserver === 'function' && meta && meta.stableAncestor && meta.stableAncestor !== gd.parentElement) {
+            try {
+                var rootMo = new MutationObserver(function() { onPotentialSizeChange(); });
+                rootMo.observe(meta.stableAncestor, {
+                    attributes: true,
+                    attributeFilter: ['style', 'class'],
+                });
+                gd.__fragglerRootMutationObserver = rootMo;
             } catch (e) {}
         }
     }
@@ -564,14 +712,16 @@ window.ReportPlotManager = (function() {
 
     loadInitialStates();
 
-    return {
+    var api = {
         register: function(gd) {
             if (!gd || !gd.id) return;
             plots[gd.id] = gd;
+            getPlotMeta(gd);
             attachObservers(gd);
             scheduleRefresh();
             stabilizePlot(gd);
         },
+        mountPlot: mountPlot,
         getInitialStateForPlot: function(id) {
             loadInitialStates();
             return initialStates[id] || null;
@@ -586,8 +736,12 @@ window.ReportPlotManager = (function() {
             return all;
         },
         refreshAll: scheduleRefresh,
-        resizeOne: resizeOne
+        resizeOne: resizeOne,
+        whenContainerReady: whenContainerReady,
+        measureBox: measureBox,
+        findStableAncestor: findStableAncestor
     };
+    return api;
 })();
 </script>
 """
@@ -612,6 +766,52 @@ def _resolve_report_display_name(entries: list[dict] | None = None) -> str:
         if assays and assays.issubset({"FLT3-ITD", "FLT3-D835", "NPM1"}):
             return "Flt3"
     return "Klonalitet" if analysis_name == "clonality" else analysis_name.capitalize()
+
+
+def _new_report_metrics() -> dict[str, float | int]:
+    return {
+        "plot_build_seconds": 0.0,
+        "plot_count": 0,
+        "plot_errors": 0,
+    }
+
+
+def _build_report_plot_fragment(
+    entry: dict,
+    report_metrics: dict[str, float | int] | None,
+    *,
+    qc_rules: QCRules | None = None,
+) -> str:
+    started = time.perf_counter()
+    try:
+        fragment = (
+            build_interactive_peak_plot_for_entry_qc(entry, qc_rules)
+            if qc_rules is not None
+            else build_interactive_peak_plot_for_entry(entry)
+        )
+        return fragment or "<p class='small'><em>Ingen data å vise.</em></p>"
+    except Exception as ex:
+        if report_metrics is not None:
+            report_metrics["plot_errors"] = int(report_metrics.get("plot_errors", 0)) + 1
+        prefix = "QC-plott" if qc_rules is not None else "plott"
+        return f"<p class='small'><em>Kunne ikke lage {prefix}: {escape(str(ex))}</em></p>"
+    finally:
+        if report_metrics is not None:
+            report_metrics["plot_count"] = int(report_metrics.get("plot_count", 0)) + 1
+            report_metrics["plot_build_seconds"] = float(report_metrics.get("plot_build_seconds", 0.0)) + (
+                time.perf_counter() - started
+            )
+
+
+def _format_report_metrics_summary(label: str, report_metrics: dict[str, float | int], total_seconds: float, html_bytes: int) -> str:
+    return (
+        f"[HTML] {label}: "
+        f"{int(report_metrics.get('plot_count', 0))} plott, "
+        f"{int(report_metrics.get('plot_errors', 0))} feil, "
+        f"plot-tid {float(report_metrics.get('plot_build_seconds', 0.0)):.2f}s, "
+        f"total {total_seconds:.2f}s, "
+        f"størrelse {html_bytes / (1024 * 1024):.2f} MB"
+    )
 
 
 def _create_html_header(
@@ -1170,7 +1370,12 @@ def _build_flt3_summary_table(e: dict) -> str:
 
     return ""
 
-def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: list[str]):
+def _render_assay_block(
+    assay_name: str,
+    assay_entries: list[dict],
+    html_lines: list[str],
+    report_metrics: dict[str, float | int] | None = None,
+):
     """Renders a single assay block with plots for each file."""
     display_name = assay_name
     reference_assay = assay_name
@@ -1196,11 +1401,7 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
                 f"Injeksjon: {e.get('selected_injection') or ''}",
             ]
             html_lines.append(f"<p class='small'>{escape(' | '.join(sub))}</p>")
-        try:
-            frag = build_interactive_peak_plot_for_entry(e)
-            html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
-        except Exception as ex:
-            html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+        html_lines.append(_build_report_plot_fragment(e, report_metrics))
             
         if reference_assay in {"FLT3-ITD", "FLT3-D835", "NPM1"}:
             html_lines.append(_build_flt3_summary_table(e))
@@ -1221,7 +1422,12 @@ def _render_assay_block(assay_name: str, assay_entries: list[dict], html_lines: 
 
     html_lines.append("</div>")
 
-def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: list[str]):
+def _render_tcrb_rep_block(
+    entries: list[dict],
+    replicate_num: str,
+    html_lines: list[str],
+    report_metrics: dict[str, float | int] | None = None,
+):
     """Renders a combination block for TCRb replicates."""
     if not entries: return
     html_lines.append("<div class='assay-block'>")
@@ -1244,15 +1450,15 @@ def _render_tcrb_rep_block(entries: list[dict], replicate_num: str, html_lines: 
         rearrangement_html = _render_rearrangement_info_html(e_combo['assay'])
         if rearrangement_html:
             html_lines.append(rearrangement_html)
-        try:
-            frag = build_interactive_peak_plot_for_entry(e_combo)
-            html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
-        except Exception as ex:
-            html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+        html_lines.append(_build_report_plot_fragment(e_combo, report_metrics))
         html_lines.append("</div>")
     html_lines.append("</div></div>")
 
-def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
+def _render_tcrg_combo_block(
+    tcrg_entries: list[dict],
+    html_lines: list[str],
+    report_metrics: dict[str, float | int] | None = None,
+):
     """Renders a combined block for TCRg assays."""
     if not tcrg_entries: return
     group_y = compute_group_ymax_for_entries(tcrg_entries)
@@ -1275,11 +1481,7 @@ def _render_tcrg_combo_block(tcrg_entries: list[dict], html_lines: list[str]):
         rearrangement_html = _render_rearrangement_info_html(e_combo['assay'])
         if rearrangement_html:
             html_lines.append(rearrangement_html)
-        try:
-            frag = build_interactive_peak_plot_for_entry(e_combo)
-            html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
-        except Exception as ex:
-            html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+        html_lines.append(_build_report_plot_fragment(e_combo, report_metrics))
         html_lines.append("</div>")
     html_lines.append("</div></div>")
 
@@ -1349,6 +1551,7 @@ def _render_relevant_qc_section(
     dit_entries: list[dict],
     control_entries: list[dict],
     html_lines: list[str],
+    report_metrics: dict[str, float | int] | None = None,
 ) -> None:
     patient_assays = {
         normalize_assay_qc(str(e.get("assay") or ""))
@@ -1371,12 +1574,7 @@ def _render_relevant_qc_section(
     plot_fragments: dict[int, str] = {}
 
     for idx, entry in enumerate(relevant_controls):
-        try:
-            frag = build_interactive_peak_plot_for_entry_qc(entry, rules)
-            if frag:
-                plot_fragments[idx] = frag
-        except Exception as ex:
-            plot_fragments[idx] = f"<p class='small'><em>Kunne ikke lage QC-plott: {escape(str(ex))}</em></p>"
+        plot_fragments[idx] = _build_report_plot_fragment(entry, report_metrics, qc_rules=rules)
 
     assay_label = ", ".join(sorted(patient_assays))
     html_lines.append("<details class='dit-qc-section'>")
@@ -1404,6 +1602,8 @@ def _render_relevant_qc_section(
 
 def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_outdir: Path) -> Path | None:
     """Build an FLT3 control/QC HTML report using the shared report styling."""
+    report_started = time.perf_counter()
+    report_metrics = _new_report_metrics()
     control_entries = [
         e for e in entries
         if e.get("group") in {"negative_control", "positive_control", "reactive_control"}
@@ -1497,11 +1697,7 @@ def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_ou
         details = str(row.get("Details") or "")
         if details:
             html_lines.append(f"<p class='small'><strong>Kommentar:</strong> {escape(details)}</p>")
-        try:
-            frag = build_interactive_peak_plot_for_entry(entry)
-            html_lines.append(frag if frag else "<p class='small'><em>Ingen data å vise.</em></p>")
-        except Exception as ex:
-            html_lines.append(f"<p class='small'><em>Kunne ikke lage plott: {escape(str(ex))}</em></p>")
+        html_lines.append(_build_report_plot_fragment(entry, report_metrics))
         html_lines.append(_build_flt3_summary_table(entry))
         html_lines.append("</div>")
 
@@ -1514,6 +1710,14 @@ def build_flt3_qc_html_report(entries: list[dict], qc_rows: list[dict], assay_ou
     out_html = assay_outdir / "QC_FLT3_Injections.html"
     out_html.write_text("\n".join(html_lines), encoding="utf-8")
     print_green(f"FLT3 QC HTML report saved to {out_html}")
+    print_green(
+        _format_report_metrics_summary(
+            "FLT3_QC_Resultater",
+            report_metrics,
+            time.perf_counter() - report_started,
+            out_html.stat().st_size,
+        )
+    )
     return out_html
 
 
@@ -1537,6 +1741,8 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
     display_name = _resolve_report_display_name(entries)
 
     for dit, dit_entries in sorted(per_dit.items()):
+        report_started = time.perf_counter()
+        report_metrics = _new_report_metrics()
         year = dit_to_year(dit)
         assays: dict[str, list[dict]] = defaultdict(list)
         for e in dit_entries: assays[e["assay"]].append(e)
@@ -1552,10 +1758,10 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
             display_order = _assay_display_order()
             ordered = [a for a in display_order if a in assays and a not in handled] + [a for a in assays if a not in display_order and a not in handled]
             for assay_key, block_title, block_entries in flt3_blocks:
-                _render_assay_block(block_title, block_entries, html_lines)
+                _render_assay_block(block_title, block_entries, html_lines, report_metrics)
 
             for name in ordered:
-                _render_assay_block(name, assays[name], html_lines)
+                _render_assay_block(name, assays[name], html_lines, report_metrics)
                 
                 # Special Combination Sections
                 if name == "TCRbC":
@@ -1564,16 +1770,16 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
                     rep1 = [lst[0] for a, lst in sorted_rep.items() if len(lst) >= 1]
                     rep2 = [lst[1] for a, lst in sorted_rep.items() if len(lst) >= 2]
                     if rep1: html_lines.append("<h2>Kombinasjonsfigurer – TCRβ</h2>")
-                    _render_tcrb_rep_block(rep1, "1", html_lines)
-                    _render_tcrb_rep_block(rep2, "2", html_lines)
+                    _render_tcrb_rep_block(rep1, "1", html_lines, report_metrics)
+                    _render_tcrb_rep_block(rep2, "2", html_lines, report_metrics)
                 
                 if name == "TCRgB":
                     tcrg_all = []
                     for a in ["TCRgA", "TCRgB"]:
                         if a in assays: tcrg_all.extend(sorted(assays[a], key=lambda x: x["fsa"].file_name))
-                    _render_tcrg_combo_block(tcrg_all, html_lines)
+                    _render_tcrg_combo_block(tcrg_all, html_lines, report_metrics)
             _render_sl_section(dit_entries, html_lines)
-            _render_relevant_qc_section(dit_entries, control_entries, html_lines)
+            _render_relevant_qc_section(dit_entries, control_entries, html_lines, report_metrics)
             
             html_lines.append("""
 <div class="print-fab no-print">
@@ -1585,13 +1791,21 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
             out_html = assay_outdir / f"{dit}_{display_name}_Resultater.html"
             out_html.write_text("\n".join(html_lines), encoding="utf-8")
             print_green(f"[DIT] Lagret: {out_html}")
+            print_green(
+                _format_report_metrics_summary(
+                    dit,
+                    report_metrics,
+                    time.perf_counter() - report_started,
+                    out_html.stat().st_size,
+                )
+            )
             continue
 
         display_order = _assay_display_order()
         ordered = [a for a in display_order if a in assays] + [a for a in assays if a not in display_order]
         
         for name in ordered:
-            _render_assay_block(name, assays[name], html_lines)
+            _render_assay_block(name, assays[name], html_lines, report_metrics)
             
             # Special Combination Sections
             if name == "TCRbC":
@@ -1600,17 +1814,17 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
                 rep1 = [lst[0] for a, lst in sorted_rep.items() if len(lst) >= 1]
                 rep2 = [lst[1] for a, lst in sorted_rep.items() if len(lst) >= 2]
                 if rep1: html_lines.append("<h2>Kombinasjonsfigurer – TCRβ</h2>")
-                _render_tcrb_rep_block(rep1, "1", html_lines)
-                _render_tcrb_rep_block(rep2, "2", html_lines)
+                _render_tcrb_rep_block(rep1, "1", html_lines, report_metrics)
+                _render_tcrb_rep_block(rep2, "2", html_lines, report_metrics)
             
             if name == "TCRgB":
                 tcrg_all = []
                 for a in ["TCRgA", "TCRgB"]:
                     if a in assays: tcrg_all.extend(sorted(assays[a], key=lambda x: x["fsa"].file_name))
-                _render_tcrg_combo_block(tcrg_all, html_lines)
+                _render_tcrg_combo_block(tcrg_all, html_lines, report_metrics)
 
         _render_sl_section(dit_entries, html_lines)
-        _render_relevant_qc_section(dit_entries, control_entries, html_lines)
+        _render_relevant_qc_section(dit_entries, control_entries, html_lines, report_metrics)
         
         html_lines.append("""
 <div class="print-fab no-print">
@@ -1622,6 +1836,14 @@ def build_dit_html_reports(entries: list[dict], assay_outdir: Path):
         out_html = assay_outdir / f"{dit}_{display_name}_Resultater.html"
         out_html.write_text("\n".join(html_lines), encoding="utf-8")
         print_green(f"[DIT] Lagret: {out_html}")
+        print_green(
+            _format_report_metrics_summary(
+                dit,
+                report_metrics,
+                time.perf_counter() - report_started,
+                out_html.stat().st_size,
+            )
+        )
 
 
 def interpret_sl_quality(percents, total_area):

@@ -183,6 +183,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=250,
         help="Write partial CSV/JSON/Markdown outputs after this many completed files. Use 0 to disable.",
     )
+    parser.add_argument(
+        "--use-rust",
+        action="store_true",
+        help="Use the Rust Engine for ladder fitting.",
+    )
+    parser.add_argument(
+        "--skip-html-reports",
+        action="store_true",
+        help="Skip generation of individual HTML reports.",
+    )
     return parser
 
 
@@ -374,10 +384,15 @@ def _raise_timeout(_signum: int, _frame: Any) -> None:
     raise Flt3ValidationTimeout("per-file validation timeout")
 
 
-def validate_one_path(payload: tuple[str, str, bool, bool, int, bool, str]) -> dict[str, Any]:
-    path_str, data_root_str, include_npm1, suppress_output, timeout_seconds, dit_only, required_run_name = payload
+def validate_one_path(payload: tuple[str, str, bool, bool, int, bool, str, bool, bool]) -> dict[str, Any]:
+    path_str, data_root_str, include_npm1, suppress_output, timeout_seconds, dit_only, required_run_name, use_rust, skip_html_reports = payload
     path = Path(path_str)
     data_root = Path(data_root_str)
+
+    if use_rust:
+        from config import APP_SETTINGS
+        APP_SETTINGS.setdefault("engine", {})["use_rust"] = True
+        APP_SETTINGS.setdefault("engine", {})["skip_html_reports"] = skip_html_reports
 
     stream_cm = contextlib.nullcontext()
     if suppress_output:
@@ -399,6 +414,7 @@ def validate_one_path(payload: tuple[str, str, bool, bool, int, bool, str]) -> d
                 include_npm1,
                 dit_only=dit_only,
                 required_run_name=required_run_name,
+                skip_html_reports=skip_html_reports,
             )
     except Flt3ValidationTimeout:
         return _row_for_failed_path(path, data_root, "review_required", f"timed out after {timeout_seconds}s")
@@ -417,6 +433,7 @@ def _validate_one_path_inner(
     *,
     dit_only: bool,
     required_run_name: str,
+    skip_html_reports: bool = False,
 ) -> dict[str, Any]:
     try:
         meta = classify_fsa(path)
@@ -853,6 +870,8 @@ def run_validation(
     dit_only: bool,
     required_run_name: str,
     excluded_basenames: list[str] | None = None,
+    use_rust: bool = False,
+    skip_html_reports: bool = False,
     progress_callback=None,
     progress_max_callback=None,
     status_callback=None,
@@ -878,6 +897,8 @@ def run_validation(
             int(timeout_seconds),
             bool(dit_only),
             str(required_run_name or ""),
+            bool(use_rust),
+            bool(skip_html_reports),
         )
         for path in files
     ]
@@ -975,6 +996,7 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_every=max(0, int(args.checkpoint_every)),
         dit_only=bool(args.dit_only),
         required_run_name=str(args.require_run_name_contains or ""),
+        use_rust=getattr(args, "use_rust", False),
     )
     return 0
 

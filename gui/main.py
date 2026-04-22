@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Main Layout (templateless, light software theme)
+HemaFrag Diagnostics — Main Layout (templateless, light software theme)
 
 Modern software look: 
 - Dark navy sidebar
@@ -46,7 +46,7 @@ def build_app() -> pn.Column:
     )
 
     header = pn.Row(
-        pn.pane.HTML('<div style="font-size:20px; font-weight:bold; color:var(--accent)">Fraggler Diagnostics</div>'),
+        pn.pane.HTML('<div style="font-size:20px; font-weight:bold; color:var(--accent)">HemaFrag Diagnostics</div>'),
         pn.HSpacer(),
         pn.Column(make_analysis_selector(), width=250),
         sizing_mode="stretch_width",

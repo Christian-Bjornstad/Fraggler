@@ -22,8 +22,8 @@ if _orig_get_const_info:
             return arg, repr(arg)
     dis._get_const_info = _patched_get_const_info
 
-APP_NAME = "Fraggler"
-BUNDLE_ID = "com.christian-bjornstad.fraggler"
+APP_NAME = "HemaFrag"
+BUNDLE_ID = "no.ous.hemafrag"
 PROJECT_ROOT = Path(__file__).resolve().parent
 DIST_DIR = PROJECT_ROOT / "dist"
 RELEASE_DIR = DIST_DIR / "releases"
@@ -110,6 +110,27 @@ def _build_pyinstaller_args() -> list[str]:
     for mod in COMMON_HIDDEN_IMPORTS:
         args.append(f"--hidden-import={mod}")
 
+    # Add Rust engine binary
+    rust_bin_src = PROJECT_ROOT / "fraggler-v2" / "target" / "release" / "fraggler-cli"
+    if sys.platform == "win32":
+        rust_bin_src = rust_bin_src.with_suffix(".exe")
+    
+    if rust_bin_src.exists():
+        print(f"Bundling Rust engine: {rust_bin_src}")
+        # Binary destination: root of the bundle
+        args.append(_format_binary_arg(str(rust_bin_src), "."))
+    else:
+        print(f"WARN: Rust engine binary not found at {rust_bin_src}. Building it now...")
+        subprocess.run(
+            ["cargo", "build", "--release", "-p", "fraggler-cli"],
+            cwd=PROJECT_ROOT / "fraggler-v2",
+            check=True
+        )
+        if rust_bin_src.exists():
+             args.append(_format_binary_arg(str(rust_bin_src), "."))
+        else:
+             print("ERROR: Failed to build Rust engine binary.")
+
     if sys.platform == "darwin":
         args.append("--icon=assets/app_icon.icns")
         args.append(f"--osx-bundle-identifier={BUNDLE_ID}")
@@ -184,7 +205,7 @@ def _post_build_mac() -> None:
 
 
 def _linux_readme_text() -> str:
-    return f"""Fraggler Diagnostics {APP_VERSION} — Fedora 35 Offline Bundle
+    return f"""HemaFrag Diagnostics {APP_VERSION} — Fedora 35 Offline Bundle
 
 Target:
 - Fedora 35 (or other x86_64 Linux with glibc 2.31+)
@@ -193,11 +214,11 @@ Target:
 
 Run:
 1. Extract this zip fully.
-2. Open a terminal in the extracted Fraggler_Linux folder.
+2. Open a terminal in the extracted HemaFrag_Linux folder.
 3. Make the launcher executable:
-   chmod +x Fraggler
+   chmod +x HemaFrag
 4. Start the app:
-   ./Fraggler
+   ./HemaFrag
 
 Compatibility:
 - The app forces QT_QPA_PLATFORM=xcb for X11 compatibility.
@@ -205,12 +226,12 @@ Compatibility:
 
 Validation checklist:
 - ldd --version reports glibc 2.31 or newer.
-- ldd ./Fraggler does not show missing bundled runtime dependencies.
+- ldd ./HemaFrag does not show missing bundled runtime dependencies.
 - The whole extracted folder is kept intact, including the _internal directory.
 
 Troubleshooting:
 - If launch fails, run:
-  ldd ./Fraggler
+  ldd ./HemaFrag
 - If you see missing library errors, confirm the full zip was extracted.
 """
 
@@ -225,7 +246,7 @@ def _stage_release_dir(name: str) -> Path:
 
 def _post_build_linux() -> None:
     source_dir = DIST_DIR / APP_NAME
-    release_dir = _stage_release_dir("Fraggler_Linux")
+    release_dir = _stage_release_dir("HemaFrag_Linux")
     shutil.copytree(source_dir, release_dir, dirs_exist_ok=True)
     _remove_macos_metadata_files(release_dir)
 
@@ -237,29 +258,29 @@ def _post_build_linux() -> None:
     if launcher.exists():
         launcher.chmod(0o755)
 
-    zip_path = RELEASE_DIR / "Fraggler_Linux_offline.zip"
+    zip_path = RELEASE_DIR / "HemaFrag_Linux_offline.zip"
     _zip_path(release_dir, zip_path, root_name=release_dir.name)
     print(f"Created Linux offline bundle: {zip_path}")
 
 
 def _post_build_windows() -> None:
     source_dir = DIST_DIR / APP_NAME
-    release_dir = _stage_release_dir("Fraggler_Windows")
+    release_dir = _stage_release_dir("HemaFrag_Windows")
     shutil.copytree(source_dir, release_dir, dirs_exist_ok=True)
-    zip_path = RELEASE_DIR / "Fraggler_Windows.zip"
+    zip_path = RELEASE_DIR / "HemaFrag_Windows.zip"
     _zip_path(release_dir, zip_path, root_name=release_dir.name)
     print(f"Created Windows bundle: {zip_path}")
 
 
 def _post_build_generic_desktop() -> None:
     app_path = DIST_DIR / f"{APP_NAME}.app"
-    zip_path = RELEASE_DIR / "Fraggler_macOS.zip"
+    zip_path = RELEASE_DIR / "HemaFrag_macOS.zip"
     _zip_path(app_path, zip_path, root_name=app_path.name)
     print(f"Created macOS bundle: {zip_path}")
 
 
 def build_app() -> None:
-    print(f"Building Fraggler Diagnostics desktop app for {sys.platform}...")
+    print(f"Building HemaFrag Diagnostics desktop app for {sys.platform}...")
     _prepare_build_dirs()
     PyInstaller.__main__.run(_build_pyinstaller_args())
 

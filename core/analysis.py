@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Analysis Functions.
+HemaFrag Diagnostics — Analysis Functions.
 
 Ladder fitting (LIZ / ROX), SL peak detection, ladder QC metrics,
 SL area metrics, local-maxima helpers, and running-baseline estimation.
@@ -149,7 +149,7 @@ LADDER_FIT_AUTO_ACCEPT_RULES: dict[str, dict[str, float]] = {
     LADDER_FIT_PROFILE_FLT3_GS500ROX: {
         "r2_floor": 0.9985,
         "mean_abs_error_bp": 1.8,
-        "max_abs_error_bp": 3.0,
+        "max_abs_error_bp": 4.0,
         "max_curvature": 0.5,
     },
 }
@@ -253,7 +253,8 @@ AUTO_ACCEPT_MAX_ABS_ERROR = 3.0
 ROX_PREFERRED_TIME_MIN = 1500.0
 ROX_PREFERRED_TIME_MAX = 4000.0
 ROX_PREFERRED_TIME_MARGIN = 75.0
-ROX_HARD_FILTER_TIME_MIN = 1600.0
+# Keep early ROX steps available; some runs place first valid ladder step just before 1600.
+ROX_HARD_FILTER_TIME_MIN = 1480.0
 ROX_HARD_FILTER_TIME_MAX = 4050.0
 ROX_APEX_SNAP_RADIUS = 6
 ROX_PREFERRED_SUPPLEMENT_MIN_HEIGHT = 50.0
@@ -262,6 +263,16 @@ ROX_PROFILE_TIME_WEIGHT = 0.10
 ROX_PROFILE_LOW_INTENSITY_WEIGHT = 0.04
 ROX_PROFILE_SEVERE_WEAK_PENALTY = 0.08
 ROX_PROFILE_SEVERE_WEAK_INTENSITY = 80.0
+ROX_WEAK_CANDIDATE_FLOOR = 50.0
+ROX_EARLY_ANCHOR_WINDOW_MIN = 1480.0
+ROX_EARLY_ANCHOR_WINDOW_MAX = 1700.0
+ROX_EARLY_ANCHOR_MAX_SKIP = 22.0
+ROX_EARLY_ANCHOR_SKIP_WEIGHT = 0.11
+ROX_START_ANCHOR_SOFT_MIN = 1500.0
+ROX_START_ANCHOR_SOFT_MAX = 1825.0
+ROX_START_ANCHOR_HARD_MAX = 1980.0
+ROX_START_ANCHOR_PENALTY_SOFT = 1.4
+ROX_START_ANCHOR_PENALTY_HARD = 2.8
 ROX_BEAM_EXPECTED_GAP_WEIGHT = 0.60
 ROX_EDGE_MISSING_STEP_PENALTY = 0.85
 ROX_NEAR_EDGE_MISSING_STEP_PENALTY = 0.60
@@ -438,6 +449,42 @@ def _finalize_auto_fit_metadata(fsa: FsaFile) -> FsaFile:
     return _set_ladder_fit_metadata(fsa, strategy)
 
 
+def _persist_ladder_qc_metadata(
+    fsa: FsaFile,
+    metrics: dict[str, float | int],
+    *,
+    status: str | None = None,
+) -> FsaFile:
+    r2 = float(metrics.get("r2", float("nan")))
+    mean_residual_bp = float(metrics.get("mean_abs_error_bp", float("nan")))
+    max_residual_bp = float(metrics.get("max_abs_error_bp", float("nan")))
+    max_curvature = float(metrics.get("max_curvature", float("nan")))
+    n_ladder_steps = int(metrics.get("n_ladder_steps", len(getattr(fsa, "ladder_steps", []))))
+    n_size_standard_peaks = int(
+        metrics.get("n_size_standard_peaks", len(getattr(fsa, "best_size_standard", [])))
+    )
+
+    if status is None:
+        strategy = str(getattr(fsa, "ladder_fit_strategy", "") or "")
+        if strategy == "manual_adjustment":
+            status = "manual_adjustment"
+        elif bool(getattr(fsa, "ladder_review_required", False)):
+            status = "review_required"
+        elif np.isfinite(r2):
+            status = "ok"
+        else:
+            status = "ladder_qc_failed"
+
+    fsa.ladder_qc_status = str(status)
+    fsa.ladder_r2 = r2
+    fsa.ladder_mean_residual_bp = mean_residual_bp
+    fsa.ladder_max_residual_bp = max_residual_bp
+    fsa.ladder_max_curvature = max_curvature
+    fsa.n_ladder_steps = n_ladder_steps
+    fsa.n_size_standard_peaks = n_size_standard_peaks
+    return fsa
+
+
 def _map_step_indices(source_steps: np.ndarray, target_steps: np.ndarray) -> dict[int, int]:
     mapping: dict[int, int] = {}
     used: set[int] = set()
@@ -580,6 +627,7 @@ def _annotate_fit_qc_review(
     *,
     ladder_fit_profile: str | None = None,
 ) -> FsaFile:
+    fsa = _persist_ladder_qc_metadata(fsa, metrics)
     if bool(getattr(fsa, "ladder_review_required", False)):
         profile = _normalize_ladder_fit_profile(
             ladder_fit_profile or getattr(fsa, "ladder_fit_profile", None),
@@ -614,9 +662,11 @@ def _annotate_fit_qc_review(
             note = str(getattr(fsa, "ladder_fit_note", "") or "")
             if waiver_note not in note:
                 fsa.ladder_fit_note = f"{note} {waiver_note}".strip() if note else waiver_note
+            fsa = _persist_ladder_qc_metadata(fsa, metrics, status="ok")
             return fsa
 
     if bool(getattr(fsa, "ladder_review_required", False)):
+        fsa = _persist_ladder_qc_metadata(fsa, metrics, status="review_required")
         return fsa
 
     profile = _normalize_ladder_fit_profile(
@@ -641,6 +691,7 @@ def _annotate_fit_qc_review(
         reasons.append(f"high curvature {max_curvature:.3f}")
 
     if not reasons:
+        fsa = _persist_ladder_qc_metadata(fsa, metrics, status="ok")
         return fsa
 
     fsa.ladder_review_required = True
@@ -650,6 +701,7 @@ def _annotate_fit_qc_review(
         fsa.ladder_fit_note = note
     else:
         fsa.ladder_fit_note = f"{note} {qc_note}".strip() if note else qc_note
+    fsa = _persist_ladder_qc_metadata(fsa, metrics, status="review_required")
     return fsa
 
 
@@ -740,6 +792,7 @@ def _build_bounded_rox_candidate_specs(
         start_ratio = float(intensities[i]) / max(global_intensity, 1.0)
         start_penalty = max(0.0, 0.90 - start_ratio) * 0.60
         start_penalty += _rox_peak_time_penalty(float(peaks[i])) * 0.90
+        start_penalty += _rox_start_anchor_penalty(float(peaks[i]))
         states.append((start_penalty, [i], global_gap, global_gap))
     states.sort(key=lambda item: item[0])
     states = states[:beam_width]
@@ -829,6 +882,7 @@ def _build_bounded_rox_candidate_specs(
                     "bounded": True,
                 }
             )
+        specs = _append_rox_seeded_anchor_specs(specs, peaks, expected_steps, keep_finished=keep_finished)
         return specs
 
     if not allow_partial:
@@ -856,6 +910,64 @@ def _build_bounded_rox_candidate_specs(
                     "bounded": True,
                 }
             )
+    return specs
+
+
+def _append_rox_seeded_anchor_specs(
+    specs: list[dict[str, object]],
+    peaks: np.ndarray,
+    expected_steps: np.ndarray,
+    *,
+    keep_finished: int,
+) -> list[dict[str, object]]:
+    """
+    Ensure bounded search still tests early-anchor alternatives when only a
+    late-start path is produced by the beam dynamics.
+    """
+    peak_times = np.asarray(peaks, dtype=float)
+    target_len = int(expected_steps.size)
+    if peak_times.size < target_len or target_len == 0:
+        return specs
+
+    existing_keys: set[tuple[int, ...]] = set()
+    for spec in specs:
+        times = np.asarray(spec.get("times", []), dtype=float)
+        if times.size == 0:
+            continue
+        existing_keys.add(tuple(np.rint(times).astype(int).tolist()))
+
+    late_only = True
+    for spec in specs:
+        times = np.asarray(spec.get("times", []), dtype=float)
+        if times.size == 0:
+            continue
+        if float(np.min(times)) <= (ROX_START_ANCHOR_SOFT_MAX + 120.0):
+            late_only = False
+            break
+    if not late_only:
+        return specs
+
+    max_start = max(0, int(peak_times.size - target_len))
+    max_extra = min(max_start + 1, max(2, int(keep_finished)))
+    for start_idx in range(max_extra):
+        times = peak_times[start_idx : start_idx + target_len]
+        if times.size != target_len:
+            continue
+        if float(np.min(times)) > (ROX_START_ANCHOR_SOFT_MAX + 120.0):
+            continue
+        key = tuple(np.rint(times).astype(int).tolist())
+        if key in existing_keys:
+            continue
+        existing_keys.add(key)
+        specs.append(
+            {
+                "times": times.copy(),
+                "ladder_steps": expected_steps.copy(),
+                "beam_score": 999.0 + float(start_idx),
+                "complete": True,
+                "bounded": True,
+            }
+        )
     return specs
 
 
@@ -1997,6 +2109,22 @@ def _prepare_rox_size_standard_peaks(
     snapped = _snap_peak_times_to_local_apexes(peak_times, trace)
     if snapped.size == 0:
         return snapped
+    signal_trace = np.asarray(trace, dtype=float)
+    idx_all = np.rint(snapped).astype(int)
+    valid_all = (idx_all >= 0) & (idx_all < signal_trace.size)
+    if not np.any(valid_all):
+        return np.array([], dtype=float)
+    snapped = snapped[valid_all]
+    idx_all = idx_all[valid_all]
+    heights_all = signal_trace[idx_all]
+
+    strong_preferred = (
+        (snapped >= ROX_HARD_FILTER_TIME_MIN)
+        & (snapped <= ROX_HARD_FILTER_TIME_MAX)
+        & (heights_all >= ROX_WEAK_CANDIDATE_FLOOR)
+    )
+    if np.count_nonzero(strong_preferred) >= max(1, int(expected_count)):
+        snapped = snapped[strong_preferred]
 
     preferred_mask = (
         (snapped >= ROX_HARD_FILTER_TIME_MIN)
@@ -2084,6 +2212,19 @@ def _rox_peak_time_penalty(time_value: float) -> float:
     return 0.0
 
 
+def _rox_start_anchor_penalty(first_time: float) -> float:
+    """Soft prior for where the first ROX ladder peak should land."""
+    if first_time < ROX_START_ANCHOR_SOFT_MIN:
+        return ((ROX_START_ANCHOR_SOFT_MIN - first_time) / 220.0) * 0.45
+    if first_time <= ROX_START_ANCHOR_SOFT_MAX:
+        return 0.0
+
+    penalty = ((first_time - ROX_START_ANCHOR_SOFT_MAX) / 140.0) * ROX_START_ANCHOR_PENALTY_SOFT
+    if first_time > ROX_START_ANCHOR_HARD_MAX:
+        penalty += ((first_time - ROX_START_ANCHOR_HARD_MAX) / 120.0) * ROX_START_ANCHOR_PENALTY_HARD
+    return max(0.0, penalty)
+
+
 def _candidate_rox_profile_penalty(fsa: FsaFile) -> float:
     best = getattr(fsa, "best_size_standard", None)
     if best is None:
@@ -2108,19 +2249,123 @@ def _candidate_rox_profile_penalty(fsa: FsaFile) -> float:
         return 0.0
 
     time_penalty = sum(_rox_peak_time_penalty(float(time_value)) for time_value in peak_times)
+    start_anchor_penalty = _rox_start_anchor_penalty(float(np.min(peak_times)))
+    earliest_selected = float(np.min(peak_times))
+    earliest_available_penalty = 0.0
+    available = np.asarray(getattr(fsa, "size_standard_peaks", []), dtype=float)
+    if available.size > 0:
+        avail_idx = np.rint(available).astype(int)
+        valid_avail = (avail_idx >= 0) & (avail_idx < trace.size)
+        if np.any(valid_avail):
+            avail_times = available[valid_avail]
+            avail_heights = trace[avail_idx[valid_avail]]
+            early_mask = (
+                (avail_times >= ROX_EARLY_ANCHOR_WINDOW_MIN)
+                & (avail_times <= ROX_EARLY_ANCHOR_WINDOW_MAX)
+                & (avail_heights >= ROX_WEAK_CANDIDATE_FLOOR)
+            )
+            if np.any(early_mask):
+                earliest_available = float(np.min(avail_times[early_mask]))
+                skip = max(0.0, earliest_selected - earliest_available - ROX_EARLY_ANCHOR_MAX_SKIP)
+                earliest_available_penalty = skip * ROX_EARLY_ANCHOR_SKIP_WEIGHT
     low_intensity = np.clip((250.0 - intensities) / 250.0, a_min=0.0, a_max=None)
     severe_weak = int(np.sum(intensities < ROX_PROFILE_SEVERE_WEAK_INTENSITY))
 
     return (
         float(time_penalty) * ROX_PROFILE_TIME_WEIGHT
+        + float(start_anchor_penalty)
+        + float(earliest_available_penalty)
         + float(np.sum(low_intensity)) * ROX_PROFILE_LOW_INTENSITY_WEIGHT
         + (severe_weak * ROX_PROFILE_SEVERE_WEAK_PENALTY)
     )
 
 
+def _rolling_quantile_baseline(
+    trace: np.ndarray,
+    bin_size: int = BASELINE_BIN_SIZE,
+    quantile: float = BASELINE_QUANTILE,
+) -> np.ndarray:
+    """Low-envelope baseline estimated from per-bin quantiles."""
+    values = np.asarray(trace, dtype=float)
+    n = values.size
+    if n == 0:
+        return np.zeros_like(values, dtype=float)
+    if bin_size < 20:
+        bin_size = 20
+
+    n_bins = int(np.ceil(n / bin_size))
+    centers: list[float] = []
+    base_vals: list[float] = []
+
+    for b in range(n_bins):
+        start = b * bin_size
+        end = min((b + 1) * bin_size, n)
+        seg = values[start:end]
+        if seg.size == 0:
+            continue
+        centers.append(0.5 * (start + end - 1))
+        base_vals.append(float(np.quantile(seg, quantile)))
+
+    if not centers:
+        return np.zeros_like(values, dtype=float)
+
+    centers_arr = np.asarray(centers, dtype=float)
+    base_vals_arr = np.asarray(base_vals, dtype=float)
+    idx = np.arange(n, dtype=float)
+    return np.interp(
+        idx,
+        centers_arr,
+        base_vals_arr,
+        left=base_vals_arr[0],
+        right=base_vals_arr[-1],
+    )
+
+
+def _compute_robust_arpls_baseline(
+    trace: np.ndarray,
+    lam: float = 100.0,
+    ratio: float = 0.99,
+) -> np.ndarray:
+    """
+    Robust baseline for high-dynamic-range traces.
+    Caps extreme spikes before arPLS and constrains the output against a
+    rolling low-envelope to avoid baseline "mountains" under tall peaks.
+    """
+    values = np.asarray(trace, dtype=float)
+    if values.size == 0:
+        return np.zeros_like(values, dtype=float)
+
+    try:
+        baseline = np.asarray(baseline_arPLS(values, ratio=ratio, lam=lam), dtype=float)
+    except Exception:
+        baseline = _rolling_quantile_baseline(values, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
+
+    envelope = _rolling_quantile_baseline(values, bin_size=BASELINE_BIN_SIZE, quantile=BASELINE_QUANTILE)
+    residual = values - envelope
+    residual_scale = float(np.std(residual)) if residual.size else 0.0
+    positive_excess = np.maximum(baseline - envelope, 0.0)
+    mountain_score = float(np.quantile(positive_excess, 0.95)) if positive_excess.size else 0.0
+
+    upper_guard = max(10.0, 0.10 * residual_scale)
+    lower_guard = max(25.0, 2.5 * upper_guard)
+    if mountain_score <= upper_guard:
+        constrained = baseline
+    else:
+        constrained = np.clip(baseline, envelope - lower_guard, envelope + upper_guard)
+    constrained = np.where(np.isfinite(constrained), constrained, envelope)
+    return constrained
+
+
 def _recover_rox_size_standard_peaks_from_baseline(fsa: FsaFile, raw_trace: np.ndarray) -> bool:
     """Retry ROX peak detection on a baseline-corrected trace when the raw pass fails."""
-    corrected = np.maximum(np.asarray(raw_trace, dtype=float) - baseline_arPLS(raw_trace), 0.0)
+    guarded_baseline = estimate_running_baseline(
+        np.asarray(raw_trace, dtype=float),
+        bin_size=BASELINE_BIN_SIZE,
+        quantile=BASELINE_QUANTILE,
+        use_arpls=True,
+        lam=100.0,
+    )
+    corrected = np.maximum(np.asarray(raw_trace, dtype=float) - guarded_baseline, 0.0)
     fallback_height = max(20.0, min(float(fsa.min_size_standard_height), ROX_BASELINE_FALLBACK_MIN_HEIGHT))
     found_peaks, _ = signal.find_peaks(
         corrected,
@@ -3078,13 +3323,12 @@ def analyse_fsa_liz(
             qc = compute_ladder_qc_metrics(hybrid_fsa)
             hybrid_fsa = _finalize_auto_fit_metadata(hybrid_fsa)
             hybrid_fsa = _annotate_fit_qc_review(hybrid_fsa, qc)
-            if not bool(getattr(hybrid_fsa, "ladder_review_required", False)):
-                return hybrid_fsa
-            print_warning(
-                f"[LIZ] Rust hybrid fit remained review_required for {fsa_path.name}. "
-                "Falling back to Python ladder search."
-            )
-        print_warning(f"[LIZ] Rust Engine failed or returned None for {fsa_path.name}. Falling back to Python.")
+            applied = _try_apply_saved_ladder_adjustment(hybrid_fsa, load_ladder_adjustment(hybrid_fsa), "LIZ")
+            if applied is not None:
+                return applied
+            return hybrid_fsa
+        print_warning(f"[LIZ] Rust Engine failed or returned None for {fsa_path.name}. No Python fallback will be attempted.")
+        return None
 
     base_fsa = find_size_standard_peaks(base_fsa)
     
@@ -3404,13 +3648,12 @@ def analyse_fsa_rox(
             qc = compute_ladder_qc_metrics(hybrid_fsa)
             hybrid_fsa = _finalize_auto_fit_metadata(hybrid_fsa)
             hybrid_fsa = _annotate_fit_qc_review(hybrid_fsa, qc)
-            if not bool(getattr(hybrid_fsa, "ladder_review_required", False)):
-                return hybrid_fsa
-            print_warning(
-                f"[ROX] Rust hybrid fit remained review_required for {fsa_path.name}. "
-                "Falling back to Python ladder search."
-            )
-        print_warning(f"[ROX] Rust Engine failed or returned None for {fsa_path.name}. Falling back to Python.")
+            applied = _try_apply_saved_ladder_adjustment(hybrid_fsa, load_ladder_adjustment(hybrid_fsa), "ROX")
+            if applied is not None:
+                return applied
+            return hybrid_fsa
+        print_warning(f"[ROX] Rust Engine failed or returned None for {fsa_path.name}. No Python fallback will be attempted.")
+        return None
 
     base_fsa = find_size_standard_peaks(base_fsa)
     base_raw_rox = np.asarray(base_fsa.fsa["DATA4"], dtype=float)
@@ -3648,7 +3891,7 @@ def estimate_running_baseline(
     bin_size: int = BASELINE_BIN_SIZE,
     quantile: float = BASELINE_QUANTILE,
     use_arpls: bool = True,
-    lam: float = 1000.0,
+    lam: float = 100.0,
 ) -> np.ndarray:
     """Robust rullende baseline med arPLS som default."""
     n = trace.size
@@ -3657,9 +3900,7 @@ def estimate_running_baseline(
 
     if use_arpls:
         try:
-            from fraggler.fraggler import baseline_arPLS
-            # Bruker lavere ratio (0.01) for tigther convergence
-            baseline = baseline_arPLS(trace, ratio=0.01, lam=lam)
+            baseline = _compute_robust_arpls_baseline(trace, lam=lam, ratio=0.99)
             return baseline
         except Exception:
             pass # Fallback til den enkle metoden
@@ -3667,29 +3908,7 @@ def estimate_running_baseline(
     if bin_size < 20:
         bin_size = 20
 
-    n_bins = int(np.ceil(n / bin_size))
-    centers = []
-    base_vals = []
-
-    for b in range(n_bins):
-        start = b * bin_size
-        end = min((b + 1) * bin_size, n)
-        seg = trace[start:end]
-        if seg.size == 0:
-            continue
-        centers.append(0.5 * (start + end - 1))
-        base_vals.append(np.quantile(seg, quantile))
-
-    centers = np.asarray(centers, dtype=float)
-    base_vals = np.asarray(base_vals, dtype=float)
-
-    if centers.size == 0:
-        return np.zeros_like(trace, dtype=float)
-
-    idx = np.arange(n, dtype=float)
-    baseline = np.interp(idx, centers, base_vals,
-                         left=base_vals[0], right=base_vals[-1])
-    return baseline
+    return _rolling_quantile_baseline(trace, bin_size=bin_size, quantile=quantile)
 
 
 # ==================================================================

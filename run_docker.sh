@@ -7,7 +7,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 echo -e "${BLUE}============================================================${NC}"
-echo -e "${BLUE}   Fraggler Diagnostics — Docker Runtime (GUI)${NC}"
+echo -e "${BLUE}   HemaFrag Diagnostics — Docker Runtime (GUI)${NC}"
 echo -e "${BLUE}============================================================${NC}"
 
 # 1. Build the Docker Image

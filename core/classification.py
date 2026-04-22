@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — FSA Classification.
+HemaFrag Diagnostics — FSA Classification.
 
 Dispatcher for analysis-specific classification logic.
 """

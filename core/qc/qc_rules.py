@@ -1,5 +1,5 @@
 """
-Fraggler QC — Rules, aliases, and control regex.
+HemaFrag QC — Rules, aliases, and control regex.
 """
 from __future__ import annotations
 

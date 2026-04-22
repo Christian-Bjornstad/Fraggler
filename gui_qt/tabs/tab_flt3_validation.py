@@ -134,8 +134,15 @@ class TabFlt3Validation(QWidget):
 
         self.chk_include_npm1 = QCheckBox("Include NPM1")
         self.chk_dit_only = QCheckBox("DIT only")
+        self.chk_generate_html = QCheckBox("Generate HTML Reports")
+        self.chk_generate_html.setChecked(True)
         form.addRow("", self.chk_include_npm1)
         form.addRow("", self.chk_dit_only)
+        rust_note = QLabel("Rust ladder fitting is always used for FLT3 archive validation.")
+        rust_note.setWordWrap(True)
+        rust_note.setObjectName("MutedText")
+        form.addRow("", rust_note)
+        form.addRow("", self.chk_generate_html)
         return card
 
     def _build_dashboard_card(self) -> QWidget:
@@ -276,6 +283,8 @@ class TabFlt3Validation(QWidget):
             ],
             "include_npm1": self.chk_include_npm1.isChecked(),
             "dit_only": self.chk_dit_only.isChecked(),
+            "use_rust": True,
+            "generate_html": self.chk_generate_html.isChecked(),
             "last_run_dir": str(self._current_run_dir or ""),
             "last_workbook_path": str(self._current_workbook_path or ""),
         }
@@ -312,6 +321,9 @@ class TabFlt3Validation(QWidget):
             lines.append("  --include-npm1")
         if self.chk_dit_only.isChecked():
             lines.append("  --dit-only")
+        lines.append("  --use-rust")
+        if not self.chk_generate_html.isChecked():
+            lines.append("  --skip-html-reports")
         for basename in [
             line.strip() for line in self.exclude_basenames.toPlainText().splitlines() if line.strip()
         ]:
@@ -404,6 +416,8 @@ class TabFlt3Validation(QWidget):
             timeout_seconds=self.timeout_seconds.value(),
             checkpoint_every=self.checkpoint_every.value(),
             required_run_name_contains=self.require_run_name_contains.text().strip() or "3730DNA",
+            use_rust=True,
+            skip_html_reports=not self.chk_generate_html.isChecked(),
             excluded_basenames=[
                 line.strip() for line in self.exclude_basenames.toPlainText().splitlines() if line.strip()
             ],

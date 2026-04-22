@@ -34,7 +34,7 @@ THIRD_PARTY_SOFTWARE = [
         "copyright": "Clinical Genomic Umea",
         "license_name": "MIT",
         "summary": (
-            "Fraggler Diagnostics includes and builds on local embedded code derived from the "
+            "HemaFrag Diagnostics includes and builds on local embedded code derived from the "
             "upstream fraggler package, especially in the bundled fraggler runtime module."
         ),
         "derived_paths": [

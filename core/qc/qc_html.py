@@ -1,5 +1,5 @@
 """
-Fraggler QC — HTML QC report builder.
+HemaFrag QC — HTML QC report builder.
 """
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ def build_qc_html(entries: list[dict], out_html: Path, rules: QCRules, excel_pat
     html.append("<html lang='no'>")
     html.append("<head>")
     html.append("<meta charset='utf-8'>")
-    html.append("<title>QC – Fraggler</title>")
+    html.append("<title>QC – HemaFrag Diagnostics</title>")
     html.append("""
 <style>
 /* ── Base Typography ── */
@@ -129,7 +129,7 @@ hr { border: none; border-top: 1px solid #e6e6e6; margin: 1.2rem 0; }
     html.append("</head>")
     html.append("<body>")
 
-    html.append("<h1>QC – Fraggler</h1>")
+    html.append("<h1>QC – HemaFrag Diagnostics</h1>")
     html.append(f"<p class='small'>Generert: {now}. Antall QC-filer: <strong>{len(entries)}</strong>.</p>")
     html.append(f"<p class='small'>Excel trends: <code>{html_escape(excel_path.name)}</code> (oppdateres ved hver kjøring).</p>")
 

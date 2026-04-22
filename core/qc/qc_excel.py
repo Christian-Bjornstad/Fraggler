@@ -1,5 +1,5 @@
 """
-Fraggler QC — Excel trend tracking (append-mode).
+HemaFrag QC — Excel trend tracking (append-mode).
 """
 from __future__ import annotations
 

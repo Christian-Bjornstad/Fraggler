@@ -1,5 +1,5 @@
 """
-Fraggler Diagnostics — Batch Processing
+HemaFrag Diagnostics — Batch Processing
 
 Logic for automated scanning of subfolders / YAML files and executing
 jobs (pipeline/qc/dit). Also implements cross-folder DIT aggregation.
@@ -335,6 +335,7 @@ def run_batch_jobs(
     aggregate_outdir_name: str | None = None,
     defer_tracking_workbook_refresh: bool = False,
     defer_dit_html_reports: bool | None = None,
+    skip_html_reports: bool = False,
 ) -> dict[str, Any]:
     """
     Run all generated jobs.
@@ -531,7 +532,11 @@ def run_batch_jobs(
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        if defer_dit_html_reports:
+                        if defer_dit_html_reports or skip_html_reports:
+                            for entry in entries:
+                                entry["fsa"] = None
+                                entry.pop("peaks_by_channel", None)
+                                entry.pop("size_standard", None)
                             with data_lock:
                                 _extend_entries(all_collected_entries_by_job, i, entries)
                             _emit_progress(
@@ -539,7 +544,7 @@ def run_batch_jobs(
                                 "build_report",
                                 files_done=job_file_total,
                                 files_total=job_file_total,
-                                note="build_report_deferred",
+                                note="build_report_deferred_or_skipped",
                             )
                         else:
                             _emit_progress(
@@ -593,6 +598,11 @@ def run_batch_jobs(
                         else:
                             log(f"[BATCH] Built aggregated DIT report for {job_name} with {len(entries)} entries.")
                     else:
+                        if defer_dit_html_reports or skip_html_reports:
+                            for entry in entries:
+                                entry["fsa"] = None
+                                entry.pop("peaks_by_channel", None)
+                                entry.pop("size_standard", None)
                         with data_lock:
                             _extend_entries(all_collected_entries_by_job, i, entries)
                             if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
@@ -634,9 +644,15 @@ def run_batch_jobs(
                         tracking_excel_path=tracking_excel_path,
                         update_tracking_workbook=False,
                         return_entries=True,
+                        skip_html_reports=skip_html_reports,
                         progress_callback=_job_progress,
                     )
                     if qc_entries:
+                        if defer_dit_html_reports or skip_html_reports:
+                            for entry in qc_entries:
+                                entry["fsa"] = None
+                                entry.pop("peaks_by_channel", None)
+                                entry.pop("size_standard", None)
                         with data_lock:
                             _extend_entries(qc_report_entries_by_job, i, qc_entries)
                         if defer_tracking_workbook_refresh and deferred_tracking_entries_by_job is not None:
@@ -679,6 +695,7 @@ def run_batch_jobs(
                         excel_name=resolved_excel,
                         rules=qc_rules,
                         files=job_files,
+                        skip_html_reports=skip_html_reports,
                     )
                 
             elif job_type == "dit":
@@ -700,7 +717,7 @@ def run_batch_jobs(
                     )
                     if stream_aggregated_dit and agg_outdir is not None:
                         from core.html_reports import build_dit_html_reports
-                        if defer_dit_html_reports:
+                        if defer_dit_html_reports or skip_html_reports:
                             with data_lock:
                                 _extend_entries(all_collected_entries_by_job, i, entries)
                             _emit_progress(
@@ -708,7 +725,7 @@ def run_batch_jobs(
                                 "build_report",
                                 files_done=job_file_total,
                                 files_total=job_file_total,
-                                note="build_report_deferred",
+                                note="build_report_deferred_or_skipped",
                             )
                         else:
                             _emit_progress(
@@ -846,7 +863,7 @@ def run_batch_jobs(
     dit_report_entries = all_collected_entries + qc_report_entries
     deferred_tracking_entries = _materialize_entries(deferred_tracking_entries_by_job)
 
-    if aggregate_dit_reports and all_collected_entries and not defer_dit_html_reports:
+    if aggregate_dit_reports and all_collected_entries and not defer_dit_html_reports and not skip_html_reports:
         log("\n[BATCH] Final step: Building aggregated DIT HTML reports...")
         
         from core.html_reports import build_dit_html_reports
@@ -885,8 +902,27 @@ def run_batch_jobs(
             aggregation_failed = True
             failed_jobs.append("DIT aggregation")
             log(f"[ERROR] Failed to build aggregated DIT reports: {e}")
-    elif aggregate_dit_reports and all_collected_entries and defer_dit_html_reports:
-        log("[BATCH] Skipped aggregated DIT HTML report generation; entries were retained for deferred handling.")
+    elif aggregate_dit_reports and all_collected_entries and (defer_dit_html_reports or skip_html_reports):
+        if active_analysis == "clonality" and not defer_tracking_workbook_refresh:
+            from core.analyses.clonality.tracking_excel import (
+                CLONALITY_TRACKING_FILENAME,
+                update_clonality_tracking_workbook,
+            )
+
+            _with_heartbeat(
+                "DIT aggregation",
+                "write_tracking_excel",
+                "updating final clonality tracking workbook",
+                update_clonality_tracking_workbook,
+                tracking_excel_path
+                or resolve_analysis_excel_output_path(
+                    "clonality",
+                    agg_outdir,
+                    CLONALITY_TRACKING_FILENAME,
+                ),
+                all_collected_entries,
+            )
+        log("[BATCH] Skipped aggregated DIT HTML report generation; entries were retained for deferred handling or skipped.")
     elif aggregate_dit_reports and stream_aggregated_dit:
         log("[BATCH] Aggregated DIT reports were streamed job-by-job to reduce memory pressure.")
 

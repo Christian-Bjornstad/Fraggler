@@ -131,6 +131,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=[],
         help="Basename to exclude from archive validation. Repeat for multiple known human/machine-error files.",
     )
+    parser.add_argument(
+        "--use-rust",
+        action="store_true",
+        help="Use the Rust Engine for ladder fitting.",
+    )
+    parser.add_argument(
+        "--skip-html-reports",
+        action="store_true",
+        help="Skip generation of HTML reports to save time.",
+    )
     return parser
 
 
@@ -285,15 +295,21 @@ def _style_workbook(workbook_path: Path) -> None:
 def build_excel_workbook(run_dir: Path, residual_summary: dict[str, Any], validator_summary: dict[str, Any]) -> Path:
     workbook_path = run_dir / "track-flt3-archive.xlsx"
 
-    metrics = pd.read_csv(run_dir / "flt3_ladder_metrics.csv").fillna("")
-    review = pd.read_csv(run_dir / "flt3_ladder_review_manifest.csv").fillna("")
-    fit_failed = pd.read_csv(run_dir / "flt3_ladder_fit_failed_manifest.csv").fillna("")
-    manual_adj = pd.read_csv(run_dir / "flt3_ladder_manual_adjustments_applied.csv").fillna("")
-    residual_by_year = pd.read_csv(run_dir / "residual_by_year.csv").fillna("")
-    residual_by_assay = pd.read_csv(run_dir / "residual_by_assay.csv").fillna("")
-    residual_by_analysis = pd.read_csv(run_dir / "residual_by_analysis_type.csv").fillna("")
-    residual_by_strategy = pd.read_csv(run_dir / "residual_by_strategy.csv").fillna("")
-    residual_worst = pd.read_csv(run_dir / "residual_worst_cases.csv").fillna("")
+    def _safe_read(p: Path) -> pd.DataFrame:
+        try:
+            return pd.read_csv(p).fillna("")
+        except pd.errors.EmptyDataError:
+            return pd.DataFrame()
+
+    metrics = _safe_read(run_dir / "flt3_ladder_metrics.csv")
+    review = _safe_read(run_dir / "flt3_ladder_review_manifest.csv")
+    fit_failed = _safe_read(run_dir / "flt3_ladder_fit_failed_manifest.csv")
+    manual_adj = _safe_read(run_dir / "flt3_ladder_manual_adjustments_applied.csv")
+    residual_by_year = _safe_read(run_dir / "residual_by_year.csv")
+    residual_by_assay = _safe_read(run_dir / "residual_by_assay.csv")
+    residual_by_analysis = _safe_read(run_dir / "residual_by_analysis_type.csv")
+    residual_by_strategy = _safe_read(run_dir / "residual_by_strategy.csv")
+    residual_worst = _safe_read(run_dir / "residual_worst_cases.csv")
 
     overview = pd.DataFrame(
         [
@@ -361,6 +377,9 @@ def _archive_metric_paths(metrics_csv: Path) -> list[Path]:
     seen: set[Path] = set()
     with metrics_csv.open(newline="", encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
+            status = str(row.get("status") or "").strip()
+            if status.startswith("skipped"):
+                continue
             raw_path = str(row.get("path") or "").strip()
             if not raw_path:
                 continue
@@ -483,6 +502,8 @@ def run_backfill_validation(
     checkpoint_every: int,
     required_run_name_contains: str,
     excluded_basenames: list[str] | None = None,
+    use_rust: bool = True,
+    skip_html_reports: bool = False,
     progress_callback=None,
     progress_max_callback=None,
     status_callback=None,
@@ -507,6 +528,8 @@ def run_backfill_validation(
         dit_only=bool(dit_only),
         required_run_name=str(required_run_name_contains or ""),
         excluded_basenames=list(excluded_basenames or []),
+        use_rust=use_rust,
+        skip_html_reports=skip_html_reports,
         progress_callback=progress_callback,
         progress_max_callback=progress_max_callback,
         status_callback=status_callback,
@@ -554,6 +577,8 @@ def main(argv: list[str] | None = None) -> int:
         checkpoint_every=args.checkpoint_every,
         required_run_name_contains=args.require_run_name_contains,
         excluded_basenames=list(args.excluded_basenames or DEFAULT_EXCLUDED_BASENAMES),
+        use_rust=True,
+        skip_html_reports=args.skip_html_reports,
     )
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 0

@@ -1,5 +1,5 @@
 """
-Fraggler QC — Interactive Plotly QC plot builder.
+HemaFrag QC — Interactive Plotly QC plot builder.
 """
 from __future__ import annotations
 
@@ -27,6 +27,146 @@ from core.analysis import estimate_running_baseline
 
 def _assay_reference_ranges() -> dict:
     return merged_analysis_attr("ASSAY_REFERENCE_RANGES")
+
+
+def _qc_json_dumps_compact(value: object) -> str:
+    return json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+
+
+def _get_qc_entry_cache(entry: dict) -> dict:
+    cache = entry.get("_qc_plot_cache")
+    if not isinstance(cache, dict):
+        cache = {}
+        entry["_qc_plot_cache"] = cache
+    return cache
+
+
+def _get_qc_fsa_cache(fsa: object) -> dict:
+    cache = getattr(fsa, "_qc_plot_cache", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(fsa, "_qc_plot_cache", cache)
+    return cache
+
+
+def _get_qc_axis_arrays(fsa: object) -> dict | None:
+    raw_df = getattr(fsa, "sample_data_with_basepairs", None)
+    if raw_df is None or raw_df.empty:
+        return None
+    if "time" not in raw_df.columns or "basepairs" not in raw_df.columns:
+        return None
+
+    cache = _get_qc_fsa_cache(fsa)
+    cache_key = ("axis_arrays", id(raw_df), tuple(raw_df.columns))
+    cached = cache.get("axis_arrays")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["value"]
+
+    value = {
+        "time_all": raw_df["time"].astype(int).to_numpy(),
+        "bp_all": raw_df["basepairs"].to_numpy(),
+        "available_channels": tuple(k for k in fsa.fsa.keys() if k.startswith("DATA")),
+    }
+    cache["axis_arrays"] = {"key": cache_key, "value": value}
+    return value
+
+
+def _get_qc_trace_array(fsa: object, channel: str) -> np.ndarray:
+    cache = _get_qc_fsa_cache(fsa)
+    trace_arrays = cache.setdefault("trace_arrays", {})
+    cached = trace_arrays.get(channel)
+    current = getattr(fsa, "fsa", {}).get(channel)
+    current_id = id(current)
+    if isinstance(cached, dict) and cached.get("source_id") == current_id:
+        return cached["value"]
+
+    value = np.asarray(current, dtype=float)
+    trace_arrays[channel] = {"source_id": current_id, "value": value}
+    return value
+
+
+def _marker_rules_signature(rules: QCRules) -> tuple[float, float, float, float, float]:
+    return (
+        float(getattr(rules, "min_r2_ok", 0.0)),
+        float(getattr(rules, "min_r2_warn", 0.0)),
+        float(getattr(rules, "nk_ymax_floor", 0.0)),
+        float(getattr(rules, "sample_peak_window_bp", 0.0)),
+        float(getattr(rules, "sample_peak_window_bp_fallback", 0.0)),
+    )
+
+
+def _get_qc_display_trace(entry: dict, channel: str, assay: str | None) -> np.ndarray:
+    fsa = entry["fsa"]
+    cache = _get_qc_entry_cache(entry)
+    display_cache = cache.setdefault("display_traces", {})
+    trace = _get_qc_trace_array(fsa, channel)
+    cache_key = (assay, channel, id(trace), trace.shape)
+    cached = display_cache.get(channel)
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        return cached["value"]
+
+    value = _baseline_correct_trace_for_display(
+        trace,
+        channel=channel,
+        assay=assay,
+    )
+    display_cache[channel] = {"key": cache_key, "value": value}
+    return value
+
+
+def _get_cached_marker_results(
+    entry: dict,
+    rules: QCRules,
+    marker_specs: list[dict],
+    *,
+    fsa: object,
+    primary_ch: str | None,
+) -> list[dict]:
+    cache = _get_qc_entry_cache(entry)
+    specs_signature = tuple(
+        (
+            str(m.get("name") or ""),
+            str(m.get("kind") or ""),
+            str(m.get("channel") or ""),
+            float(m.get("expected_bp", 0.0) or 0.0),
+            float(m.get("window_bp", 0.0) or 0.0),
+        )
+        for m in marker_specs
+    )
+    cache_key = (primary_ch, _marker_rules_signature(rules), specs_signature)
+    cached = cache.get("marker_results")
+    if isinstance(cached, dict) and cached.get("key") == cache_key:
+        results = [dict(item) for item in cached["value"]]
+        entry["qc_marker_results"] = results
+        return results
+
+    results: list[dict] = []
+    for m in marker_specs:
+        ch = primary_ch if m["channel"] == "primary" else m["channel"]
+        if m["kind"] == "sample":
+            res = find_peak_near_bp_with_fallback(
+                fsa=fsa,
+                channel=ch,
+                target_bp=float(m["expected_bp"]),
+                window_bp=float(m["window_bp"]),
+                fallback_window_bp=float(getattr(rules, "sample_peak_window_bp_fallback", m["window_bp"])),
+                baseline_correct=True,
+            )
+        else:
+            res = find_peak_near_bp(
+                fsa=fsa,
+                channel=ch,
+                target_bp=float(m["expected_bp"]),
+                window_bp=float(m["window_bp"]),
+                baseline_correct=True,
+            )
+        res2 = dict(m)
+        res2.update(res)
+        results.append(res2)
+
+    cache["marker_results"] = {"key": cache_key, "value": [dict(item) for item in results]}
+    entry["qc_marker_results"] = results
+    return results
 
 
 def _is_ladder_channel(channel: str | None) -> bool:
@@ -114,17 +254,16 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     # NK: ikke fast ymin, men vi gulver ymax senere
     ymin = 0.0
 
-    raw_df = getattr(fsa, "sample_data_with_basepairs", None)
-    if raw_df is None or raw_df.empty:
-        return None
-    if "time" not in raw_df.columns or "basepairs" not in raw_df.columns:
+    axis_arrays = _get_qc_axis_arrays(fsa)
+    if not axis_arrays:
         return None
 
-    time_all = raw_df["time"].astype(int).to_numpy()
-    bp_all = raw_df["basepairs"].to_numpy()
+    time_all = axis_arrays["time_all"]
+    bp_all = axis_arrays["bp_all"]
+    entry_cache = _get_qc_entry_cache(entry)
 
     # Finn hvilke kanaler som faktisk finnes
-    available = [k for k in fsa.fsa.keys() if k.startswith("DATA")]
+    available = list(axis_arrays["available_channels"])
     channels_to_plot = [ch for ch in trace_channels if ch in available]
     if not channels_to_plot:
         if primary_ch in fsa.fsa:
@@ -140,7 +279,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
 
     # Felles x-akse basert på første kanal
     first_ch = channels_to_plot[0]
-    trace_first = np.asarray(fsa.fsa[first_ch])
+    trace_first = _get_qc_trace_array(fsa, first_ch)
     mask = (time_all >= 0) & (time_all < len(trace_first))
     if not np.any(mask):
         return None
@@ -157,6 +296,32 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
 
     # Bare beregn/legg til markører om vi faktisk har specs (dvs PK)
     marker_specs = markers_for_entry(entry, rules)  # tom for ikke-PK
+    fragment_cache_key = (
+        primary_ch,
+        tuple(channels_to_plot),
+        float(bp_min),
+        float(bp_max),
+        str(assay or ""),
+        str(entry.get("ladder") or ""),
+        str(ctrl),
+        _marker_rules_signature(rules),
+        tuple(
+            (
+                str(m.get("name") or ""),
+                str(m.get("kind") or ""),
+                str(m.get("channel") or ""),
+                float(m.get("expected_bp", 0.0) or 0.0),
+                float(m.get("window_bp", 0.0) or 0.0),
+            )
+            for m in marker_specs
+        ),
+    )
+    cached_fragment = entry_cache.get("html_fragment")
+    if isinstance(cached_fragment, dict) and cached_fragment.get("key") == fragment_cache_key:
+        marker_results = cached_fragment.get("marker_results")
+        if isinstance(marker_results, list):
+            entry["qc_marker_results"] = [dict(item) for item in marker_results]
+        return cached_fragment.get("value")
 
     fig = go.Figure()
 
@@ -167,13 +332,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     scale_channels = [ch for ch in channels_to_plot if ch not in ("DATA4", "DATA105")]
 
     for ch in channels_to_plot:
-        full_trace = np.asarray(fsa.fsa[ch]).astype(float)
-
-        full_corr = _baseline_correct_trace_for_display(
-            full_trace,
-            channel=ch,
-            assay=assay,
-        )
+        full_corr = _get_qc_display_trace(entry, ch, assay)
 
         y_corr = full_corr[time_all[mask]]
 
@@ -226,35 +385,13 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
     # -----------------------------
     # MARKØRER: forventede sample-peaks + ladder-peaks
     # -----------------------------
-    marker_results = []
-
-    # Bare beregn/legg til markører om vi faktisk har specs (dvs PK)
-    if marker_specs:
-        for m in marker_specs:
-            ch = primary_ch if m["channel"] == "primary" else m["channel"]
-            if m["kind"] == "sample":
-                res = find_peak_near_bp_with_fallback(
-                    fsa=fsa,
-                    channel=ch,
-                    target_bp=float(m["expected_bp"]),
-                    window_bp=float(m["window_bp"]),
-                    fallback_window_bp=float(getattr(rules, "sample_peak_window_bp_fallback", m["window_bp"])),
-                    baseline_correct=True,
-                )
-            else:
-                res = find_peak_near_bp(
-                    fsa=fsa,
-                    channel=ch,
-                    target_bp=float(m["expected_bp"]),
-                    window_bp=float(m["window_bp"]),
-                    baseline_correct=True,
-                )
-            res2 = dict(m)
-            res2.update(res)
-            marker_results.append(res2)
-
-    # Lagre til Excel (tom liste for NK/RK)
-    entry["qc_marker_results"] = marker_results
+    marker_results = _get_cached_marker_results(
+        entry,
+        rules,
+        marker_specs,
+        fsa=fsa,
+        primary_ch=primary_ch,
+    )
 
     # --- Hvis markører finnes: legg inn marker-traces ---
     n_extra_traces = 0
@@ -393,7 +530,7 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
 
     fig.update_xaxes(range=[x_min, x_max], showgrid=False, zeroline=False)
 
-    fig_json = json.dumps(fig.to_plotly_json())
+    fig_json = _qc_json_dumps_compact(fig.to_plotly_json())
     safe_id = (sample_id.replace(" ", "_").replace(".", "_").replace("/", "_").replace("\\", "_").replace(":", "_"))
     div_id = f"qc_peakplot_{safe_id}_{uuid.uuid4().hex}"
 
@@ -406,9 +543,14 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
   if (!gd) return;
 
   var peaksTraceIndex = {peaks_trace_index};
-  var assayName = {json.dumps(assay)};
+  var assayName = {_qc_json_dumps_compact(assay)};
 
-  Plotly.newPlot(gd, fig.data, fig.layout, {{ responsive: true, displaylogo: false }}).then(function(g) {{
+  var plotConfig = {{ responsive: true, displaylogo: false }};
+  var mountPlot = (window.ReportPlotManager && window.ReportPlotManager.mountPlot)
+    ? window.ReportPlotManager.mountPlot(gd, fig.data, fig.layout, plotConfig)
+    : Plotly.newPlot(gd, fig.data, fig.layout, plotConfig);
+
+  mountPlot.then(function(g) {{
     function decodePlotlyArray(val) {{
       if (Array.isArray(val)) return val;
       if (ArrayBuffer.isView(val)) return Array.from(val);
@@ -544,4 +686,9 @@ def build_interactive_peak_plot_for_entry_qc(entry: dict, rules: QCRules) -> str
 }})();
 </script>
 """
+    entry_cache["html_fragment"] = {
+        "key": fragment_cache_key,
+        "value": html_fragment,
+        "marker_results": [dict(item) for item in marker_results],
+    }
     return html_fragment

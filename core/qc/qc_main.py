@@ -1,5 +1,5 @@
 """
-Fraggler QC — CLI entry point.
+HemaFrag QC — CLI entry point.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from datetime import datetime
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Fraggler QC report + marker tracking + Excel trends.")
+    parser = argparse.ArgumentParser(description="HemaFrag QC report + marker tracking + Excel trends.")
     parser.add_argument("--fsa_dir", type=str, default=str(DEFAULT_FSA_DIR),
                         help="Mappe med .fsa-filer")
     parser.add_argument("--outdir", type=str, default="",
